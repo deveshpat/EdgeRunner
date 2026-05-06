@@ -6,7 +6,7 @@ The primary goal is zero cloud inference for core workflows.
 ## What runs locally
 
 1. Gemma text generation in a web worker:
-- Model: onnx-community/gemma-4-E4B-it-ONNX
+- Model: onnx-community/gemma-4-E2B-it-ONNX
 - Runtime: WebGPU with WASM fallback
 
 2. TTS in a web worker:
