@@ -7,7 +7,7 @@ env.useBrowserCache = true;
 // To switch to E2B (~500 MB), change the model ID here only.
 const MODEL_E4B = "onnx-community/gemma-4-E4B-it-ONNX";
 const MODEL_E2B = "onnx-community/gemma-4-E2B-it-ONNX";
-const MODEL_ID = MODEL_E4B;
+const MODEL_ID = MODEL_E2B;
 const DTYPE = "q4f16";
 
 type GeneratorPipeline = Awaited<ReturnType<typeof pipeline>>;
