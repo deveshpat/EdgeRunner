@@ -1,3 +1,4 @@
+import re
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from schemas import ChatRequest, ChatResponse
@@ -13,6 +14,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+def clean_output(text: str) -> str:
+    """Removes <think> tags and cleans up stray prompt leakage from small models."""
+    if not text:
+        return ""
+    # Remove reasoning blocks
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    # Remove prompt leakage if the model hallucinates it
+    text = text.split("If the draft answers")[0]
+    text = text.split("output exactly")[0]
+    return text.strip()
+
+@app.get("/")
+async def root():
+    return {"message": "EdgeRunner Backend is Online."}
 
 @app.get("/health")
 async def health_check():
@@ -31,11 +47,15 @@ async def chat_endpoint(request: ChatRequest):
     result = agent_app.invoke(initial_state)
     
     messages = result['messages']
+    
+    # Store raw thoughts for the UI hacker terminal
     thought_process = [m.content for m in messages if m.content and "PERFECT" not in m.content]
-    final_response = messages[-1].content if "PERFECT" in messages[-1].content else messages[-2].content
-
+    
+    # Get the final draft
+    raw_final = messages[-1].content if "PERFECT" in messages[-1].content else messages[-2].content
+    
     return ChatResponse(
-        response=final_response.replace("PERFECT", "").strip(),
+        response=clean_output(raw_final.replace("PERFECT", "")),
         thought_process=thought_process
     )
 
