@@ -64,7 +64,6 @@ def execute_and_reflect(state: AgentState):
     """Executes any code found, then critiques the draft."""
     draft_message = state['messages'][-1].content
     
-    # 1. Check if the model wrote Python code
     code = extract_python_code(draft_message)
     terminal_output = ""
     
@@ -73,24 +72,11 @@ def execute_and_reflect(state: AgentState):
         terminal_output = execute_code_locally(code)
         print(f"🖥️ [Terminal] {terminal_output[:100]}...\n")
         
-    # 2. Build the Reflection Prompt with the Terminal Logs
-    reflection_content = f"""
-    Review the following draft response. 
-    Identify any logic flaws, missing information, or coding errors.
-    
-    Draft: {draft_message}
-    """
-    
+    # Much simpler prompt for small models
     if terminal_output:
-        reflection_content += f"""
-    You wrote code in the draft. I executed it for you. Here is the terminal output:
-    -----------------------------------
-    {terminal_output}
-    -----------------------------------
-    If the execution failed, you MUST rewrite the code to fix the error.
-    """
-        
-    reflection_content += "\nIf the draft answers the user perfectly and the code (if any) executed successfully with the expected output, output exactly 'PERFECT'."
+        reflection_content = f"You wrote Python code and I ran it. The terminal output was:\n{terminal_output}\nIf it failed, you MUST rewrite the code and fix the bug. Do not apologize, just fix it."
+    else:
+        reflection_content = "Evaluate your last response. If it is accurate and complete, reply with only the word 'PERFECT'."
 
     reflection_prompt = HumanMessage(content=reflection_content)
     critique = local_llm.invoke([reflection_prompt])
