@@ -1,5 +1,5 @@
 /** @type {import('next').NextConfig} */
-const isGithubPages = process.env.GITHUB_ACTIONS === "true";
+const isGithubPages = process.env.NEXT_DEPLOY_TARGET === "github-pages";
 const repoName = "Stuni-web";
 
 const nextConfig = {

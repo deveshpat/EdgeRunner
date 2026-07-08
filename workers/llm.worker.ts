@@ -11,7 +11,7 @@ const MODEL_J3B = "bartowski/ai21labs_AI21-Jamba-Reasoning-3B-GGUF";
 const MODEL_ID = MODEL_J3B;
 const DTYPE = "q4f16";
 
-type GeneratorPipeline = Awaited<ReturnType<typeof pipeline>>;
+type GeneratorPipeline = any;
 
 let generator: GeneratorPipeline | null = null;
 
@@ -81,7 +81,7 @@ self.onmessage = async (e: MessageEvent) => {
       // TextStreamer streams decoded tokens back to the main thread as they
       // are generated. skip_prompt suppresses echoing the input messages.
       const streamer = new TextStreamer(
-        (generator as unknown as { tokenizer: unknown }).tokenizer,
+        (generator as unknown as { tokenizer: any }).tokenizer,
         {
           skip_prompt: true,
           skip_special_tokens: true,

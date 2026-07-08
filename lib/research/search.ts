@@ -11,12 +11,9 @@ export async function searchWeb(query: string): Promise<string> {
 
   lastCall = Date.now();
 
-  const res = await fetch(
-    `/api/proxy?url=${encodeURIComponent(`${JINA_SEARCH}${encodeURIComponent(query)}`)}`,
-    {
-      headers: { Accept: "text/plain" },
-    },
-  );
+  const res = await fetch(`${JINA_SEARCH}${encodeURIComponent(query)}`, {
+    headers: { Accept: "text/plain" },
+  });
 
   if (!res.ok) {
     throw new Error(`Jina search failed: ${res.status}`);

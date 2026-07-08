@@ -103,7 +103,7 @@ self.onmessage = async (e: MessageEvent) => {
           }
         } finally {
           await shelter.purge?.();
-          await shelter.destroy?.();
+          await (shelter as { destroy?: (value?: unknown) => void | Promise<void> }).destroy?.(undefined);
         }
       } else if (runtime.evalRString) {
         stdout = String(await runtime.evalRString(payload.code || ""));

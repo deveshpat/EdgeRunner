@@ -101,7 +101,10 @@ self.onmessage = async (e: MessageEvent) => {
       );
 
       const wav = float32ToWav(output.audio, output.sampling_rate);
-      self.postMessage({ type: "audio", id, wav }, [wav]);
+      (self as unknown as { postMessage: (message: unknown, transfer?: Transferable[]) => void }).postMessage(
+        { type: "audio", id, wav },
+        [wav],
+      );
       return;
     }
   } catch (err) {

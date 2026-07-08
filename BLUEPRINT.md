@@ -189,7 +189,7 @@ Browser Tab
 | OOM: running Gemma + Pyodide + FFmpeg simultaneously | High | Strict lifecycle: terminate Pyodide worker when done. Never run FFmpeg + Gemma at same time. |
 | LaTeX texlyre-busytex 175MB | High | Only load on explicit request. Default to SwiftLaTeX (10MB). |
 | WebR 40MB load time | Medium | Lazy-load only when R code detected. Show progress. |
-| COEP headers blocking Jina fetch | Resolved | `/api/proxy` thin route already in place. Tested working. |
+| COEP headers blocking Jina fetch | Mitigated | Research calls now use direct Jina endpoints client-side. |
 | Jina 20 RPM rate limit | Low | IndexedDB cache. 3s queue delay between requests. |
 | JS sandbox XSS/code injection | Medium | Run all user JS in sandboxed iframe with `sandbox` attribute. No `allow-same-origin`. |
 
@@ -235,7 +235,7 @@ stuni-web/
 ├── public/
 │   └── js-sandbox.html
 │
-├── app/api/proxy/route.ts    ← thin Jina proxy (only remaining server route)
+├── (no app/api routes)       ← static-export compatible for GitHub Pages
 ├── next.config.mjs           ← COOP/COEP headers
 ├── package.json              ← @huggingface/transformers upgraded to v4.x
 └── .env                      ← NEXT_PUBLIC_LOCAL_TTS_MODEL only
@@ -283,7 +283,7 @@ export const TOOL_REGISTRY = [
 ---
 
 ### Phase 3 — Research Tools (Agent-Reach lite)
-**Status:** ✅ Complete (lib/research/ + /api/proxy)
+**Status:** ✅ Complete (lib/research direct Jina integration)
 
 ---
 

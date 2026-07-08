@@ -165,8 +165,9 @@ export default function Home() {
           requestAdapter: () => Promise<unknown>;
         };
       };
+      const gpu = nav.gpu;
 
-      const hasNavigatorGpu = typeof nav.gpu !== "undefined";
+      const hasNavigatorGpu = typeof gpu !== "undefined";
 
       if (!secureContext || !hasNavigatorGpu) {
         if (!cancelled) {
@@ -184,7 +185,10 @@ export default function Home() {
       }
 
       try {
-        const adapter = await nav.gpu.requestAdapter();
+        if (!gpu) {
+          return;
+        }
+        const adapter = await gpu.requestAdapter();
         if (!cancelled) {
           setGpuPreflight({
             checked: true,
@@ -457,9 +461,10 @@ Topic: ${prompt}`;
       await ffmpeg.deleteFile("segments.txt").catch(() => undefined);
 
       const output = await ffmpeg.readFile("stuni_explainer.mp4");
+      const outputBytes = output instanceof Uint8Array ? new Uint8Array(output) : output;
       // Avoid allocating a second full-size copy of the rendered video in memory.
       const outputUrl = URL.createObjectURL(
-        new Blob([output], { type: "video/mp4" }),
+        new Blob([outputBytes], { type: "video/mp4" }),
       );
       setVideoUrl(outputUrl);
       setStatus("Done");

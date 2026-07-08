@@ -1,3 +1,5 @@
+declare function importScripts(...urls: string[]): void;
+
 declare let PdfTeXEngine: {
   new (): {
     loadEngine: () => Promise<void>;
@@ -16,6 +18,10 @@ let engine:
     }
   | null = null;
 
+const workerScope = self as unknown as {
+  postMessage: (message: unknown, transfer?: Transferable[]) => void;
+};
+
 self.onmessage = async (e: MessageEvent) => {
   const { type, id, payload } = e.data as {
     type: string;
@@ -28,13 +34,13 @@ self.onmessage = async (e: MessageEvent) => {
       importScripts("/swiftlatex/PdfTeXEngine.js");
       engine = new PdfTeXEngine();
       await engine.loadEngine();
-      self.postMessage({ type: "ready", id });
+      workerScope.postMessage({ type: "ready", id });
       return;
     }
 
     if (type === "compile") {
       if (!engine) {
-        self.postMessage({ type: "error", id, payload: "Latex engine not initialized" });
+        workerScope.postMessage({ type: "error", id, payload: "Latex engine not initialized" });
         return;
       }
 
@@ -44,7 +50,7 @@ self.onmessage = async (e: MessageEvent) => {
       const result = await engine.compileLaTeX();
 
       if (!result.pdf) {
-        self.postMessage({ type: "error", id, payload: result.log || "LaTeX compile failed" });
+        workerScope.postMessage({ type: "error", id, payload: result.log || "LaTeX compile failed" });
         return;
       }
 
@@ -52,9 +58,9 @@ self.onmessage = async (e: MessageEvent) => {
         result.pdf.byteOffset,
         result.pdf.byteOffset + result.pdf.byteLength,
       );
-      self.postMessage({ type: "pdf", id, payload: pdfBuffer }, [pdfBuffer]);
+      workerScope.postMessage({ type: "pdf", id, payload: pdfBuffer }, [pdfBuffer]);
     }
   } catch (err) {
-    self.postMessage({ type: "error", id, payload: String(err) });
+    workerScope.postMessage({ type: "error", id, payload: String(err) });
   }
 };
