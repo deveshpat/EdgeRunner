@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+pydantic
+langchain
+langchain-community
+langgraph
+llama-cpp-python
+huggingface-hub
+psutil
