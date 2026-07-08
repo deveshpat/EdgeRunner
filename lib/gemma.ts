@@ -28,7 +28,7 @@ class GemmaManager {
 
   private getWorker(): Worker {
     if (!this.worker) {
-      this.worker = new Worker(new URL("../workers/gemma.worker.ts", import.meta.url), {
+      this.worker = new Worker(new URL("../workers/llm.worker.ts", import.meta.url), {
         type: "module",
       });
 

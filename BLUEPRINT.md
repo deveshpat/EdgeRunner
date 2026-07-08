@@ -141,7 +141,7 @@ const result = await engine.compileLaTeX();
 ```
 Browser Tab
 │
-├── [Web Worker: gemma.worker.ts]
+├── [Web Worker: llm.worker.ts]
 │   └── Gemma 4 E4B ONNX q4f16 — WebGPU / WASM fallback
 │       ├── @huggingface/transformers v4.x
 │       ├── Text generation + streaming (TextStreamer)
@@ -225,7 +225,7 @@ stuni-web/
 │       └── registry.ts
 │
 ├── workers/
-│   ├── gemma.worker.ts       ← REWRITTEN in Session 4 (v4 API, clean, no hacks)
+│   ├── llm.worker.ts         ← REWRITTEN in Session 4 (v4 API, clean, no hacks)
 │   ├── pyodide.worker.ts
 │   ├── webr.worker.ts
 │   ├── duckdb.worker.ts
@@ -271,7 +271,7 @@ export const TOOL_REGISTRY = [
 
 **Changes scoped to:**
 - `package.json` / `package-lock.json` — `@huggingface/transformers@latest` (v4.x)
-- `workers/gemma.worker.ts` — full rewrite: clean single-attempt load, `TextStreamer` for token streaming, WebGPU + WASM fallback, no config patching
+- `workers/llm.worker.ts` — full rewrite: clean single-attempt load, `TextStreamer` for token streaming, WebGPU + WASM fallback, no config patching
 
 **Expected outcome:** Video page generates script via local Gemma 4 E4B (WebGPU) or E2B fallback (WASM).
 

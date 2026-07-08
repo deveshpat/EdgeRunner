@@ -41,6 +41,12 @@ npm run dev
 
 Open http://localhost:3000
 
+## Deploy to GitHub Pages
+
+- A workflow is available at `.github/workflows/deploy-pages.yml`.
+- Push to `main` (or run the workflow manually) to publish.
+- The app will be available at `https://deveshpat.github.io/Stuni-web/`.
+
 ## Environment
 
 Only local model env is required for TTS override.
