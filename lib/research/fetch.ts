@@ -59,12 +59,9 @@ export async function fetchUrl(url: string): Promise<string> {
   const cached = await getCached(normalized);
   if (cached) return cached;
 
-  const res = await fetch(
-    `/api/proxy?url=${encodeURIComponent(`${JINA_READ}${normalized}`)}`,
-    {
-      headers: { Accept: "text/plain", "X-Return-Format": "markdown" },
-    },
-  );
+  const res = await fetch(`${JINA_READ}${normalized}`, {
+    headers: { Accept: "text/plain", "X-Return-Format": "markdown" },
+  });
 
   if (!res.ok) {
     throw new Error(`Jina fetch failed: ${res.status}`);

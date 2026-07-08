@@ -10,7 +10,7 @@ The primary goal is zero cloud inference for core workflows.
 - Runtime: WebGPU with WASM fallback
 
 2. TTS in a web worker:
-- Model: Xenova/mms-tts-eng (default)
+- Model: cstr/qwen3-tts-1.7b-customvoice-GGUF (default)
 
 3. Video rendering in browser:
 - Canvas slide rendering
@@ -41,12 +41,18 @@ npm run dev
 
 Open http://localhost:3000
 
+## Deploy to GitHub Pages
+
+- A workflow is available at `.github/workflows/deploy-pages.yml`.
+- Push to `main` (or run the workflow manually) to publish.
+- The app will be available at `https://deveshpat.github.io/Stuni-web/`.
+
 ## Environment
 
 Only local model env is required for TTS override.
 
 ```bash
-NEXT_PUBLIC_LOCAL_TTS_MODEL=Xenova/mms-tts-eng
+NEXT_PUBLIC_LOCAL_TTS_MODEL=cstr/qwen3-tts-1.7b-customvoice-GGUF
 ```
 
 No OpenRouter or API key env vars are required for the local-first flow.

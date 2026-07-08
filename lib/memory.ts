@@ -18,16 +18,26 @@ export interface MemoryEntry {
 
 type EntryInput = Omit<MemoryEntry, "id" | "wing"> & { wing?: Wing };
 
-const dbPromise = openDB(DB_NAME, 1, {
-  upgrade(db) {
-    if (!db.objectStoreNames.contains("entries")) {
-      db.createObjectStore("entries", { keyPath: "id" });
-    }
-    if (!db.objectStoreNames.contains("embeddings")) {
-      db.createObjectStore("embeddings", { keyPath: "id" });
-    }
-  },
-});
+let dbPromise: ReturnType<typeof openDB> | null = null;
+
+function getDbPromise(): ReturnType<typeof openDB> | null {
+  if (typeof window === "undefined" || typeof indexedDB === "undefined") {
+    return null;
+  }
+  if (!dbPromise) {
+    dbPromise = openDB(DB_NAME, 1, {
+      upgrade(db) {
+        if (!db.objectStoreNames.contains("entries")) {
+          db.createObjectStore("entries", { keyPath: "id" });
+        }
+        if (!db.objectStoreNames.contains("embeddings")) {
+          db.createObjectStore("embeddings", { keyPath: "id" });
+        }
+      },
+    });
+  }
+  return dbPromise;
+}
 
 let embedder:
   | ((text: string, options?: Record<string, unknown>) => Promise<{ data: Float32Array }>)
@@ -74,7 +84,9 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
 
 export const memory = {
   async store(entry: EntryInput): Promise<void> {
-    const db = await dbPromise;
+    const promise = getDbPromise();
+    if (!promise) return;
+    const db = await promise;
     const id = crypto.randomUUID();
     const wing = entry.wing || detectWing(entry.content);
     const payload: MemoryEntry = {
@@ -92,7 +104,9 @@ export const memory = {
   },
 
   async search(query: string, topK: number = 5): Promise<MemoryEntry[]> {
-    const db = await dbPromise;
+    const promise = getDbPromise();
+    if (!promise) return [];
+    const db = await promise;
     const entries = (await db.getAll("entries")) as MemoryEntry[];
     if (!entries.length) return [];
 
@@ -113,7 +127,11 @@ export const memory = {
   },
 
   async getStartupContext(): Promise<string> {
-    const db = await dbPromise;
+    const promise = getDbPromise();
+    if (!promise) {
+      return "L0:\nNo personal context yet.\n\nL1:\nNo recent facts yet.";
+    }
+    const db = await promise;
     const entries = ((await db.getAll("entries")) as MemoryEntry[]).sort(
       (a, b) => b.timestamp - a.timestamp,
     );
