@@ -1,4 +1,5 @@
-const DEFAULT_MODEL = process.env.NEXT_PUBLIC_LOCAL_TTS_MODEL || "Xenova/mms-tts-eng";
+const DEFAULT_MODEL =
+  process.env.NEXT_PUBLIC_LOCAL_TTS_MODEL || "cstr/qwen3-tts-1.7b-customvoice-GGUF";
 const CALL_TIMEOUT_MS = 120_000;
 
 class TTSManager {

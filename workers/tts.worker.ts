@@ -4,7 +4,7 @@ let ttsPipeline: unknown = null;
 let loadedModel = "";
 let speakerEmbeddings: Float32Array | null = null;
 
-const DEFAULT_MODEL = "Xenova/mms-tts-eng";
+const DEFAULT_MODEL = "cstr/qwen3-tts-1.7b-customvoice-GGUF";
 const SPEAKER_EMBEDDINGS_URL =
   "https://huggingface.co/datasets/Xenova/transformers.js-docs/resolve/main/speaker_embeddings.bin";
 

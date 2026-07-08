@@ -29,7 +29,7 @@ Released April 2025. The E4B (4B effective params) runs in-browser via Transform
 - Transformers.js v4 ships a completely rewritten C++ WebGPU runtime with full Gemma4 support.
 - Reference browser agent using it: github.com/kessler/gemma-gem (Chrome extension, confirmed working)
 
-**⚠️ Audio = INPUT only.** Gemma 4 understands speech but cannot generate it. `@xenova/mms-tts-eng` stays.
+**⚠️ Audio = INPUT only.** Gemma 4 understands speech but cannot generate it. TTS remains separate.
 
 **⚠️ WebLLM does NOT support Gemma 4** as of April 2026 — open feature request only.
 
@@ -161,7 +161,7 @@ Browser Tab
 │   └── SwiftLaTeX (PdfTeX/XeTeX WASM)
 │
 ├── [Web Worker: tts.worker.ts]
-│   └── @xenova/mms-tts-eng
+│   └── cstr/qwen3-tts-1.7b-customvoice-GGUF
 │
 ├── [Sandboxed iframe: js-sandbox.html] — lazy loaded
 │   └── Three.js / p5.js / D3.js / Matter.js / Plotly
@@ -345,7 +345,7 @@ export const TOOL_REGISTRY = [
 
 `.env` contains only:
 ```
-NEXT_PUBLIC_LOCAL_TTS_MODEL=Xenova/mms-tts-eng
+NEXT_PUBLIC_LOCAL_TTS_MODEL=cstr/qwen3-tts-1.7b-customvoice-GGUF
 ```
 
 ---
