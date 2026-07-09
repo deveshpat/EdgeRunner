@@ -37,25 +37,34 @@ async def health_check():
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     lc_messages = []
-    for msg in request.messages:
-        if msg.role == 'user':
-            lc_messages.append(HumanMessage(content=msg.content))
-        elif msg.role == 'assistant':
-            lc_messages.append(AIMessage(content=msg.content))
+    # Only send the latest user prompt to start the graph cleanly
+    last_user_msg = [m for m in request.messages if m.role == 'user'][-1]
+    lc_messages.append(HumanMessage(content=last_user_msg.content))
             
-    initial_state = {"messages": lc_messages, "iterations": 0}
+    initial_state = {
+        "messages": lc_messages, 
+        "iterations": 0, 
+        "plan": "", 
+        "tests": "", 
+        "code": "", 
+        "terminal_output": ""
+    }
+    
+    # Execute SOTA Graph
     result = agent_app.invoke(initial_state)
     
-    messages = result['messages']
+    # Extract all the AI's internal dialogue for the UI's Hacker Terminal
+    # Skip the first message (which is the user's prompt)
+    thought_process = [m.content for m in result['messages'][1:]]
     
-    # Store raw thoughts for the UI hacker terminal
-    thought_process = [m.content for m in messages if m.content and "PERFECT" not in m.content]
+    # The final answer is the combination of the working code and the execution result
+    final_code = result.get('code', 'No code generated.')
+    final_terminal = result.get('terminal_output', '')
     
-    # Get the final draft
-    raw_final = messages[-1].content if "PERFECT" in messages[-1].content else messages[-2].content
-    
+    final_response = f"### Final SOTA Solution:\n\n```python\n{final_code}\n```\n\n### Execution Results:\n```text\n{final_terminal}\n```"
+
     return ChatResponse(
-        response=clean_output(raw_final.replace("PERFECT", "")),
+        response=final_response,
         thought_process=thought_process
     )
 
