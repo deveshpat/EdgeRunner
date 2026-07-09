@@ -14,7 +14,7 @@ export default function EdgeRunnerUI() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [backendUrl, setBackendUrl] = useState("https://effective-carnival-95p5jr745592xpxr-8000.app.github.dev/");
+  const [backendUrl, setBackendUrl] = useState("https://effective-carnival-95p5jr745592xpxr-8000.app.github.dev");
   const [isOnline, setIsOnline] = useState<boolean | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
