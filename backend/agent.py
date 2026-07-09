@@ -9,108 +9,144 @@ from model_manager import get_or_download_model
 
 # 1. Initialize Dynamic Model
 model_config = get_or_download_model()
-
-print("\nLoading model into memory... (This may take a few seconds)")
+print("\nLoading model into memory...")
 local_llm = ChatLlamaCpp(
     model_path=model_config["path"],
-    temperature=0.3,
+    temperature=0.2, # Lower temperature for better coding logic
     n_ctx=model_config["n_ctx"],
-    max_tokens=1024,      
+    max_tokens=1500,      
     n_gpu_layers=-1,      
     verbose=False
 )
-print("✅ Model loaded successfully! Fasten your seatbelt.")
+print("✅ SOTA Engine Loaded!")
 
-# 2. Define the State
+# 2. Advanced State (Memory)
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], operator.add]
+    plan: str
+    tests: str
+    code: str
+    terminal_output: str
     iterations: int
 
-# ─── TOOL: Code Execution ────────────────────────────────────────────
+# ─── UTILS ───────────────────────────────────────────────────────────
 
-def extract_python_code(text: str) -> str:
-    """Extracts python code from markdown blocks."""
+def extract_code(text: str) -> str:
     match = re.search(r"```python\n(.*?)\n```", text, re.DOTALL)
-    return match.group(1) if match else None
+    return match.group(1) if match else ""
 
-def execute_code_locally(code: str) -> str:
-    """Runs the code in a subprocess and captures terminal output."""
+def execute_code_locally(code: str, tests: str) -> str:
+    """Runs the generated code and the tests together."""
+    full_script = f"{code}\n\n# --- TESTS ---\n{tests}"
     try:
-        # Run code safely with a 10-second timeout to prevent infinite loops
         result = subprocess.run(
-            ["python", "-c", code],
-            capture_output=True,
-            text=True,
-            timeout=10
+            ["python", "-c", full_script],
+            capture_output=True, text=True, timeout=15
         )
         if result.returncode == 0:
-            return f"✅ EXECUTION SUCCESS:\n{result.stdout.strip()}"
+            return f"✅ SUCCESS. Output:\n{result.stdout.strip()}"
         else:
-            return f"❌ EXECUTION FAILED:\n{result.stderr.strip()}"
+            return f"❌ FAILED. Error Traceback:\n{result.stderr.strip()}"
     except subprocess.TimeoutExpired:
-        return "⏳ EXECUTION TIMED OUT (Exceeded 10 seconds. Check for infinite loops)."
+        return "⏳ TIMEOUT. Infinite loop detected."
     except Exception as e:
-        return f"⚠️ SYSTEM ERROR:\n{str(e)}"
+        return f"⚠️ SYSTEM ERROR: {str(e)}"
 
-# ─── NODES ───────────────────────────────────────────────────────────
+# ─── NODES (The SOTA Flow) ──────────────────────────────────────────
 
-def generate_draft(state: AgentState):
-    """Generates the initial code or the revised response."""
-    messages = state['messages']
-    response = local_llm.invoke(messages)
-    return {"messages": [response], "iterations": state.get("iterations", 0) + 1}
-
-def execute_and_reflect(state: AgentState):
-    """Executes any code found, then critiques the draft."""
-    draft_message = state['messages'][-1].content
+def planner_and_tester(state: AgentState):
+    """Generates a plan and writes unit tests before touching the main code."""
+    print("🧠 [Harness] Analyzing problem & writing tests...")
+    task = state['messages'][0].content
     
-    code = extract_python_code(draft_message)
-    terminal_output = ""
+    prompt = f"""You are a SOTA software architect. 
+    Task: {task}
     
-    if code:
-        print("\n⚙️ [Harness] Code detected! Executing in local sandbox...")
-        terminal_output = execute_code_locally(code)
-        print(f"🖥️ [Terminal] {terminal_output[:100]}...\n")
+    1. Write a brief, step-by-step plan to solve this.
+    2. Write a Python script containing `assert` statements to thoroughly test the solution. 
+    Ensure the tests call the functions you plan to write.
+    
+    Output the tests inside a ```python block.
+    """
+    response = local_llm.invoke([HumanMessage(content=prompt)])
+    
+    tests = extract_code(response.content)
+    # We store the plan/tests in state and add the thought process to the UI
+    return {
+        "plan": response.content, 
+        "tests": tests, 
+        "messages": [AIMessage(content=f"**1. Planning & Testing Phase:**\n{response.content}")]
+    }
+
+def code_generator(state: AgentState):
+    """Writes the actual code to pass the tests."""
+    print("💻 [Harness] Writing implementation code...")
+    task = state['messages'][0].content
+    plan = state.get('plan', '')
+    tests = state.get('tests', '')
+    error = state.get('terminal_output', '')
+    
+    prompt = f"Task: {task}\n\nPlan:\n{plan}\n\nTests you must pass:\n{tests}\n"
+    
+    if error:
+        prompt += f"\n⚠️ PREVIOUS ATTEMPT FAILED! Terminal Output:\n{error}\nFix the bug!\n"
         
-    # Much simpler prompt for small models
-    if terminal_output:
-        reflection_content = f"You wrote Python code and I ran it. The terminal output was:\n{terminal_output}\nIf it failed, you MUST rewrite the code and fix the bug. Do not apologize, just fix it."
-    else:
-        reflection_content = "Evaluate your last response. If it is accurate and complete, reply with only the word 'PERFECT'."
-
-    reflection_prompt = HumanMessage(content=reflection_content)
-    critique = local_llm.invoke([reflection_prompt])
+    prompt += "\nWrite the final complete Python code to solve the task and pass the tests. Output ONLY the code inside a ```python block."
     
-    return {"messages": [critique]}
+    response = local_llm.invoke([HumanMessage(content=prompt)])
+    code = extract_code(response.content)
+    
+    return {
+        "code": code,
+        "iterations": state.get("iterations", 0) + 1,
+        "messages": [AIMessage(content=f"**2. Implementation Phase:**\nI have written the code. Running tests...")]
+    }
 
-def should_continue(state: AgentState):
-    """Decides to loop back and fix code, or end the process."""
-    last_message = state['messages'][-1].content
+def executor_and_critic(state: AgentState):
+    """Runs the code against the tests."""
+    print("⚙️ [Harness] Running Sandboxed Tests...")
+    code = state.get('code', '')
+    tests = state.get('tests', '')
+    
+    if not code:
+        terminal_output = "❌ FAILED: No Python code was generated."
+    else:
+        terminal_output = execute_code_locally(code, tests)
+        
+    print(f"🖥️ [Terminal] {terminal_output[:100]}...\n")
+    
+    return {
+        "terminal_output": terminal_output,
+        "messages": [AIMessage(content=f"**3. Sandbox Execution:**\n```text\n{terminal_output}\n```")]
+    }
+
+# ─── ROUTING LOGIC ──────────────────────────────────────────────────
+
+def should_loop(state: AgentState):
+    """If tests fail, loop back to code generator. If pass, finish."""
+    output = state.get("terminal_output", "")
     iterations = state.get("iterations", 0)
     
-    # Cap iterations to save compute
     if iterations >= 3:
-        return "end"
+        return "end" # Cap loops to save compute
         
-    if "PERFECT" in last_message.upper():
+    if "✅ SUCCESS" in output:
         return "end"
         
     return "rewrite"
 
-# ─── GRAPH CONSTRUCTION ──────────────────────────────────────────────
+# ─── BUILD THE GRAPH ────────────────────────────────────────────────
 
 workflow = StateGraph(AgentState)
 
-workflow.add_node("generate", generate_draft)
-workflow.add_node("reflect", execute_and_reflect)
+workflow.add_node("plan", planner_and_tester)
+workflow.add_node("code", code_generator)
+workflow.add_node("execute", executor_and_critic)
 
-workflow.set_entry_point("generate")
+workflow.set_entry_point("plan")
 
-workflow.add_edge("generate", "reflect")
-workflow.add_conditional_edges(
-    "reflect",
-    should_continue,
-    {"rewrite": "generate", "end": END}
-)
+workflow.add_edge("plan", "code")
+workflow.add_edge("code", "execute")
+workflow.add_conditional_edges("execute", should_loop, {"rewrite": "code", "end": END})
 
 agent_app = workflow.compile()
