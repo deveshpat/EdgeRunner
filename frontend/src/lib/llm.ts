@@ -2,7 +2,7 @@ import { pipeline, env } from "@huggingface/transformers";
 
 // Configure Transformers.js for Web
 env.allowLocalModels = false;
-env.backends.onnx.wasm.numThreads = 1;
+// env.backends.onnx.wasm.numThreads = 1;
 
 let generatorInstance: any = null;
 let currentModelId: string | null = null;
