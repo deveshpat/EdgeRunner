@@ -14,7 +14,7 @@ export default function EdgeRunnerUI() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [backendUrl, setBackendUrl] = useState("https://afraid-cobras-travel.loca.lt");
+  const [backendUrl, setBackendUrl] = useState("https://tender-badgers-refuse.loca.lt");
   const [isOnline, setIsOnline] = useState<boolean | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
