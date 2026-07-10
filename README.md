@@ -23,6 +23,25 @@ Live UI: [https://deveshpat.github.io/EdgeRunner/](https://deveshpat.github.io/E
 - Tokens are **never** stored in plaintext `localStorage` / `sessionStorage`  
 - See [SECURITY.md](SECURITY.md)
 
+### Google login (multi-device Kaggle token)
+
+Sign in with **Google** so the same encrypted vault (Kaggle username + API token + prefs) follows you across browsers/devices.
+
+1. Create a **Google Cloud OAuth 2.0 Web Client ID**  
+   - [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials)  
+   - Application type: **Web application**  
+   - **Authorized JavaScript origins:**  
+     - `https://deveshpat.github.io`  
+     - `http://localhost:3000` (local dev)  
+   - Enable the **Google Drive API** on the project (App Data scope only)
+2. Put the client ID in one of:  
+   - `frontend/public/config.json` → `"googleClientId": "….apps.googleusercontent.com"`  
+   - or paste it once in the UI (stored in `localStorage` on that browser)  
+   - or build with `NEXT_PUBLIC_GOOGLE_CLIENT_ID=...`
+3. On the site: **Continue with Google** → save Kaggle token once → **Sync now** on other devices after Google sign-in  
+
+Sync uses the private **Drive App Data** folder (only this app + your Google account can read it). Payload is AES-256-GCM encrypted client-side before upload. There is still **no EdgeRunner server** holding your keys.
+
 ### Fast Kaggle install (prebuilt wheels)
 
 Compiling `llama-cpp-python` every launch is the main delay. The worker installs

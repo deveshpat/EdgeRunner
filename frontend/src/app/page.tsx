@@ -13,6 +13,18 @@ import {
   ChevronRight,
   X,
 } from "lucide-react";
+import {
+  getGoogleUser,
+  initGoogleAuth,
+  isGoogleConfigured,
+  isGoogleSignedIn,
+  onGoogleAuthChange,
+  signInWithGoogle,
+  signOutGoogle,
+  type GoogleUser,
+} from "@/lib/google-auth";
+import { syncAfterGoogleLogin } from "@/lib/cloud-sync";
+import { setGoogleClientIdOverride, loadConfig } from "@/lib/config";
 import ReactMarkdown from "react-markdown";
 import {
   launchKaggleSession,
@@ -22,6 +34,7 @@ import {
 import {
   clearSecret,
   createVault,
+  getLocalSyncUpdatedAt,
   isUnlocked,
   loadChat,
   loadPrefs,
@@ -65,6 +78,11 @@ export default function EdgeRunnerUI() {
   );
   const [vaultError, setVaultError] = useState<string | null>(null);
   const [showPass, setShowPass] = useState(false);
+  const [googleUser, setGoogleUser] = useState<GoogleUser | null>(null);
+  const [googleConfigured, setGoogleConfigured] = useState(false);
+  const [googleBusy, setGoogleBusy] = useState(false);
+  const [googleMsg, setGoogleMsg] = useState<string | null>(null);
+  const [clientIdDraft, setClientIdDraft] = useState("");
 
   const [phase, setPhase] = useState<ConnectionMode>("setup");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -150,6 +168,104 @@ export default function EdgeRunnerUI() {
       cancelled = true;
     };
   }, []);
+
+  // Google auth bootstrap
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const cfg = await loadConfig();
+        if (!cancelled) setClientIdDraft(cfg.googleClientId || "");
+        const { configured } = await initGoogleAuth();
+        if (!cancelled) {
+          setGoogleConfigured(configured);
+          setGoogleUser(getGoogleUser());
+        }
+      } catch {
+        if (!cancelled) setGoogleConfigured(false);
+      }
+    })();
+    return onGoogleAuthChange(() => {
+      setGoogleUser(getGoogleUser());
+    });
+  }, []);
+
+  const runGoogleSync = async () => {
+    if (!isUnlocked()) {
+      // ensure device vault for local encrypt
+      const exists = await vaultExists();
+      if (!exists) await createVault({ mode: "device" });
+      else await tryAutoUnlock();
+      if (!isUnlocked()) await unlockDeviceVault().catch(() => createVault({ mode: "device" }));
+    }
+    const secret = await loadSecret();
+    const prefs = loadPrefs();
+    const result = await syncAfterGoogleLogin({
+      secret,
+      prefs,
+      applySecret: async (s) => {
+        await saveSecret(s);
+        setUsername(s.username || "");
+        if (s.apiToken) setApiToken(s.apiToken);
+        if (s.apiKey) setApiKey(s.apiKey);
+        setHasStoredCreds(!!(s.apiToken || s.apiKey));
+      },
+      applyPrefs: (pr) => {
+        savePrefs(pr);
+        if (pr.username) setUsername(pr.username);
+        if (pr.localBackendUrl) setLocalUrl(pr.localBackendUrl);
+        if (pr.accelerator) setAccelerator(pr.accelerator);
+        if (pr.idleTimeout) setIdleTimeout(pr.idleTimeout);
+        if (pr.maxLifetime) setMaxLifetime(pr.maxLifetime);
+        if (pr.mode === "local") setSetupTab("local");
+      },
+      getLocalUpdatedAt: () => getLocalSyncUpdatedAt(),
+    });
+    setGoogleMsg(result.detail);
+    setMessages((m) => {
+      const line = {
+        role: "system" as const,
+        content: `google sync · ${result.detail}`,
+        ts: Date.now(),
+      };
+      return m.length ? [...m, line] : [line];
+    });
+    return result;
+  };
+
+  const handleGoogleSignIn = async () => {
+    setGoogleBusy(true);
+    setVaultError(null);
+    setGoogleMsg(null);
+    try {
+      if (clientIdDraft.trim() && !(await isGoogleConfigured())) {
+        setGoogleClientIdOverride(clientIdDraft.trim());
+      }
+      const { user } = await signInWithGoogle();
+      setGoogleUser(user);
+      setGoogleConfigured(true);
+      // Always land in ready vault after Google
+      const exists = await vaultExists();
+      if (!exists) await createVault({ mode: "device" });
+      else {
+        await tryAutoUnlock();
+        if (!isUnlocked()) {
+          try {
+            await unlockDeviceVault();
+          } catch {
+            await createVault({ mode: "device" });
+          }
+        }
+      }
+      await migrateLegacyIfNeeded();
+      setVaultGate("ready");
+      await runGoogleSync();
+    } catch (e) {
+      setVaultError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGoogleBusy(false);
+    }
+  };
 
   // After vault ready: restore prefs + try silent reconnect (no setup nag)
   useEffect(() => {
@@ -948,13 +1064,49 @@ export default function EdgeRunnerUI() {
         </header>
         <main className="flex-1 flex items-start justify-center p-6">
           <div className="w-full max-w-md space-y-4 er-panel er-panel-hot er-clip p-5">
+            <div className="space-y-2 border-b border-[var(--border)] pb-4">
+              <p className="text-[var(--cyan)] text-xs tracking-wider uppercase">
+                multi-device netlink
+              </p>
+              <p className="text-xs text-[var(--muted)]">
+                Sign in with Google to sync Kaggle API chrome across devices
+                (private Drive App Data · AES-GCM).
+              </p>
+              {!googleConfigured && (
+                <label className="block text-[10px] text-[var(--muted)]">
+                  Google OAuth Client ID
+                  <input
+                    value={clientIdDraft}
+                    onChange={(e) => setClientIdDraft(e.target.value)}
+                    placeholder="….apps.googleusercontent.com"
+                    className="er-input mt-1 w-full px-2 py-1.5 text-xs"
+                  />
+                </label>
+              )}
+              <button
+                type="button"
+                disabled={googleBusy}
+                onClick={() => void handleGoogleSignIn()}
+                className="er-btn-cyan w-full py-2.5 flex items-center justify-center gap-2"
+              >
+                {googleBusy ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <span className="text-base">G</span>
+                )}
+                {googleBusy ? "linking…" : "continue with google"}
+              </button>
+              {googleMsg && (
+                <p className="text-[10px] text-[var(--accent)]">{googleMsg}</p>
+              )}
+            </div>
             {vaultGate === "create" ? (
               <>
                 <p className="text-[var(--fg)]">
-                  <span className="er-prompt-char">›</span> initialize encrypted vault
+                  <span className="er-prompt-char">›</span> or local-only vault
                 </p>
                 <p className="text-xs text-[var(--muted)]">
-                  AES-256-GCM chrome on-device. Keys never leave Night City (this browser).
+                  Device-only AES-256-GCM (no sync). Use Google above for multi-device.
                 </p>
                 <div className="space-y-2">
                   {(
@@ -1038,6 +1190,14 @@ export default function EdgeRunnerUI() {
                 </button>
                 <button
                   type="button"
+                  disabled={googleBusy}
+                  onClick={() => void handleGoogleSignIn()}
+                  className="er-btn-cyan w-full py-2"
+                >
+                  {googleBusy ? "linking…" : "unlock via google sync"}
+                </button>
+                <button
+                  type="button"
                   onClick={async () => {
                     if (confirm("Wipe local vault?")) {
                       await wipeVault();
@@ -1115,6 +1275,14 @@ export default function EdgeRunnerUI() {
             >
               <Square size={12} className="inline" /> stop
             </button>
+          )}
+          {googleUser && (
+            <span
+              className="hidden md:inline text-[10px] text-[var(--cyan)] truncate max-w-[8rem]"
+              title={googleUser.email}
+            >
+              {googleUser.email}
+            </span>
           )}
           <button
             type="button"
@@ -1310,6 +1478,80 @@ export default function EdgeRunnerUI() {
               >
                 <X size={16} />
               </button>
+            </div>
+
+            {/* Google account / multi-device */}
+            <div className="space-y-2 border border-[var(--border)] p-3">
+              <div className="text-[var(--warn)] tracking-wider text-[10px]">
+                GOOGLE · MULTI-DEVICE
+              </div>
+              {googleUser ? (
+                <div className="space-y-2">
+                  <p className="text-[var(--cyan)] truncate">{googleUser.email}</p>
+                  <p className="text-[10px] text-[var(--muted)]">
+                    Kaggle API syncs via private Drive App Data when you save credentials.
+                  </p>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      disabled={googleBusy}
+                      onClick={() => void (async () => {
+                        setGoogleBusy(true);
+                        try {
+                          await runGoogleSync();
+                        } catch (e) {
+                          setSessionError(e instanceof Error ? e.message : String(e));
+                        } finally {
+                          setGoogleBusy(false);
+                        }
+                      })()}
+                      className="er-btn-cyan flex-1 py-1.5"
+                    >
+                      {googleBusy ? "syncing…" : "sync now"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        signOutGoogle();
+                        setGoogleUser(null);
+                        setGoogleMsg(null);
+                      }}
+                      className="er-btn flex-1 py-1.5"
+                    >
+                      sign out
+                    </button>
+                  </div>
+                  {googleMsg && (
+                    <p className="text-[10px] text-[var(--accent)]">{googleMsg}</p>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-[10px] text-[var(--muted)]">
+                    Sign in once — paste Kaggle token once — every device with this Google
+                    account gets the same chrome.
+                  </p>
+                  {!googleConfigured && (
+                    <label className="block text-[10px] text-[var(--muted)]">
+                      OAuth Client ID
+                      <input
+                        value={clientIdDraft}
+                        onChange={(e) => setClientIdDraft(e.target.value)}
+                        placeholder="….apps.googleusercontent.com"
+                        className="er-input mt-1 w-full px-2 py-1.5"
+                      />
+                    </label>
+                  )}
+                  <button
+                    type="button"
+                    disabled={googleBusy}
+                    onClick={() => void handleGoogleSignIn()}
+                    className="er-btn-cyan w-full py-2"
+                  >
+                    {googleBusy ? "linking…" : "continue with google"}
+                  </button>
+                </div>
+              )}
             </div>
 
             <div className="er-tabs">

@@ -8,17 +8,28 @@ backends. There is **no EdgeRunner cloud** holding your keys or chats.
 | Threat | Mitigation |
 |--------|------------|
 | Token re-entry every visit | Encrypted device vault (IndexedDB) |
+| Token re-entry on every device | Optional Google login → Drive App Data sync (AES-GCM payload) |
 | Disk / backup scrape of browser profile | AES-256-GCM ciphertext at rest; optional passphrase (PBKDF2 600k) |
 | Other websites reading data | Same-origin policy + non-extractable CryptoKeys |
 | XSS → token theft | CSP, no `rehype-raw`, URL allowlist in markdown, minimal deps |
-| Tab close leaving GPU on | `sendBeacon` shutdown + idle heartbeat watchdog on worker |
+| Tab close leaving GPU on | Soft detach + idle heartbeat watchdog; explicit Stop hard-kills |
 | Supply-chain install lag / build on Kaggle | Prebuilt wheels from our GitHub release (verify release assets) |
+
+## Google multi-device sync
+
+- **Auth:** Google Identity Services (OAuth token client)
+- **Storage:** Google Drive **App Data** folder only (`drive.appdata` scope) — not your visible Drive
+- **Crypto:** AES-256-GCM envelope built in the browser before upload
+- **No EdgeRunner server** stores tokens; confidentiality is Google-account + client encryption
+- Revoke access anytime: [Google Account → Third-party access](https://myaccount.google.com/permissions)
 
 ## What we do **not** claim
 
 - **XSS on the EdgeRunner origin** while the vault is unlocked can still call
   WebCrypto and decrypt (same as any client-side password manager). Use the
   **passphrase** vault mode on shared machines and lock/wipe when done.
+- **Anyone with your Google account** (or OAuth token for this app) can pull the
+  synced vault — treat Google sign-in like a password manager master key.
 - **Kaggle** and **tunnel** operators can see traffic to those endpoints —
   use only for non-sensitive workloads or local backend mode.
 - GitHub Pages meta CSP is weaker than HTTP headers; treat it as defense-in-depth.

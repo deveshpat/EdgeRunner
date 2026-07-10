@@ -1,0 +1,4 @@
+{
+  "googleClientId": "",
+  "comment": "Paste your Google OAuth 2.0 Web Client ID here (…apps.googleusercontent.com). Authorized JavaScript origins must include https://deveshpat.github.io and http://localhost:3000. See README."
+}

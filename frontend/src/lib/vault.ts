@@ -285,10 +285,57 @@ function requireKey(): CryptoKey {
   return memory.key;
 }
 
+const SYNC_META_KEY = "edgerunner_sync_meta";
+
+export function touchSyncMeta(): void {
+  try {
+    localStorage.setItem(
+      SYNC_META_KEY,
+      JSON.stringify({ updatedAt: Date.now() })
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
+export function getLocalSyncUpdatedAt(): number {
+  try {
+    const raw = localStorage.getItem(SYNC_META_KEY);
+    if (raw) {
+      const j = JSON.parse(raw) as { updatedAt?: number };
+      if (j.updatedAt) return j.updatedAt;
+    }
+  } catch {
+    /* ignore */
+  }
+  return 0;
+}
+
+async function pushCloudIfSignedIn(): Promise<void> {
+  try {
+    const { isGoogleSignedIn } = await import("./google-auth");
+    if (!isGoogleSignedIn()) return;
+    const { pushCloudSync } = await import("./cloud-sync");
+    const secret = await loadSecret();
+    const prefs = loadPrefs();
+    await pushCloudSync({
+      v: 1,
+      updatedAt: Date.now(),
+      secret,
+      prefs,
+    });
+    touchSyncMeta();
+  } catch (e) {
+    console.warn("[EdgeRunner] cloud push skipped:", e);
+  }
+}
+
 export async function saveSecret(secret: KaggleSecret): Promise<void> {
   const key = requireKey();
   const blob = await encryptJson(key, secret);
   await idbPut("credentials", blob);
+  touchSyncMeta();
+  void pushCloudIfSignedIn();
 }
 
 export async function loadSecret(): Promise<KaggleSecret | null> {
@@ -304,6 +351,8 @@ export async function loadSecret(): Promise<KaggleSecret | null> {
 
 export async function clearSecret(): Promise<void> {
   await idbDel("credentials");
+  touchSyncMeta();
+  void pushCloudIfSignedIn();
 }
 
 export async function saveChat(record: ChatRecord): Promise<void> {
@@ -384,6 +433,9 @@ export function savePrefs(prefs: StoredPrefs): void {
     delete clean.apiToken;
     delete clean.apiKey;
     localStorage.setItem(PREFS_KEY, JSON.stringify(clean));
+    touchSyncMeta();
+    // Fire-and-forget cloud prefs sync when signed in
+    void pushCloudIfSignedIn();
   } catch {
     /* ignore */
   }
