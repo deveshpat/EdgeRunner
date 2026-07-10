@@ -50,7 +50,7 @@ jobs:
         env:
           NEXT_PUBLIC_BASE_PATH: /EdgeRunner
           # Fallback if config.json is empty; public/config.json is source of truth at runtime
-          NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${{ vars.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '22648364020234-gldbcsfl16cftjvd11o9iqpalesi1hsn.apps.googleusercontent.com' }}
+          NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${{ vars.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '175039186672-j4a0kr8q6n1knhkh37ssb78i2qrfl75q.apps.googleusercontent.com' }}
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
