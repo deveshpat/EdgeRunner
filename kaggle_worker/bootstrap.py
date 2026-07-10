@@ -874,8 +874,10 @@ def start_api(public_url: str) -> subprocess.Popen:
             "KP_STARTUP_GRACE_SECONDS": str(STARTUP_GRACE),
             "KP_WORK_DIR": str(WORK),
             "KP_HEARTBEAT_FILE": str(hb_file),
-            # Persist GGUFs under /kaggle/working so next run can remount them
+            # GGUFs under working; default to a small model for fast cold starts
             "EDGERUNNER_MODEL_DIR": str(models_dir),
+            "EDGERUNNER_USE_TRENDING": os.environ.get("EDGERUNNER_USE_TRENDING", "0"),
+            "EDGERUNNER_MAX_MODEL_GB": os.environ.get("EDGERUNNER_MAX_MODEL_GB", "3.5"),
             "HF_HOME": str(hf_home),
             "HUGGINGFACE_HUB_CACHE": str(hf_home / "hub"),
             "PORT": str(PORT),

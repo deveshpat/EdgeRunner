@@ -110,70 +110,35 @@ def get_system_hardware():
 
 
 def hydrate_model_cache_from_inputs() -> None:
-    """Copy GGUF + HF cache from previous kernel output mounted under /kaggle/input.
+    """Link (never copy) GGUFs from /kaggle/input if a prior output was mounted.
 
-    When we re-push the same notebook with kernel_sources=[username/edgerunner],
-    Kaggle mounts the prior /kaggle/working tree under /kaggle/input/<slug>/.
+    Copying multi‑GB files from attached kernel output made cold starts worse
+    than re-downloading a small model. We only create cheap symlinks.
     """
     input_root = Path("/kaggle/input")
     if not input_root.exists():
+        print("  (no /kaggle/input — kernel output not attached; OK for fast start)", flush=True)
         return
 
     dest_models = Path(MODEL_DIR)
     dest_models.mkdir(parents=True, exist_ok=True)
-    dest_hf = Path(
-        os.environ.get(
-            "HF_HOME",
-            "/kaggle/working/hf_cache"
-            if Path("/kaggle/working").exists()
-            else str(Path.home() / ".cache" / "huggingface"),
-        )
-    )
-
-    copied = 0
-    # Any prior .gguf
+    linked = 0
     for gguf in input_root.rglob("*.gguf"):
         try:
             target = dest_models / gguf.name
-            if target.exists() and target.stat().st_size > 0:
+            if target.exists() or target.is_symlink():
                 continue
-            print(f"  ♻️ Restoring cached model {gguf.name} from {gguf}", flush=True)
-            shutil.copy2(gguf, target)
-            copied += 1
+            # Symlink is instant; load will read through to /kaggle/input
+            target.symlink_to(gguf.resolve())
+            print(f"  ♻️ Linked cached model {gguf.name} → {gguf}", flush=True)
+            linked += 1
         except Exception as e:
-            print(f"  cache restore skip {gguf}: {e}", flush=True)
+            print(f"  cache link skip {gguf.name}: {e}", flush=True)
 
-    # HF hub cache trees
-    for cache_name in ("hub", "huggingface", "hf_cache"):
-        for src in input_root.rglob(cache_name):
-            if not src.is_dir():
-                continue
-            # Prefer directories that look like HF hub cache
-            if not any(src.rglob("*.gguf")) and "models--" not in str(src):
-                # still copy hub metadata if models-- present deeper
-                if not any(p.name.startswith("models--") for p in src.rglob("*") if p.is_dir()):
-                    continue
-            try:
-                dest_hf.mkdir(parents=True, exist_ok=True)
-                # Merge into HF_HOME/hub when possible
-                target = dest_hf / "hub" if src.name != "hub" else dest_hf / "hub"
-                if src.name == "hub":
-                    target = dest_hf / "hub"
-                elif src.name == "hf_cache":
-                    target = dest_hf
-                else:
-                    target = dest_hf / src.name
-                if not target.exists():
-                    print(f"  ♻️ Restoring HF cache from {src}", flush=True)
-                    shutil.copytree(src, target, dirs_exist_ok=True)
-                    copied += 1
-            except Exception as e:
-                print(f"  HF cache restore skip: {e}", flush=True)
-
-    if copied:
-        print(f"✅ Restored {copied} cache item(s) from prior Kaggle output", flush=True)
+    if linked:
+        print(f"✅ Linked {linked} GGUF(s) in-place (no multi-GB copy)", flush=True)
     else:
-        print("  (no prior model cache found under /kaggle/input)", flush=True)
+        print("  (no linkable GGUF under /kaggle/input)", flush=True)
 
 
 def find_existing_gguf(filename: str) -> str | None:
@@ -316,14 +281,15 @@ def get_or_download_model():
         )
     print("-" * 80, flush=True)
 
-    best_model = next((m for m in scored_models if m["total_score"] > 0), None)
-    if not best_model:
-        print(
-            "\n❌ CRITICAL: No trending models fit. Falling back to static lightweight model.",
-            flush=True,
-        )
-        best_model = _fallback_model()
-        scored_models = [best_model]
+    # Prefer a small default for fast Kaggle boots. Set EDGERUNNER_USE_TRENDING=1
+    # to pick the largest fitting trending model instead.
+    use_trending = os.environ.get("EDGERUNNER_USE_TRENDING", "0").strip() not in (
+        "0",
+        "false",
+        "False",
+        "",
+    )
+    max_gb = float(os.environ.get("EDGERUNNER_MAX_MODEL_GB", "3.5"))
 
     forced_repo = os.environ.get("EDGERUNNER_MODEL_REPO")
     forced_file = os.environ.get("EDGERUNNER_MODEL_FILE")
@@ -333,62 +299,67 @@ def get_or_download_model():
             "name": forced_repo.split("/")[-1],
             "filename": forced_file,
             "safe_ctx": int(os.environ.get("EDGERUNNER_N_CTX", "2048")),
+            "required_ram_gb": 0,
         }
         print(f"\n🤖 Using forced model from env: {selected_model['name']}", flush=True)
-    elif AUTO_SELECT:
-        selected_model = best_model
+    elif use_trending:
+        best_model = next((m for m in scored_models if m["total_score"] > 0), None)
+        selected_model = best_model or _fallback_model()
         print(
-            f"\n🤖 Auto-selecting optimal model: {selected_model['name']} (non-interactive)",
+            f"\n🤖 Trending pick: {selected_model['name']} "
+            f"(~{selected_model.get('required_ram_gb', '?')} GB)",
             flush=True,
         )
     else:
-        print(f"\n🤖 Auto-selecting optimal model: {best_model['name']}", flush=True)
-        try:
-            choice = input(
-                f"Press [ENTER] to use this model, or type a number (1-{len(scored_models)}) to override: "
-            ).strip()
-        except EOFError:
-            choice = ""
-        selected_model = (
-            scored_models[int(choice) - 1]
-            if choice.isdigit() and 1 <= int(choice) <= len(scored_models)
-            else best_model
+        # Fast path: smallest fitting model under max_gb, else static fallback
+        small = [
+            m
+            for m in scored_models
+            if m.get("total_score", 0) > 0
+            and m.get("required_ram_gb", 99) <= max_gb
+        ]
+        small.sort(key=lambda m: m.get("required_ram_gb", 99))
+        selected_model = small[0] if small else _fallback_model()
+        print(
+            f"\n🤖 Fast default model: {selected_model['name']} "
+            f"(cap {max_gb} GB; set EDGERUNNER_USE_TRENDING=1 for larger)",
+            flush=True,
         )
 
     filename = selected_model["filename"]
-    # Prefer basename only in MODEL_DIR
     base_name = Path(filename).name
+    # Prefer any already-present file (working dir or input mount) — no copy
     model_path = find_existing_gguf(base_name)
 
     if model_path:
-        print(f"\n✅ Found cached model at {model_path}\n", flush=True)
-        # Ensure a copy lives under MODEL_DIR for next-run output packaging
-        dest = Path(MODEL_DIR) / base_name
-        if Path(model_path).resolve() != dest.resolve():
-            try:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                if not dest.exists():
-                    shutil.copy2(model_path, dest)
-                    model_path = str(dest)
-            except Exception:
-                pass
+        print(f"\n✅ Using model in-place at {model_path}\n", flush=True)
     else:
-        model_path = str(Path(MODEL_DIR) / base_name)
-        _set_status("download", f"Downloading {selected_model['name']}…")
-        print(
-            f"\n⬇️ Downloading {selected_model['name']} from HuggingFace...",
-            flush=True,
-        )
-        hf_hub_download(
-            repo_id=selected_model["repo_id"],
-            filename=selected_model["filename"],
-            local_dir=MODEL_DIR,
-        )
-        print("✅ Download complete!\n", flush=True)
+        # Also accept any cached GGUF under MODEL_DIR if name differs slightly
+        existing_any = list(Path(MODEL_DIR).glob("*.gguf")) if Path(MODEL_DIR).exists() else []
+        if existing_any and not use_trending and not forced_repo:
+            model_path = str(existing_any[0])
+            print(f"\n✅ Reusing existing GGUF on disk: {model_path}\n", flush=True)
+        else:
+            model_path = str(Path(MODEL_DIR) / base_name)
+            _set_status("download", f"Downloading {selected_model['name']}…")
+            print(
+                f"\n⬇️ Downloading {selected_model['name']} from HuggingFace...",
+                flush=True,
+            )
+            hf_hub_download(
+                repo_id=selected_model["repo_id"],
+                filename=selected_model["filename"],
+                local_dir=MODEL_DIR,
+            )
+            # Resolve actual path (HF may nest filename)
+            found = find_existing_gguf(base_name)
+            if found:
+                model_path = found
+            print("✅ Download complete!\n", flush=True)
 
     _set_status("downloaded", selected_model.get("name", ""), loading=True)
     return {
-        "path": model_path if os.path.exists(model_path) else str(Path(MODEL_DIR) / base_name),
+        "path": model_path,
         "n_ctx": selected_model.get("safe_ctx", 2048),
         "name": selected_model.get("name", "unknown"),
     }

@@ -382,48 +382,24 @@ export async function launchKaggleSession(
       message: `Updating notebook ${kernelRef} (${accelerator.toUpperCase()})…`,
     });
 
-    // Prefer reusing prior version output as a data source (model cache).
-    // First-ever create may reject self-source — retry without it.
-    let push: Awaited<ReturnType<typeof saveKernel>>;
-    try {
-      push = await saveKernel(
-        auth,
-        {
-          slug: kernelRef,
-          title: STABLE_KERNEL_TITLE,
-          source,
-          enableGpu: accelerator === "gpu",
-          sessionTimeoutSeconds: maxLifetime,
-          kernelDataSources: [kernelRef],
-        },
-        signal
-      );
-      if (push.error) throw new Error(String(push.error));
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      const maybeSourceIssue =
-        /kernel.*source|data source|invalid|not found|404|403/i.test(msg);
-      if (!maybeSourceIssue) throw e;
-      onProgress?.({
-        state: "pushing",
-        sessionId,
-        kernelRef,
-        accelerator,
-        message: "First run or source unavailable — pushing without cache mount…",
-      });
-      push = await saveKernel(
-        auth,
-        {
-          slug: kernelRef,
-          title: STABLE_KERNEL_TITLE,
-          source,
-          enableGpu: accelerator === "gpu",
-          sessionTimeoutSeconds: maxLifetime,
-          kernelDataSources: [],
-        },
-        signal
-      );
-      if (push.error) throw new Error(String(push.error));
+    // Do NOT attach prior kernel output by default.
+    // Mounting multi‑GB GGUF outputs makes Kaggle session start very slow.
+    // Models still land under /kaggle/working for this run; next run re-downloads
+    // a small default GGUF quickly (or set EDGERUNNER_KERNEL_CACHE=1 later).
+    const push = await saveKernel(
+      auth,
+      {
+        slug: kernelRef,
+        title: STABLE_KERNEL_TITLE,
+        source,
+        enableGpu: accelerator === "gpu",
+        sessionTimeoutSeconds: maxLifetime,
+        kernelDataSources: [],
+      },
+      signal
+    );
+    if (push.error) {
+      throw new Error(String(push.error));
     }
 
     onProgress?.({

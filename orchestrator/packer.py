@@ -130,8 +130,8 @@ def write_kernel_bundle(
         "enable_internet": True,
         "dataset_sources": [],
         "competition_sources": [],
-        # Prior run's /kaggle/working is mounted under /kaggle/input/ — model cache
-        "kernel_sources": [kernel_id],
+        # Empty by default: attaching prior multi‑GB output slows every cold start.
+        "kernel_sources": [],
         "model_sources": [],
         "keywords": [],
     }
