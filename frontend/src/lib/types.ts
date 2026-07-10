@@ -1,5 +1,5 @@
 export type Message = {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   content: string;
   thoughts?: string[];
   ts?: number;
@@ -46,6 +46,20 @@ export type StoredPrefs = {
   accelerator?: Accelerator;
   idleTimeout?: number;
   maxLifetime?: number;
-  /** Remember last attached backend URL (not secrets). */
   lastBackendUrl?: string;
+  rememberCredentials?: boolean;
+  vaultMode?: "device" | "passphrase";
+};
+
+export type ModelOption = {
+  repo_id: string;
+  name: string;
+  filename: string;
+  file_size_gb: number;
+  required_ram_gb: number;
+  safe_ctx: number;
+  sharded: boolean;
+  fits: boolean;
+  fit_status: string;
+  recommended?: boolean;
 };

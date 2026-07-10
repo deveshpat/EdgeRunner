@@ -30,3 +30,9 @@ class SessionStatus(BaseModel):
     session: dict
     public_url: Optional[str] = None
     accelerator: Optional[str] = None
+
+
+class ModelLoadRequest(BaseModel):
+    repo_id: str
+    filename: str
+    n_ctx: Optional[int] = None

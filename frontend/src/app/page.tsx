@@ -3,24 +3,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Send,
-  Terminal,
-  Cpu,
   Settings2,
-  CheckCircle2,
-  XCircle,
-  Rocket,
   Square,
   Loader2,
-  KeyRound,
-  Cloud,
-  Zap,
-  Link2,
-  HardDrive,
-  Trash2,
   Shield,
   Lock,
   Eye,
   EyeOff,
+  ChevronRight,
+  Terminal,
+  X,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import {
@@ -35,7 +27,6 @@ import {
   loadChat,
   loadPrefs,
   loadSecret,
-  lockVault,
   migrateLegacyIfNeeded,
   readMeta,
   saveChat,
@@ -52,6 +43,7 @@ import type {
   Accelerator,
   ConnectionMode,
   Message,
+  ModelOption,
   SessionInfo,
   SessionState,
 } from "@/lib/types";
@@ -59,6 +51,10 @@ import type {
 const CHAT_KEY = "current";
 
 type VaultGate = "loading" | "ready" | "need_passphrase" | "create";
+
+function sysLine(content: string): Message {
+  return { role: "system", content, ts: Date.now() };
+}
 
 export default function EdgeRunnerUI() {
   const [vaultGate, setVaultGate] = useState<VaultGate>("loading");
@@ -78,7 +74,14 @@ export default function EdgeRunnerUI() {
   const [backendUrl, setBackendUrl] = useState("");
   const [isOnline, setIsOnline] = useState<boolean | null>(null);
   const [modelReady, setModelReady] = useState(false);
+  const [modelName, setModelName] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showModels, setShowModels] = useState(false);
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
+  const [modelHw, setModelHw] = useState<string | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelSwitching, setModelSwitching] = useState(false);
+  const [restoring, setRestoring] = useState(true);
 
   const [setupTab, setSetupTab] = useState<"kaggle" | "local">("kaggle");
   const [username, setUsername] = useState("");
@@ -98,10 +101,12 @@ export default function EdgeRunnerUI() {
   const [progressMsg, setProgressMsg] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const sessionRef = useRef<SessionInfo | null>(null);
   const backendUrlRef = useRef(backendUrl);
   const abortRef = useRef<AbortController | null>(null);
   const chatIdRef = useRef(CHAT_KEY);
+  const intentionalStopRef = useRef(false);
 
   useEffect(() => {
     sessionRef.current = session;
@@ -147,21 +152,23 @@ export default function EdgeRunnerUI() {
     };
   }, []);
 
-  // After vault ready: restore prefs + encrypted secrets + chat
+  // After vault ready: restore prefs + try silent reconnect (no setup nag)
   useEffect(() => {
     if (vaultGate !== "ready") return;
-    const prefs = loadPrefs();
-    if (prefs.username) setUsername(prefs.username);
-    if (prefs.localBackendUrl) setLocalUrl(prefs.localBackendUrl);
-    if (prefs.accelerator) setAccelerator(prefs.accelerator);
-    if (prefs.idleTimeout) setIdleTimeout(prefs.idleTimeout);
-    if (prefs.maxLifetime) setMaxLifetime(prefs.maxLifetime);
-    if (prefs.mode === "local") setSetupTab("local");
-    if (typeof prefs.rememberCredentials === "boolean") {
-      setRememberCreds(prefs.rememberCredentials);
-    }
+    let cancelled = false;
 
-    void (async () => {
+    (async () => {
+      const prefs = loadPrefs();
+      if (prefs.username) setUsername(prefs.username);
+      if (prefs.localBackendUrl) setLocalUrl(prefs.localBackendUrl);
+      if (prefs.accelerator) setAccelerator(prefs.accelerator);
+      if (prefs.idleTimeout) setIdleTimeout(prefs.idleTimeout);
+      if (prefs.maxLifetime) setMaxLifetime(prefs.maxLifetime);
+      if (prefs.mode === "local") setSetupTab("local");
+      if (typeof prefs.rememberCredentials === "boolean") {
+        setRememberCreds(prefs.rememberCredentials);
+      }
+
       const secret = await loadSecret();
       if (secret) {
         setUsername(secret.username || prefs.username || "");
@@ -170,11 +177,65 @@ export default function EdgeRunnerUI() {
         setHasStoredCreds(!!(secret.apiToken || secret.apiKey));
       }
       const rec = await loadChat(CHAT_KEY);
-      if (rec?.messages?.length) {
+      if (rec?.messages?.length && !cancelled) {
         setMessages(rec.messages);
         chatIdRef.current = rec.id;
       }
+
+      // Silent reconnect to last tunnel / local backend
+      const last = (prefs.lastBackendUrl || "").replace(/\/$/, "");
+      if (last) {
+        try {
+          const res = await fetch(`${last}/health`, {
+            signal: AbortSignal.timeout(6000),
+            cache: "no-store",
+            referrerPolicy: "no-referrer",
+          });
+          if (res.ok && !cancelled) {
+            const data = (await res.json()) as {
+              model_ready?: boolean;
+              model?: { ready?: boolean; name?: string };
+            };
+            setBackendUrl(last);
+            setIsOnline(true);
+            setModelReady(!!(data.model_ready || data.model?.ready));
+            setModelName(data.model?.name || null);
+            const isTunnel =
+              /trycloudflare\.com|loca\.lt|localtunnel\.me|bore\.pub/i.test(
+                last
+              );
+            setPhase(isTunnel ? "kaggle" : "local");
+            setMessages((m) =>
+              m.length
+                ? m
+                : [sysLine(`reconnected · ${last.replace(/^https?:\/\//, "")}`)]
+            );
+            if (!cancelled) setRestoring(false);
+            return;
+          }
+        } catch {
+          /* fall through — session dead */
+        }
+      }
+
+      // Configured user: don't force the big setup form
+      const hasCreds = !!(secret?.apiToken || secret?.apiKey || prefs.username);
+      if (!cancelled) {
+        if (hasCreds || prefs.localBackendUrl || prefs.mode) {
+          setPhase("setup"); // compact resume UI, not first-run wizard
+          setMessages([
+            sysLine(
+              "session offline · press Launch or open settings to connect"
+            ),
+          ]);
+        }
+        setRestoring(false);
+      }
     })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [vaultGate]);
 
   // Encrypted chat persistence
@@ -197,7 +258,7 @@ export default function EdgeRunnerUI() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Health — poll faster until model is ready (avoid stuck "Booting model")
+  // Health poll
   useEffect(() => {
     if (!backendUrl) {
       setIsOnline(null);
@@ -229,6 +290,7 @@ export default function EdgeRunnerUI() {
           };
           const ready = !!(data.model_ready || data.model?.ready);
           setModelReady(ready);
+          if (data.model?.name) setModelName(data.model.name);
           const err =
             data.model_error ||
             data.model?.error ||
@@ -238,14 +300,14 @@ export default function EdgeRunnerUI() {
           } else if (err) {
             setProgressMsg(
               err.includes("GLIBC")
-                ? "Model engine incompatible (GLIBC) — relaunch after manylinux wheel deploy"
-                : `Model error: ${err.slice(0, 160)}`
+                ? "engine incompatible (GLIBC) — relaunch"
+                : `model error: ${err.slice(0, 120)}`
             );
-          } else if (data.model?.loading || data.model?.name) {
+          } else if (data.model?.loading || data.model?.phase) {
             setProgressMsg(
-              data.model?.name
-                ? `Loading model ${data.model.name}…`
-                : "Downloading / loading model…"
+              data.model?.detail ||
+                data.model?.phase ||
+                "loading model…"
             );
           }
         }
@@ -254,7 +316,6 @@ export default function EdgeRunnerUI() {
       }
     };
     check();
-    // 2s while booting, 10s once ready (interval recreated when modelReady flips)
     const interval = setInterval(check, modelReady ? 10000 : 2000);
     return () => {
       cancelled = true;
@@ -262,13 +323,12 @@ export default function EdgeRunnerUI() {
     };
   }, [backendUrl, modelReady]);
 
-  // Heartbeat — GET avoids CORS preflight through tunnels
+  // Heartbeat
   useEffect(() => {
-    if (!backendUrl || isOnline === false || phase === "setup") return;
+    if (!backendUrl || isOnline === false) return;
     const beat = () => {
       const base = backendUrlRef.current.replace(/\/$/, "");
       if (!base) return;
-      // Prefer GET (no preflight); also POST keepalive as backup
       fetch(`${base}/session/heartbeat`, {
         method: "GET",
         keepalive: true,
@@ -284,47 +344,39 @@ export default function EdgeRunnerUI() {
       });
     };
     beat();
-    // 15s — well under default 90s idle so a few missed beats still OK
     const interval = setInterval(beat, 15000);
     return () => clearInterval(interval);
-  }, [backendUrl, isOnline, phase]);
+  }, [backendUrl, isOnline]);
 
-  // Tab close / hide → kill Kaggle (multiple channels; sendBeacon JSON often fails CORS)
+  // Soft detach on leave — NOT hard kill (refresh reconnects within grace)
   useEffect(() => {
-    const killRemoteSession = (reason: string) => {
+    const softDetach = () => {
+      if (intentionalStopRef.current) return;
       const url = backendUrlRef.current;
       if (!url) return;
       const isTunnel =
         /trycloudflare\.com|loca\.lt|localtunnel\.me|bore\.pub/i.test(url);
-      // Local loopback: only kill if it's a tunneled Kaggle URL
       if (!isTunnel && /127\.0\.0\.1|localhost/i.test(url)) return;
 
       const base = url.replace(/\/$/, "");
-      const getUrl = `${base}/session/shutdown?reason=${encodeURIComponent(reason)}`;
-      const postUrl = `${base}/session/shutdown`;
-
+      const getUrl = `${base}/session/detach?reason=${encodeURIComponent("pagehide")}&grace=60`;
       try {
-        // 1) GET via Image — no CORS preflight, highly reliable on unload
         const img = new Image();
         img.src = getUrl;
       } catch {
         /* ignore */
       }
       try {
-        // 2) sendBeacon POST with text/plain (simple content-type, no preflight)
         if (navigator.sendBeacon) {
           navigator.sendBeacon(
-            postUrl,
-            new Blob([reason], { type: "text/plain" })
+            `${base}/session/detach`,
+            new Blob(["pagehide"], { type: "text/plain" })
           );
-          // 3) Also beacon the GET-style URL (some browsers POST empty to it — server accepts)
-          navigator.sendBeacon(getUrl);
         }
       } catch {
         /* ignore */
       }
       try {
-        // 4) fetch keepalive GET + POST
         fetch(getUrl, {
           method: "GET",
           keepalive: true,
@@ -332,34 +384,14 @@ export default function EdgeRunnerUI() {
           cache: "no-store",
           referrerPolicy: "no-referrer",
         }).catch(() => {});
-        fetch(postUrl, {
-          method: "POST",
-          body: reason,
-          headers: { "Content-Type": "text/plain" },
-          keepalive: true,
-          mode: "cors",
-          referrerPolicy: "no-referrer",
-        }).catch(() => {});
       } catch {
         /* best effort */
       }
     };
 
-    const onPageHide = (e: PageTransitionEvent) => {
-      // persisted=true means bfcache — still kill Kaggle to protect quota
-      void e;
-      killRemoteSession("tab_closed");
-    };
-    const onBeforeUnload = () => killRemoteSession("tab_closed");
-    // visibility hidden is a strong signal on mobile; only kill if page is unloading
-    // (don't kill on tab switch). Handled by pagehide.
-
+    const onPageHide = () => softDetach();
     window.addEventListener("pagehide", onPageHide);
-    window.addEventListener("beforeunload", onBeforeUnload);
-    return () => {
-      window.removeEventListener("pagehide", onPageHide);
-      window.removeEventListener("beforeunload", onBeforeUnload);
-    };
+    return () => window.removeEventListener("pagehide", onPageHide);
   }, []);
 
   const finishVaultCreate = async () => {
@@ -407,12 +439,8 @@ export default function EdgeRunnerUI() {
     try {
       const url = localUrl.trim().replace(/\/$/, "");
       if (!url) throw new Error("Enter a backend URL");
-      // Only allow loopback / private for local mode (SSRF-ish safety in UI)
-      if (!/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?\/?$/i.test(url)) {
-        // still allow user LAN if they insist — warn only for non-http(s)
-        if (!/^https?:\/\//i.test(url)) {
-          throw new Error("Backend URL must be http(s)");
-        }
+      if (!/^https?:\/\//i.test(url)) {
+        throw new Error("Backend URL must be http(s)");
       }
       const res = await fetch(`${url}/health`, {
         signal: AbortSignal.timeout(8000),
@@ -422,9 +450,14 @@ export default function EdgeRunnerUI() {
       const data = await res.json();
       setBackendUrl(url);
       setModelReady(!!data.model_ready);
+      setModelName(data.model?.name || null);
       setIsOnline(true);
       setPhase("local");
       setShowSettings(false);
+      setMessages((m) => [
+        ...m,
+        sysLine(`attached local · ${url}`),
+      ]);
       savePrefs({
         mode: "local",
         localBackendUrl: url,
@@ -434,7 +467,7 @@ export default function EdgeRunnerUI() {
       setSessionError(
         e instanceof Error
           ? e.message
-          : "Could not reach local backend. Is it running?"
+          : "Could not reach local backend"
       );
     } finally {
       setSessionBusy(false);
@@ -516,6 +549,8 @@ export default function EdgeRunnerUI() {
         setHasStoredCreds(true);
       }
 
+      setMessages((m) => [...m, sysLine("launching kaggle worker…")]);
+
       const result = await launchKaggleSession({
         auth: {
           username: username.trim(),
@@ -547,9 +582,13 @@ export default function EdgeRunnerUI() {
       });
       setPhase("kaggle");
       setShowSettings(false);
-      setProgressMsg("Backend online — waiting for model…");
+      setProgressMsg("backend online — loading model…");
       setIsOnline(true);
       setModelReady(false);
+      setMessages((m) => [
+        ...m,
+        sysLine(`online · ${result.publicUrl.replace(/^https?:\/\//, "")}`),
+      ]);
       savePrefs({
         lastBackendUrl: result.publicUrl,
         accelerator: result.accelerator,
@@ -561,26 +600,22 @@ export default function EdgeRunnerUI() {
       })
         .then((h) => {
           if (h.online) setIsOnline(true);
-          // Only promote to ready — never force false over a later health poll
           if (h.model_ready) {
             setModelReady(true);
             setProgressMsg(null);
+            setMessages((m) => [...m, sysLine("model ready")]);
           } else if (h.online) {
-            setProgressMsg(
-              "Backend is up; model still loading (check status badge)…"
-            );
+            setProgressMsg("backend up; model still loading…");
           }
         })
-        .catch(() => {
-          /* aborted or network — health poll continues */
-        });
+        .catch(() => {});
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg !== "aborted" && msg !== "Launch aborted") {
         setSessionError(msg);
+        setMessages((m) => [...m, sysLine(`launch failed · ${msg}`)]);
       }
       setSession(null);
-      setPhase("setup");
     } finally {
       setSessionBusy(false);
     }
@@ -588,6 +623,7 @@ export default function EdgeRunnerUI() {
 
   const stopSession = async () => {
     setSessionBusy(true);
+    intentionalStopRef.current = true;
     try {
       abortRef.current?.abort();
       if (backendUrl) {
@@ -601,15 +637,20 @@ export default function EdgeRunnerUI() {
       setSession((s) => (s ? { ...s, state: "stopped" } : s));
       setIsOnline(false);
       setBackendUrl("");
-      setPhase("setup");
-      setShowSettings(false);
+      setModelReady(false);
+      setModelName(null);
+      setMessages((m) => [...m, sysLine("session stopped")]);
+      savePrefs({ lastBackendUrl: undefined });
     } finally {
       setSessionBusy(false);
+      setTimeout(() => {
+        intentionalStopRef.current = false;
+      }, 2000);
     }
   };
 
   const clearChat = () => {
-    setMessages([]);
+    setMessages([sysLine("chat cleared")]);
     void saveChat({
       id: chatIdRef.current,
       messages: [],
@@ -624,8 +665,106 @@ export default function EdgeRunnerUI() {
     setHasStoredCreds(false);
   };
 
+  const fetchModels = async () => {
+    if (!backendUrl) return;
+    setModelsLoading(true);
+    try {
+      const res = await fetch(`${backendUrl.replace(/\/$/, "")}/models`, {
+        signal: AbortSignal.timeout(60000),
+        cache: "no-store",
+        referrerPolicy: "no-referrer",
+      });
+      if (!res.ok) throw new Error(`models ${res.status}`);
+      const data = (await res.json()) as {
+        options?: ModelOption[];
+        hardware?: { type?: string; total_gb?: number; free_gb?: number };
+        current?: { name?: string; ready?: boolean };
+      };
+      setModelOptions(data.options || []);
+      if (data.hardware) {
+        setModelHw(
+          `${data.hardware.type || "hw"} · ${data.hardware.total_gb?.toFixed?.(1) ?? "?"} GB`
+        );
+      }
+      if (data.current?.name) setModelName(data.current.name);
+    } catch (e) {
+      setSessionError(
+        e instanceof Error ? e.message : "Could not list models"
+      );
+    } finally {
+      setModelsLoading(false);
+    }
+  };
+
+  const openModelPicker = async () => {
+    setShowModels(true);
+    await fetchModels();
+  };
+
+  const switchToModel = async (opt: ModelOption) => {
+    if (!backendUrl || modelSwitching) return;
+    if (!opt.fits) {
+      const ok = confirm(
+        `${opt.name} needs ~${opt.required_ram_gb} GB RAM and may not fit. Try anyway? (previous model will be unloaded + GC first)`
+      );
+      if (!ok) return;
+    }
+    setModelSwitching(true);
+    setModelReady(false);
+    setProgressMsg(`switching → ${opt.name} (unload + GC)…`);
+    setMessages((m) => [
+      ...m,
+      sysLine(`model switch → ${opt.name} · unload + GC first`),
+    ]);
+    try {
+      const res = await fetch(`${backendUrl.replace(/\/$/, "")}/models/load`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          repo_id: opt.repo_id,
+          filename: opt.filename,
+          n_ctx: opt.safe_ctx,
+        }),
+        referrerPolicy: "no-referrer",
+      });
+      const data = (await res.json()) as {
+        ok?: boolean;
+        error?: string;
+        model?: { name?: string; ready?: boolean };
+      };
+      if (!data.ok) {
+        throw new Error(data.error || "load failed");
+      }
+      setModelReady(!!data.model?.ready);
+      setModelName(data.model?.name || opt.name);
+      setProgressMsg(null);
+      setMessages((m) => [
+        ...m,
+        sysLine(`model loaded · ${data.model?.name || opt.name}`),
+      ]);
+      setShowModels(false);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setProgressMsg(`switch failed: ${msg.slice(0, 100)}`);
+      setMessages((m) => [...m, sysLine(`model switch failed · ${msg}`)]);
+    } finally {
+      setModelSwitching(false);
+    }
+  };
+
   const handleSend = async () => {
-    if (!input.trim() || isLoading || !backendUrl) return;
+    if (!input.trim() || isLoading) return;
+
+    if (!backendUrl) {
+      setMessages((prev) => [
+        ...prev,
+        { role: "user", content: input, ts: Date.now() },
+        sysLine("no backend · open settings → Launch Kaggle or attach local"),
+      ]);
+      setInput("");
+      setShowSettings(true);
+      return;
+    }
 
     const userMsg: Message = {
       role: "user",
@@ -636,12 +775,11 @@ export default function EdgeRunnerUI() {
     setInput("");
     setIsLoading(true);
 
-    // Placeholder assistant bubble — updated as NDJSON status/ping/done arrive
     setMessages((prev) => [
       ...prev,
       {
         role: "assistant",
-        content: "_Working…_",
+        content: "…",
         thoughts: [],
         ts: Date.now(),
       },
@@ -669,10 +807,12 @@ export default function EdgeRunnerUI() {
           Accept: "application/x-ndjson, application/json",
         },
         body: JSON.stringify({
-          messages: [...messages, userMsg].map((m) => ({
-            role: m.role,
-            content: m.content,
-          })),
+          messages: [...messages, userMsg]
+            .filter((m) => m.role === "user" || m.role === "assistant")
+            .map((m) => ({
+              role: m.role,
+              content: m.content,
+            })),
         }),
         referrerPolicy: "no-referrer",
       });
@@ -683,7 +823,6 @@ export default function EdgeRunnerUI() {
       let data: { response?: string; thought_process?: string[] };
 
       if (ctype.includes("ndjson") || ctype.includes("stream")) {
-        // NDJSON: status / ping / done — keeps Cloudflare + browser alive
         const reader = response.body?.getReader();
         if (!reader) throw new Error("No response body");
         const decoder = new TextDecoder();
@@ -715,15 +854,14 @@ export default function EdgeRunnerUI() {
             if (evt.type === "status" && evt.message) {
               thoughts.push(evt.message);
               updateLastAssistant({
-                content: `_${evt.message}_`,
+                content: evt.message,
                 thoughts: [...thoughts],
               });
             } else if (evt.type === "ping") {
-              // tunnel keepalive — optional soft pulse
               updateLastAssistant({
                 content: thoughts.length
-                  ? `_${thoughts[thoughts.length - 1]}_ · still working…`
-                  : "_Still working…_",
+                  ? `${thoughts[thoughts.length - 1]} · …`
+                  : "…",
                 thoughts: [...thoughts],
               });
             } else if (evt.type === "done") {
@@ -734,9 +872,7 @@ export default function EdgeRunnerUI() {
             }
           }
         }
-        if (!final?.response) {
-          throw new Error("Stream ended without a reply");
-        }
+        if (!final?.response) throw new Error("Stream ended without a reply");
         data = final;
       } else {
         data = (await response.json()) as {
@@ -746,12 +882,11 @@ export default function EdgeRunnerUI() {
       }
 
       updateLastAssistant({
-        content: data.response || "_(empty reply)_",
+        content: data.response || "(empty)",
         thoughts: data.thought_process,
         ts: Date.now(),
       });
     } catch (err) {
-      // Distinguish dead tunnel vs long-running cancel
       let stillUp = false;
       try {
         const h = await fetch(`${base}/health`, {
@@ -763,205 +898,161 @@ export default function EdgeRunnerUI() {
       } catch {
         stillUp = false;
       }
-
       const detail =
         err instanceof Error && err.message ? ` (${err.message})` : "";
       updateLastAssistant({
         content: stillUp
-          ? `⚠️ Reply interrupted${detail}. The Kaggle backend is still online — the tunnel or browser dropped a long request. Try a short message (e.g. **hi**), or prefix coding tasks with \`/code\`. If this keeps happening, open settings and relaunch.`
-          : "⚠️ Connection error. Is the backend still running? If you used Kaggle, the session may have timed out — open settings and relaunch.",
+          ? `reply interrupted${detail}. backend still online — try again or /code for harness`
+          : "connection error — session may be gone. settings → relaunch",
         ts: Date.now(),
       });
     } finally {
       setIsLoading(false);
+      inputRef.current?.focus();
     }
   };
 
-  const stateColor = (state?: string) => {
-    switch (state) {
-      case "online":
-        return "text-emerald-400";
-      case "failed":
-      case "stopped":
-        return "text-red-400";
-      case "packing":
-      case "pushing":
-      case "provisioning":
-        return "text-amber-400";
-      default:
-        return "text-neutral-400";
-    }
-  };
+  const statusKind =
+    isOnline && modelReady
+      ? "online"
+      : isOnline
+        ? "booting"
+        : backendUrl
+          ? "offline"
+          : "offline";
 
-  const maskToken = (t: string) =>
-    t.length <= 8 ? "••••••••" : `${t.slice(0, 4)}…${t.slice(-4)}`;
+  const configured =
+    hasStoredCreds ||
+    !!(username && (apiToken || apiKey)) ||
+    !!loadPrefs().localBackendUrl;
 
   // ── Vault gates ─────────────────────────────────────────────────────────
-  if (vaultGate === "loading") {
+  if (vaultGate === "loading" || (vaultGate === "ready" && restoring)) {
     return (
-      <div className="min-h-screen bg-neutral-950 text-neutral-200 flex items-center justify-center">
-        <Loader2 className="animate-spin text-cyan-500" size={32} />
+      <div className="er-shell min-h-screen flex items-center justify-center text-[var(--muted)] text-sm">
+        <Loader2 className="animate-spin text-[var(--accent)] mr-3" size={18} />
+        <span className="font-mono">booting vault…</span>
       </div>
     );
   }
 
   if (vaultGate === "create" || vaultGate === "need_passphrase") {
     return (
-      <div className="min-h-screen bg-neutral-950 text-neutral-200 flex flex-col">
-        <header className="flex items-center gap-3 p-6 border-b border-neutral-800">
-          <div className="p-2 bg-cyan-950 rounded-lg text-cyan-400">
-            <Shield size={24} />
-          </div>
-          <div>
-            <h1 className="text-lg font-bold tracking-wider">EDGERUNNER</h1>
-            <p className="text-xs text-neutral-500">
-              Local encrypted vault · keys never leave this device
-            </p>
-          </div>
+      <div className="er-shell min-h-screen flex flex-col font-mono text-sm">
+        <header className="flex items-center gap-3 px-5 py-4 border-b border-[var(--border)]">
+          <Terminal size={18} className="text-[var(--accent)]" />
+          <span className="text-[var(--accent)] tracking-widest text-xs font-semibold">
+            EDGERUNNER
+          </span>
+          <span className="text-[var(--muted)] text-xs">// vault</span>
         </header>
         <main className="flex-1 flex items-start justify-center p-6">
-          <div className="w-full max-w-md space-y-5">
+          <div className="w-full max-w-md space-y-4">
             {vaultGate === "create" ? (
               <>
-                <div>
-                  <h2 className="text-xl font-semibold">Create device vault</h2>
-                  <p className="text-sm text-neutral-500 mt-1">
-                    Credentials and chat are encrypted with AES-256-GCM on this
-                    browser only. Choose how the vault key is protected.
-                  </p>
-                </div>
+                <p className="text-[var(--fg)]">
+                  <span className="text-[var(--prompt)]">›</span> create encrypted
+                  vault
+                </p>
+                <p className="text-xs text-[var(--muted)]">
+                  AES-256-GCM on-device. Keys never leave this browser.
+                </p>
                 <div className="space-y-2">
-                  <button
-                    type="button"
-                    onClick={() => setVaultModeChoice("device")}
-                    className={`w-full text-left p-4 rounded-xl border text-sm ${
-                      vaultModeChoice === "device"
-                        ? "border-cyan-700 bg-cyan-950/40"
-                        : "border-neutral-800 bg-neutral-900"
-                    }`}
-                  >
-                    <div className="font-medium text-cyan-300">
-                      This device (recommended)
-                    </div>
-                    <div className="text-xs text-neutral-500 mt-1">
-                      Non-extractable key in IndexedDB. Auto-unlocks on this
-                      browser — you won&apos;t re-enter the Kaggle token.
-                    </div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setVaultModeChoice("passphrase")}
-                    className={`w-full text-left p-4 rounded-xl border text-sm ${
-                      vaultModeChoice === "passphrase"
-                        ? "border-cyan-700 bg-cyan-950/40"
-                        : "border-neutral-800 bg-neutral-900"
-                    }`}
-                  >
-                    <div className="font-medium text-amber-300 flex items-center gap-2">
-                      <Lock size={14} /> Passphrase lock
-                    </div>
-                    <div className="text-xs text-neutral-500 mt-1">
-                      PBKDF2 (600k) + AES-GCM. Stronger on shared machines —
-                      unlock once per session.
-                    </div>
-                  </button>
+                  {(
+                    [
+                      ["device", "device key (auto-unlock)"],
+                      ["passphrase", "passphrase lock"],
+                    ] as const
+                  ).map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => setVaultModeChoice(mode)}
+                      className={`w-full text-left px-3 py-2.5 rounded border text-xs ${
+                        vaultModeChoice === mode
+                          ? "border-[var(--accent-dim)] bg-[#0f1a10] text-[var(--accent)]"
+                          : "border-[var(--border)] text-[var(--muted)] hover:border-[#444]"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
                 </div>
                 {vaultModeChoice === "passphrase" && (
-                  <div className="space-y-3">
-                    <label className="block text-xs text-neutral-400">
-                      Passphrase
-                      <div className="relative mt-1">
-                        <input
-                          type={showPass ? "text" : "password"}
-                          value={passphrase}
-                          onChange={(e) => setPassphrase(e.target.value)}
-                          className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2.5 text-sm pr-10"
-                          autoComplete="new-password"
-                        />
-                        <button
-                          type="button"
-                          className="absolute right-2 top-2.5 text-neutral-500"
-                          onClick={() => setShowPass((v) => !v)}
-                        >
-                          {showPass ? <EyeOff size={16} /> : <Eye size={16} />}
-                        </button>
-                      </div>
-                    </label>
-                    <label className="block text-xs text-neutral-400">
-                      Confirm
-                      <input
-                        type={showPass ? "text" : "password"}
-                        value={passphrase2}
-                        onChange={(e) => setPassphrase2(e.target.value)}
-                        className="mt-1 w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2.5 text-sm"
-                        autoComplete="new-password"
-                      />
-                    </label>
+                  <div className="space-y-2">
+                    <input
+                      type={showPass ? "text" : "password"}
+                      value={passphrase}
+                      onChange={(e) => setPassphrase(e.target.value)}
+                      placeholder="passphrase"
+                      className="w-full bg-[var(--bg-panel)] border border-[var(--border)] rounded px-3 py-2 text-sm"
+                    />
+                    <input
+                      type={showPass ? "text" : "password"}
+                      value={passphrase2}
+                      onChange={(e) => setPassphrase2(e.target.value)}
+                      placeholder="confirm"
+                      className="w-full bg-[var(--bg-panel)] border border-[var(--border)] rounded px-3 py-2 text-sm"
+                    />
+                    <button
+                      type="button"
+                      className="text-xs text-[var(--muted)]"
+                      onClick={() => setShowPass((v) => !v)}
+                    >
+                      {showPass ? <EyeOff size={12} className="inline" /> : <Eye size={12} className="inline" />}{" "}
+                      toggle
+                    </button>
                   </div>
                 )}
                 <button
                   type="button"
                   onClick={finishVaultCreate}
-                  className="w-full py-3 rounded-xl bg-cyan-700 hover:bg-cyan-600 text-sm font-medium"
+                  className="w-full py-2.5 rounded bg-[var(--accent-dim)] text-[var(--accent)] text-sm hover:brightness-110"
                 >
-                  Create vault
+                  create vault
                 </button>
               </>
             ) : (
               <>
-                <div>
-                  <h2 className="text-xl font-semibold flex items-center gap-2">
-                    <Lock size={20} /> Unlock vault
-                  </h2>
-                  <p className="text-sm text-neutral-500 mt-1">
-                    {lockedVaultMode === "device"
-                      ? "Vault locked for this tab. Unlock to use saved credentials and encrypted chat."
-                      : "Enter your vault passphrase. Encrypted credentials and chat stay on this device."}
-                  </p>
-                </div>
+                <p className="text-[var(--fg)] flex items-center gap-2">
+                  <Lock size={14} className="text-[var(--warn)]" /> unlock vault
+                </p>
                 {lockedVaultMode === "passphrase" && (
-                  <label className="block text-xs text-neutral-400">
-                    Passphrase
-                    <input
-                      type={showPass ? "text" : "password"}
-                      value={passphrase}
-                      onChange={(e) => setPassphrase(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") void finishVaultUnlock();
-                      }}
-                      className="mt-1 w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2.5 text-sm"
-                      autoComplete="current-password"
-                      autoFocus
-                    />
-                  </label>
+                  <input
+                    type={showPass ? "text" : "password"}
+                    value={passphrase}
+                    onChange={(e) => setPassphrase(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void finishVaultUnlock();
+                    }}
+                    placeholder="passphrase"
+                    className="w-full bg-[var(--bg-panel)] border border-[var(--border)] rounded px-3 py-2 text-sm"
+                    autoFocus
+                  />
                 )}
                 <button
                   type="button"
                   onClick={finishVaultUnlock}
-                  className="w-full py-3 rounded-xl bg-cyan-700 hover:bg-cyan-600 text-sm font-medium"
+                  className="w-full py-2.5 rounded bg-[var(--accent-dim)] text-[var(--accent)] text-sm"
                 >
-                  Unlock
+                  unlock
                 </button>
                 <button
                   type="button"
                   onClick={async () => {
-                    if (
-                      confirm(
-                        "Wipe the local vault? Encrypted credentials and chat on this device will be deleted."
-                      )
-                    ) {
+                    if (confirm("Wipe local vault?")) {
                       await wipeVault();
                       setVaultGate("create");
                     }
                   }}
-                  className="w-full text-xs text-neutral-600 hover:text-red-400"
+                  className="w-full text-xs text-[var(--muted)] hover:text-[var(--danger)]"
                 >
-                  Wipe vault
+                  wipe vault
                 </button>
               </>
             )}
             {vaultError && (
-              <p className="text-xs text-red-400 bg-red-950/30 border border-red-900/40 rounded-lg p-3">
+              <p className="text-xs text-[var(--danger)] border border-red-900/40 rounded p-2">
                 {vaultError}
               </p>
             )}
@@ -971,591 +1062,528 @@ export default function EdgeRunnerUI() {
     );
   }
 
-  // ── Launching ───────────────────────────────────────────────────────────
-  if (phase === "setup" && sessionBusy) {
-    return (
-      <div className="min-h-screen bg-neutral-950 text-neutral-200 flex flex-col items-center justify-center p-6">
-        <Loader2 size={40} className="animate-spin text-cyan-500 mb-4" />
-        <h2 className="text-lg font-semibold">Starting Kaggle session</h2>
-        <p className="text-sm text-neutral-500 mt-2 max-w-md text-center">
-          {progressMsg ||
-            "Pushing worker + installing prebuilt wheels… first model download may still take a minute."}
-        </p>
-        {session && (
-          <div className="mt-6 text-xs font-mono bg-neutral-900 border border-neutral-800 rounded-xl p-4 max-w-lg w-full space-y-1 text-neutral-400">
-            <div>
-              <span className="text-neutral-600">state </span>
-              <span className={stateColor(session.state)}>{session.state}</span>
-            </div>
-            <div>
-              <span className="text-neutral-600">kernel </span>
-              {session.kernel_ref || "…"}
-            </div>
-            <div>
-              <span className="text-neutral-600">accel </span>
-              {session.accelerator}
-            </div>
-            {session.logs_tail && (
-              <pre className="mt-2 max-h-40 overflow-y-auto text-[10px] text-neutral-500 whitespace-pre-wrap">
-                {session.logs_tail.slice(-1500)}
-              </pre>
-            )}
-          </div>
-        )}
-        <button
-          type="button"
-          onClick={() => {
-            abortRef.current?.abort();
-            setSessionBusy(false);
-            setSession(null);
-            setSessionError("Launch cancelled");
-          }}
-          className="mt-6 text-sm text-neutral-500 hover:text-red-400"
-        >
-          Cancel
-        </button>
-      </div>
-    );
-  }
-
-  // ── Setup ───────────────────────────────────────────────────────────────
-  if (phase === "setup") {
-    return (
-      <div className="min-h-screen bg-neutral-950 text-neutral-200 flex flex-col">
-        <header className="flex items-center justify-between p-6 border-b border-neutral-800">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-cyan-950 rounded-lg text-cyan-400">
-              <Cpu size={24} />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold tracking-wider">EDGERUNNER</h1>
-              <p className="text-xs text-neutral-500">
-                GitHub Pages · encrypted vault · fast prebuilt wheels
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-1 text-xs text-emerald-500/80">
-            <Shield size={14} /> Vault unlocked
-          </div>
-        </header>
-
-        <main className="flex-1 flex items-start justify-center p-6">
-          <div className="w-full max-w-lg space-y-6">
-            <div>
-              <h2 className="text-xl font-semibold text-neutral-100">
-                Connect a backend
-              </h2>
-              <p className="text-sm text-neutral-500 mt-1">
-                Kaggle token is stored encrypted on this device. Chat is
-                AES-GCM encrypted at rest. Closing the tab kills the Kaggle
-                session.
-              </p>
-            </div>
-
-            <div className="flex rounded-xl border border-neutral-800 overflow-hidden">
-              <button
-                type="button"
-                onClick={() => setSetupTab("kaggle")}
-                className={`flex-1 flex items-center justify-center gap-2 py-3 text-sm transition-colors ${
-                  setupTab === "kaggle"
-                    ? "bg-cyan-950/60 text-cyan-300"
-                    : "bg-neutral-900 text-neutral-500 hover:text-neutral-300"
-                }`}
-              >
-                <Cloud size={16} /> Kaggle
-              </button>
-              <button
-                type="button"
-                onClick={() => setSetupTab("local")}
-                className={`flex-1 flex items-center justify-center gap-2 py-3 text-sm transition-colors ${
-                  setupTab === "local"
-                    ? "bg-cyan-950/60 text-cyan-300"
-                    : "bg-neutral-900 text-neutral-500 hover:text-neutral-300"
-                }`}
-              >
-                <HardDrive size={16} /> Local URL
-              </button>
-            </div>
-
-            {setupTab === "kaggle" ? (
-              <div className="space-y-4 rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
-                <div className="flex items-start gap-2 text-xs text-neutral-500">
-                  <KeyRound
-                    size={14}
-                    className="mt-0.5 shrink-0 text-cyan-600"
-                  />
-                  <p>
-                    Token encrypted with your vault key (never sent to our
-                    servers — only to Kaggle&apos;s API from your browser).{" "}
-                    <a
-                      href="https://www.kaggle.com/settings"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-cyan-500 hover:underline"
-                    >
-                      Get a token
-                    </a>
-                    .
-                  </p>
-                </div>
-
-                {hasStoredCreds && (
-                  <div className="flex items-center justify-between text-xs bg-emerald-950/30 border border-emerald-900/40 rounded-lg px-3 py-2 text-emerald-400/90">
-                    <span className="flex items-center gap-2">
-                      <Shield size={12} />
-                      Saved credentials{" "}
-                      {apiToken ? `(${maskToken(apiToken)})` : ""}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={forgetCredentials}
-                      className="text-neutral-500 hover:text-red-400"
-                    >
-                      Forget
-                    </button>
-                  </div>
-                )}
-
-                <label className="block text-xs text-neutral-400">
-                  Kaggle username
-                  <input
-                    value={username}
-                    onChange={(e) => setUsername(e.target.value)}
-                    className="mt-1 w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2.5 text-sm"
-                    autoComplete="username"
-                    placeholder="your-kaggle-username"
-                  />
-                </label>
-                <label className="block text-xs text-neutral-400">
-                  API token
-                  <input
-                    type="password"
-                    value={apiToken}
-                    onChange={(e) => setApiToken(e.target.value)}
-                    className="mt-1 w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2.5 text-sm font-mono"
-                    autoComplete="off"
-                    placeholder={
-                      hasStoredCreds
-                        ? "•••• saved — paste to replace"
-                        : "Bearer access token"
-                    }
-                  />
-                </label>
-                <label className="block text-xs text-neutral-500">
-                  Legacy API key (optional)
-                  <input
-                    type="password"
-                    value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                    className="mt-1 w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm"
-                    autoComplete="off"
-                  />
-                </label>
-
-                <label className="flex items-start gap-2 text-xs text-neutral-400 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={rememberCreds}
-                    onChange={(e) => setRememberCreds(e.target.checked)}
-                    className="mt-0.5"
-                  />
-                  <span>
-                    Remember token on this device (encrypted AES-256-GCM in
-                    IndexedDB)
-                  </span>
-                </label>
-
-                <div>
-                  <p className="text-xs text-neutral-400 mb-2">Accelerator</p>
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setAccelerator("gpu")}
-                      className={`flex-1 py-2.5 rounded-lg border text-sm transition-colors ${
-                        accelerator === "gpu"
-                          ? "border-amber-600 bg-amber-950/40 text-amber-300"
-                          : "border-neutral-800 bg-neutral-950 text-neutral-400"
-                      }`}
-                    >
-                      GPU
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setAccelerator("cpu")}
-                      className={`flex-1 py-2.5 rounded-lg border text-sm transition-colors ${
-                        accelerator === "cpu"
-                          ? "border-cyan-600 bg-cyan-950/50 text-cyan-300"
-                          : "border-neutral-800 bg-neutral-950 text-neutral-400"
-                      }`}
-                    >
-                      CPU
-                    </button>
-                  </div>
-                  <label className="mt-3 flex items-start gap-2 text-xs text-neutral-500 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={fallbackCpu}
-                      onChange={(e) => setFallbackCpu(e.target.checked)}
-                      className="mt-0.5"
-                    />
-                    <span>
-                      If GPU fails (quota), fall back to CPU automatically.
-                    </span>
-                  </label>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="block text-xs text-neutral-400">
-                    Idle kill (sec)
-                    <input
-                      type="number"
-                      min={30}
-                      max={3600}
-                      value={idleTimeout}
-                      onChange={(e) => setIdleTimeout(Number(e.target.value))}
-                      className="mt-1 w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm"
-                    />
-                  </label>
-                  <label className="block text-xs text-neutral-400">
-                    Max lifetime (sec)
-                    <input
-                      type="number"
-                      min={300}
-                      max={43200}
-                      value={maxLifetime}
-                      onChange={(e) => setMaxLifetime(Number(e.target.value))}
-                      className="mt-1 w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm"
-                    />
-                  </label>
-                </div>
-
-                <button
-                  onClick={launchKaggle}
-                  disabled={
-                    sessionBusy ||
-                    !username.trim() ||
-                    (!apiToken.trim() && !apiKey.trim())
-                  }
-                  className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-cyan-700 hover:bg-cyan-600 disabled:opacity-40 text-white text-sm font-medium transition-colors"
-                >
-                  <Rocket size={16} /> Launch on Kaggle
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-4 rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
-                <div className="flex items-start gap-2 text-xs text-neutral-500">
-                  <Link2 size={14} className="mt-0.5 shrink-0 text-cyan-600" />
-                  <p>
-                    Run the FastAPI backend locally, then paste its URL.
-                  </p>
-                </div>
-                <label className="block text-xs text-neutral-400">
-                  Backend URL
-                  <input
-                    value={localUrl}
-                    onChange={(e) => setLocalUrl(e.target.value)}
-                    className="mt-1 w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2.5 text-sm font-mono"
-                    placeholder="http://127.0.0.1:8000"
-                  />
-                </label>
-                <button
-                  onClick={attachLocal}
-                  disabled={sessionBusy || !localUrl.trim()}
-                  className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-cyan-700 hover:bg-cyan-600 disabled:opacity-40 text-white text-sm font-medium transition-colors"
-                >
-                  <Link2 size={16} /> Connect
-                </button>
-              </div>
-            )}
-
-            {sessionError && (
-              <p className="text-xs text-red-400 bg-red-950/30 border border-red-900/40 rounded-lg p-3 whitespace-pre-wrap">
-                {sessionError}
-              </p>
-            )}
-
-            {messages.length > 0 && (
-              <p className="text-xs text-neutral-600 text-center">
-                {messages.length} encrypted message
-                {messages.length === 1 ? "" : "s"} will reappear after you
-                connect.
-              </p>
-            )}
-          </div>
-        </main>
-      </div>
-    );
-  }
-
-  // ── Chat ────────────────────────────────────────────────────────────────
+  // ── Main CLI shell (always — setup is a panel, not a dead-end page) ─────
   return (
-    <div className="flex flex-col h-screen bg-neutral-950 text-neutral-200 font-sans selection:bg-cyan-900 selection:text-cyan-50">
-      <header className="flex items-center justify-between p-4 bg-neutral-900 border-b border-neutral-800 shadow-md">
-        <div className="flex items-center gap-3">
-          <div className="p-2 bg-cyan-950 rounded-lg text-cyan-400">
-            <Cpu size={24} />
-          </div>
-          <div>
-            <h1 className="text-lg font-bold tracking-wider text-neutral-100">
-              EDGERUNNER
-            </h1>
-            <p className="text-xs text-neutral-400">
-              {phase === "kaggle"
-                ? "Kaggle · encrypted chat · kill on close"
-                : "Local backend · encrypted chat"}
-            </p>
-          </div>
+    <div className="er-shell min-h-screen flex flex-col font-mono text-sm">
+      {/* Title bar */}
+      <header className="flex items-center gap-3 px-3 sm:px-4 py-2 border-b border-[var(--border)] bg-[var(--bg-panel)] shrink-0">
+        <Terminal size={16} className="text-[var(--accent)] shrink-0" />
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <span className="text-[var(--accent)] tracking-widest text-xs font-semibold shrink-0">
+            EDGERUNNER
+          </span>
+          <span className="text-[var(--dim)] hidden sm:inline">│</span>
+          <span className="text-[var(--muted)] text-xs truncate">
+            agent harness
+          </span>
         </div>
-
-        <div className="flex items-center gap-3 text-sm">
-          {session && (
-            <div
-              className={`hidden sm:flex items-center gap-2 px-3 py-1.5 bg-neutral-950 rounded-full border border-neutral-800 ${stateColor(session.state)}`}
+        <div className="flex items-center gap-2 sm:gap-3 text-xs shrink-0">
+          <span className="flex items-center gap-1.5 text-[var(--muted)]">
+            <span className={`er-status-dot ${statusKind}`} />
+            {isOnline && modelReady
+              ? "ready"
+              : isOnline
+                ? "booting"
+                : backendUrl
+                  ? "down"
+                  : "idle"}
+          </span>
+          {modelName && (
+            <button
+              type="button"
+              onClick={() => void openModelPicker()}
+              className="hidden sm:inline text-[var(--info)] hover:underline truncate max-w-[10rem]"
+              title="Switch model"
             >
-              {session.state === "online" ? (
-                <Cloud size={14} />
-              ) : (
-                <Loader2 size={14} className="animate-spin" />
-              )}
-              <span className="capitalize">{session.state}</span>
-              <span className="text-neutral-600">·</span>
-              <span className="uppercase text-neutral-400">
-                {session.accelerator}
-              </span>
-            </div>
+              {modelName}
+            </button>
           )}
-
-          <div className="flex items-center gap-2 px-3 py-1.5 bg-neutral-950 rounded-full border border-neutral-800">
-            {isOnline ? (
-              <>
-                <CheckCircle2
-                  size={14}
-                  className={
-                    modelReady ? "text-emerald-500" : "text-amber-400"
-                  }
-                />
-                <span
-                  className={
-                    modelReady ? "text-emerald-500/80" : "text-amber-400/90"
-                  }
-                >
-                  {modelReady
-                    ? "Engine Online"
-                    : "API online · loading model…"}
-                </span>
-              </>
-            ) : (
-              <>
-                <XCircle size={14} className="text-red-500" />
-                <span className="text-red-500/80">
-                  {backendUrl ? "Disconnected" : "No session"}
-                </span>
-              </>
-            )}
-          </div>
-
+          {backendUrl && (
+            <button
+              type="button"
+              onClick={() => void openModelPicker()}
+              className="text-[var(--muted)] hover:text-[var(--fg)] px-1.5 py-0.5 border border-[var(--border)] rounded"
+              title="Models"
+            >
+              model
+            </button>
+          )}
+          {backendUrl && (
+            <button
+              type="button"
+              onClick={() => void stopSession()}
+              disabled={sessionBusy}
+              className="text-[var(--danger)] hover:brightness-125 px-1.5 py-0.5"
+              title="Stop Kaggle session"
+            >
+              <Square size={12} className="inline" /> stop
+            </button>
+          )}
           <button
-            onClick={() => setShowSettings((v) => !v)}
-            className="p-2 hover:bg-neutral-800 rounded-full transition-colors"
-            title="Session settings"
+            type="button"
+            onClick={() => setShowSettings(true)}
+            className="text-[var(--muted)] hover:text-[var(--fg)] p-1"
+            title="Settings"
           >
-            <Settings2 size={20} className="text-neutral-400" />
+            <Settings2 size={15} />
           </button>
         </div>
       </header>
 
-      {showSettings && (
-        <section className="border-b border-neutral-800 bg-neutral-900/80 p-4">
-          <div className="max-w-3xl mx-auto space-y-3 text-sm">
-            <div className="flex flex-wrap gap-2">
-              <button
-                onClick={stopSession}
-                disabled={sessionBusy}
-                className="flex items-center gap-2 px-4 py-2 rounded-xl border border-red-900/60 bg-red-950/30 hover:bg-red-950/60 text-red-300 text-sm"
-              >
-                <Square size={14} /> Stop & teardown
-              </button>
-              <button
-                onClick={() => {
-                  void stopSession();
-                }}
-                className="flex items-center gap-2 px-4 py-2 rounded-xl border border-neutral-700 text-neutral-400 text-sm hover:bg-neutral-800"
-              >
-                Back to setup
-              </button>
-              <button
-                onClick={clearChat}
-                className="flex items-center gap-2 px-4 py-2 rounded-xl border border-neutral-700 text-neutral-400 text-sm hover:bg-neutral-800"
-              >
-                <Trash2 size={14} /> Clear chat
-              </button>
-              <button
-                onClick={async () => {
-                  const meta = await readMeta();
-                  lockVault();
-                  setLockedVaultMode(meta?.mode || "device");
-                  setPhase("setup");
-                  setBackendUrl("");
-                  setVaultGate("need_passphrase");
-                }}
-                className="flex items-center gap-2 px-4 py-2 rounded-xl border border-neutral-700 text-neutral-400 text-sm hover:bg-neutral-800"
-              >
-                <Lock size={14} /> Lock vault
-              </button>
-              <button
-                onClick={async () => {
-                  if (
-                    confirm(
-                      "Wipe vault? Removes encrypted credentials and chat from this browser."
-                    )
-                  ) {
-                    await wipeVault();
-                    setMessages([]);
-                    setApiToken("");
-                    setApiKey("");
-                    setHasStoredCreds(false);
-                    setPhase("setup");
-                    setVaultGate("create");
-                  }
-                }}
-                className="flex items-center gap-2 px-4 py-2 rounded-xl border border-red-900/40 text-red-400/80 text-sm hover:bg-red-950/30"
-              >
-                Wipe vault
-              </button>
-            </div>
-            {backendUrl && (
-              <p className="text-xs font-mono text-cyan-500/80 break-all">
-                {backendUrl}
-              </p>
-            )}
-            {session?.kernel_ref && (
-              <p className="text-xs text-neutral-500">
-                kernel{" "}
-                <a
-                  className="text-neutral-400 hover:underline"
-                  href={`https://www.kaggle.com/code/${session.kernel_ref}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  {session.kernel_ref}
-                </a>
-              </p>
-            )}
-            {progressMsg && (
-              <p className="text-xs text-amber-400/80">{progressMsg}</p>
-            )}
-            {sessionError && (
-              <p className="text-xs text-red-400">{sessionError}</p>
-            )}
-          </div>
-        </section>
+      {/* Status strip */}
+      {(progressMsg || sessionBusy) && (
+        <div className="px-4 py-1.5 text-xs text-[var(--warn)] border-b border-[var(--border)] bg-[#1a1608] flex items-center gap-2">
+          <Loader2 size={12} className="animate-spin shrink-0" />
+          <span className="truncate">
+            {progressMsg || "working…"}
+          </span>
+        </div>
       )}
 
-      <main className="flex-1 overflow-y-auto p-4 md:p-8 space-y-6">
+      {/* Transcript */}
+      <main className="flex-1 overflow-y-auto px-3 sm:px-6 py-4 space-y-3">
         {messages.length === 0 && (
-          <div className="flex flex-col items-center justify-center h-full text-neutral-500 space-y-4">
-            <Terminal size={48} className="opacity-20" />
-            <p className="text-center max-w-md text-sm">
-              {modelReady
-                ? "Session ready. Give the agent a coding task."
-                : backendUrl
-                  ? "Backend is up — model may still be downloading on first boot."
-                  : "Connect a backend to start chatting."}
+          <div className="text-[var(--muted)] text-xs space-y-1 pt-8 max-w-xl">
+            <p>
+              <span className="text-[var(--prompt)]">›</span> EdgeRunner CLI
+              agent
             </p>
-            <p className="text-xs text-neutral-600 flex items-center gap-1">
-              <Zap size={12} /> Chat encrypted at rest (AES-256-GCM)
+            <p className="pl-3">
+              chat casually · prefix coding with{" "}
+              <code className="text-[var(--accent)]">/code</code>
+            </p>
+            <p className="pl-3">
+              {configured
+                ? "credentials saved — open settings only to change them"
+                : "open settings to launch Kaggle or attach a local backend"}
             </p>
           </div>
         )}
 
-        {messages.map((msg, idx) => (
-          <div
-            key={idx}
-            className={`flex flex-col ${msg.role === "user" ? "items-end" : "items-start"}`}
-          >
-            {msg.role === "assistant" &&
-              msg.thoughts &&
-              msg.thoughts.length > 0 && (
-                <div className="mb-2 max-w-[85%] md:max-w-[70%] w-full">
-                  <div className="text-xs text-cyan-600 mb-1 flex items-center gap-2 font-mono ml-2">
-                    <Terminal size={12} /> Agent Reflection Logs
-                  </div>
-                  <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-3 space-y-3 font-mono text-xs text-neutral-400 overflow-x-auto">
-                    {msg.thoughts.map((thought, i) => (
-                      <div
-                        key={i}
-                        className="border-l-2 border-neutral-700 pl-3"
-                      >
-                        {thought}
-                      </div>
-                    ))}
-                  </div>
+        {messages.map((m, i) => {
+          if (m.role === "system") {
+            return (
+              <div
+                key={i}
+                className="text-xs text-[var(--muted)] flex gap-2 items-start"
+              >
+                <span className="text-[var(--dim)] select-none">#</span>
+                <span>{m.content}</span>
+              </div>
+            );
+          }
+          if (m.role === "user") {
+            return (
+              <div key={i} className="flex gap-2 items-start">
+                <span className="text-[var(--prompt)] select-none shrink-0">
+                  ›
+                </span>
+                <div className="text-[var(--fg)] whitespace-pre-wrap break-words flex-1">
+                  {m.content}
                 </div>
-              )}
-
-            <div
-              className={`max-w-[85%] md:max-w-[70%] p-4 rounded-2xl ${
-                msg.role === "user"
-                  ? "bg-cyan-900/40 border border-cyan-800/50 rounded-tr-none text-cyan-50"
-                  : "bg-neutral-800/50 border border-neutral-700/50 rounded-tl-none"
-              }`}
-            >
-              <div className="prose prose-invert prose-p:leading-relaxed prose-pre:bg-neutral-900 prose-pre:border prose-pre:border-neutral-700 max-w-none">
-                <ReactMarkdown
-                  // No rehype-raw — markdown cannot inject HTML/scripts
-                  skipHtml
-                  urlTransform={(url) => {
-                    // Block javascript: / data: navigation
-                    if (/^(https?:|mailto:)/i.test(url)) return url;
-                    return "";
-                  }}
-                >
-                  {msg.content}
-                </ReactMarkdown>
+              </div>
+            );
+          }
+          return (
+            <div key={i} className="flex gap-2 items-start">
+              <span className="text-[var(--info)] select-none shrink-0">
+                ‹
+              </span>
+              <div className="flex-1 min-w-0">
+                {m.thoughts && m.thoughts.length > 0 && (
+                  <details className="mb-1 text-xs text-[var(--muted)]">
+                    <summary className="cursor-pointer hover:text-[var(--fg)]">
+                      trace ({m.thoughts.length})
+                    </summary>
+                    <pre className="mt-1 whitespace-pre-wrap text-[10px] text-[var(--dim)] border-l border-[var(--border)] pl-2">
+                      {m.thoughts.join("\n")}
+                    </pre>
+                  </details>
+                )}
+                <div className="er-md text-[var(--fg)]">
+                  <ReactMarkdown>{m.content}</ReactMarkdown>
+                </div>
               </div>
             </div>
-          </div>
-        ))}
-
-        {isLoading && (
-          <div className="flex items-start max-w-[70%]">
-            <div className="bg-neutral-800/50 border border-neutral-700/50 p-4 rounded-2xl rounded-tl-none animate-pulse text-cyan-500/70 text-sm font-mono flex items-center gap-2">
-              <Terminal size={16} className="animate-bounce" /> Harness is
-              thinking…
-            </div>
-          </div>
-        )}
+          );
+        })}
         <div ref={messagesEndRef} />
       </main>
 
-      <footer className="p-4 bg-neutral-900 border-t border-neutral-800">
-        <div className="max-w-4xl mx-auto flex items-end gap-2">
+      {/* Composer */}
+      <footer className="border-t border-[var(--border)] bg-[var(--bg-panel)] p-3 shrink-0">
+        {!backendUrl && (
+          <div className="mb-2 flex flex-wrap gap-2 text-xs">
+            {hasStoredCreds || username ? (
+              <button
+                type="button"
+                disabled={sessionBusy}
+                onClick={() => void launchKaggle()}
+                className="px-3 py-1.5 rounded border border-[var(--accent-dim)] text-[var(--accent)] hover:bg-[#0f1a10]"
+              >
+                {sessionBusy ? "launching…" : "▶ launch kaggle"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setShowSettings(true)}
+                className="px-3 py-1.5 rounded border border-[var(--border)] text-[var(--muted)] hover:text-[var(--fg)]"
+              >
+                configure backend
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setSetupTab("local");
+                setShowSettings(true);
+              }}
+              className="px-3 py-1.5 rounded border border-[var(--border)] text-[var(--muted)] hover:text-[var(--fg)]"
+            >
+              local
+            </button>
+          </div>
+        )}
+        <div className="flex gap-2 items-end max-w-4xl mx-auto">
+          <span className="text-[var(--prompt)] pb-2.5 select-none shrink-0">
+            ›
+          </span>
           <textarea
+            ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                handleSend();
+                void handleSend();
               }
             }}
-            placeholder={
-              backendUrl ? "Give the agent a task…" : "Connect a backend first…"
-            }
-            disabled={!backendUrl}
-            className="flex-1 bg-neutral-950 border border-neutral-800 rounded-xl p-4 text-neutral-200 focus:outline-none focus:border-cyan-700 focus:ring-1 focus:ring-cyan-700 resize-none disabled:opacity-50"
             rows={1}
-            style={{ minHeight: "56px", maxHeight: "200px" }}
+            placeholder={
+              backendUrl
+                ? modelReady
+                  ? "message · /code for harness · shift+enter newline"
+                  : "backend up — model still loading…"
+                : "launch a session first…"
+            }
+            disabled={isLoading || modelSwitching}
+            className="flex-1 bg-transparent border-0 outline-none resize-none text-sm text-[var(--fg)] placeholder:text-[var(--dim)] max-h-32 py-2"
           />
           <button
-            onClick={handleSend}
-            disabled={!input.trim() || isLoading || !backendUrl}
-            className="p-4 bg-cyan-700 hover:bg-cyan-600 disabled:opacity-50 disabled:hover:bg-cyan-700 text-white rounded-xl transition-colors flex items-center justify-center"
+            type="button"
+            onClick={() => void handleSend()}
+            disabled={isLoading || !input.trim()}
+            className="p-2 text-[var(--accent)] disabled:text-[var(--dim)] hover:brightness-125"
           >
-            <Send size={20} />
+            {isLoading ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <Send size={16} />
+            )}
+          </button>
+        </div>
+        <div className="flex justify-between mt-1 text-[10px] text-[var(--dim)] max-w-4xl mx-auto px-5">
+          <span>
+            {phase !== "setup" ? phase : "—"}
+            {session?.accelerator ? ` · ${session.accelerator}` : ""}
+          </span>
+          <button
+            type="button"
+            onClick={clearChat}
+            className="hover:text-[var(--muted)]"
+          >
+            clear
           </button>
         </div>
       </footer>
+
+      {/* Settings drawer */}
+      {showSettings && (
+        <div className="fixed inset-0 z-50 flex justify-end bg-black/60">
+          <button
+            type="button"
+            className="flex-1"
+            aria-label="Close"
+            onClick={() => setShowSettings(false)}
+          />
+          <aside className="w-full max-w-md h-full bg-[var(--bg-panel)] border-l border-[var(--border)] overflow-y-auto p-4 space-y-4 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="text-[var(--accent)] tracking-wider">
+                SETTINGS
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowSettings(false)}
+                className="text-[var(--muted)] hover:text-[var(--fg)]"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="flex rounded border border-[var(--border)] overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setSetupTab("kaggle")}
+                className={`flex-1 py-2 ${
+                  setupTab === "kaggle"
+                    ? "bg-[#0f1a10] text-[var(--accent)]"
+                    : "text-[var(--muted)]"
+                }`}
+              >
+                kaggle
+              </button>
+              <button
+                type="button"
+                onClick={() => setSetupTab("local")}
+                className={`flex-1 py-2 ${
+                  setupTab === "local"
+                    ? "bg-[#0f1a10] text-[var(--accent)]"
+                    : "text-[var(--muted)]"
+                }`}
+              >
+                local
+              </button>
+            </div>
+
+            {setupTab === "kaggle" ? (
+              <div className="space-y-3">
+                {hasStoredCreds && (
+                  <div className="flex items-center justify-between text-[var(--accent)] border border-[var(--accent-dim)] rounded px-2 py-1.5">
+                    <span className="flex items-center gap-1">
+                      <Shield size={12} /> credentials saved
+                    </span>
+                    <button
+                      type="button"
+                      onClick={forgetCredentials}
+                      className="text-[var(--muted)] hover:text-[var(--danger)]"
+                    >
+                      forget
+                    </button>
+                  </div>
+                )}
+                <label className="block text-[var(--muted)]">
+                  username
+                  <input
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    className="mt-1 w-full bg-[var(--bg)] border border-[var(--border)] rounded px-2 py-2 text-[var(--fg)]"
+                  />
+                </label>
+                <label className="block text-[var(--muted)]">
+                  api token
+                  <input
+                    type="password"
+                    value={apiToken}
+                    onChange={(e) => setApiToken(e.target.value)}
+                    placeholder={hasStoredCreds ? "•••• saved" : "KGAT_…"}
+                    className="mt-1 w-full bg-[var(--bg)] border border-[var(--border)] rounded px-2 py-2 text-[var(--fg)]"
+                  />
+                </label>
+                <label className="block text-[var(--muted)]">
+                  legacy key (optional)
+                  <input
+                    type="password"
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    className="mt-1 w-full bg-[var(--bg)] border border-[var(--border)] rounded px-2 py-2 text-[var(--fg)]"
+                  />
+                </label>
+                <div className="flex gap-2">
+                  {(["gpu", "cpu"] as const).map((a) => (
+                    <button
+                      key={a}
+                      type="button"
+                      onClick={() => setAccelerator(a)}
+                      className={`flex-1 py-1.5 rounded border ${
+                        accelerator === a
+                          ? "border-[var(--accent-dim)] text-[var(--accent)]"
+                          : "border-[var(--border)] text-[var(--muted)]"
+                      }`}
+                    >
+                      {a}
+                    </button>
+                  ))}
+                </div>
+                <label className="flex items-center gap-2 text-[var(--muted)]">
+                  <input
+                    type="checkbox"
+                    checked={fallbackCpu}
+                    onChange={(e) => setFallbackCpu(e.target.checked)}
+                  />
+                  cpu fallback if gpu busy
+                </label>
+                <label className="flex items-center gap-2 text-[var(--muted)]">
+                  <input
+                    type="checkbox"
+                    checked={rememberCreds}
+                    onChange={(e) => setRememberCreds(e.target.checked)}
+                  />
+                  remember credentials (encrypted)
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="text-[var(--muted)]">
+                    idle kill (s)
+                    <input
+                      type="number"
+                      value={idleTimeout}
+                      onChange={(e) => setIdleTimeout(Number(e.target.value))}
+                      className="mt-1 w-full bg-[var(--bg)] border border-[var(--border)] rounded px-2 py-1.5"
+                    />
+                  </label>
+                  <label className="text-[var(--muted)]">
+                    max life (s)
+                    <input
+                      type="number"
+                      value={maxLifetime}
+                      onChange={(e) => setMaxLifetime(Number(e.target.value))}
+                      className="mt-1 w-full bg-[var(--bg)] border border-[var(--border)] rounded px-2 py-1.5"
+                    />
+                  </label>
+                </div>
+                <p className="text-[var(--dim)] leading-relaxed">
+                  refresh keeps the session (soft detach + reconnect). stop /
+                  idle timeout kills Kaggle. page close → ~60s detach grace.
+                </p>
+                <button
+                  type="button"
+                  disabled={sessionBusy}
+                  onClick={() => void launchKaggle()}
+                  className="w-full py-2.5 rounded bg-[var(--accent-dim)] text-[var(--accent)] hover:brightness-110 disabled:opacity-50"
+                >
+                  {sessionBusy ? "launching…" : "launch kaggle"}
+                </button>
+                {sessionError && (
+                  <p className="text-[var(--danger)]">{sessionError}</p>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <label className="block text-[var(--muted)]">
+                  backend url
+                  <input
+                    value={localUrl}
+                    onChange={(e) => setLocalUrl(e.target.value)}
+                    className="mt-1 w-full bg-[var(--bg)] border border-[var(--border)] rounded px-2 py-2 text-[var(--fg)]"
+                  />
+                </label>
+                <button
+                  type="button"
+                  disabled={sessionBusy}
+                  onClick={() => void attachLocal()}
+                  className="w-full py-2.5 rounded bg-[var(--accent-dim)] text-[var(--accent)]"
+                >
+                  attach
+                </button>
+                {sessionError && (
+                  <p className="text-[var(--danger)]">{sessionError}</p>
+                )}
+              </div>
+            )}
+
+            {backendUrl && (
+              <div className="pt-2 border-t border-[var(--border)] space-y-2">
+                <p className="text-[var(--muted)] break-all">
+                  backend: {backendUrl}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void openModelPicker()}
+                  className="w-full py-2 border border-[var(--border)] rounded text-[var(--info)]"
+                >
+                  choose model
+                </button>
+              </div>
+            )}
+          </aside>
+        </div>
+      )}
+
+      {/* Model picker */}
+      {showModels && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 p-0 sm:p-4">
+          <div className="w-full max-w-lg max-h-[85vh] bg-[var(--bg-panel)] border border-[var(--border)] rounded-t-xl sm:rounded-xl overflow-hidden flex flex-col">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border)]">
+              <div>
+                <div className="text-[var(--accent)] text-xs tracking-wider">
+                  MODELS
+                </div>
+                <div className="text-[10px] text-[var(--muted)]">
+                  {modelHw || "scanning hardware…"} · no max-GB cap · unload+GC
+                  on switch
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowModels(false)}
+                className="text-[var(--muted)] hover:text-[var(--fg)]"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="overflow-y-auto flex-1 p-2 space-y-1">
+              {modelsLoading && (
+                <div className="flex items-center gap-2 p-4 text-[var(--muted)] text-xs">
+                  <Loader2 size={14} className="animate-spin" /> fetching
+                  options…
+                </div>
+              )}
+              {modelSwitching && (
+                <div className="p-2 text-xs text-[var(--warn)] border border-[var(--warn)]/30 rounded mb-2">
+                  unloading previous model + GC, then loading…
+                </div>
+              )}
+              {!modelsLoading &&
+                modelOptions.map((opt) => (
+                  <button
+                    key={`${opt.repo_id}/${opt.filename}`}
+                    type="button"
+                    disabled={modelSwitching}
+                    onClick={() => void switchToModel(opt)}
+                    className={`w-full text-left px-3 py-2.5 rounded border text-xs transition-colors ${
+                      opt.fits
+                        ? "border-[var(--border)] hover:border-[var(--accent-dim)] hover:bg-[#0f1a10]"
+                        : "border-[var(--border)] opacity-60 hover:opacity-90"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[var(--fg)] truncate font-medium">
+                        {opt.name}
+                      </span>
+                      <ChevronRight
+                        size={12}
+                        className="text-[var(--dim)] shrink-0"
+                      />
+                    </div>
+                    <div className="text-[var(--muted)] mt-0.5 flex flex-wrap gap-x-2">
+                      <span>
+                        {opt.file_size_gb} GB disk · ~{opt.required_ram_gb} GB
+                        ram
+                      </span>
+                      <span
+                        className={
+                          opt.fits ? "text-[var(--accent)]" : "text-[var(--danger)]"
+                        }
+                      >
+                        {opt.fit_status}
+                      </span>
+                      {opt.sharded && (
+                        <span className="text-[var(--warn)]">sharded</span>
+                      )}
+                    </div>
+                    <div className="text-[10px] text-[var(--dim)] truncate mt-0.5">
+                      {opt.repo_id} / {opt.filename}
+                    </div>
+                  </button>
+                ))}
+              {!modelsLoading && modelOptions.length === 0 && (
+                <p className="p-4 text-[var(--muted)] text-xs">
+                  no options — is the backend online?
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

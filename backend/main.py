@@ -19,8 +19,16 @@ from agent import (
     load_model,
     run_user_message,
     set_progress_callback,
+    switch_model,
+    unload_model,
 )
-from schemas import ChatRequest, ChatResponse, HeartbeatResponse, SessionStatus
+from schemas import (
+    ChatRequest,
+    ChatResponse,
+    HeartbeatResponse,
+    ModelLoadRequest,
+    SessionStatus,
+)
 from session_control import watchdog
 
 PUBLIC_URL: Optional[str] = os.environ.get("KP_PUBLIC_URL")
@@ -127,18 +135,64 @@ def _do_shutdown(reason: str) -> dict:
     return {"ok": True, "session": status, "message": "Shutdown scheduled"}
 
 
+def _do_detach(reason: str, grace: Optional[float] = None) -> dict:
+    """Soft leave — refresh can reconnect; true close expires grace."""
+    print(f"Detach requested: {reason}", flush=True)
+    status = watchdog.request_detach(reason=reason, grace=grace)
+    return {"ok": True, "session": status, "message": "Detach grace started"}
+
+
+@app.api_route("/session/detach", methods=["GET", "POST", "OPTIONS"])
+async def session_detach(
+    request: Request,
+    reason: str = Query("client_detached", max_length=200),
+    grace: float = Query(60.0, ge=5.0, le=600.0),
+):
+    """Soft client leave (pagehide/refresh). Heartbeat cancels the kill timer."""
+    if request.method == "OPTIONS":
+        return PlainTextResponse("ok", status_code=204)
+    final_reason = reason or "client_detached"
+    g = grace
+    if request.method == "POST":
+        try:
+            raw = await request.body()
+            if raw:
+                text = raw.decode("utf-8", errors="replace").strip()
+                if text.startswith("{"):
+                    body = json.loads(text)
+                    if isinstance(body, dict):
+                        if body.get("reason"):
+                            final_reason = str(body["reason"])[:200]
+                        if body.get("grace") is not None:
+                            g = float(body["grace"])
+                elif text:
+                    final_reason = text[:200]
+        except Exception:
+            pass
+    payload = _do_detach(final_reason, g)
+    if request.method == "GET" or "text/plain" in (
+        request.headers.get("accept") or ""
+    ):
+        return PlainTextResponse(
+            f"ok detach={final_reason}",
+            status_code=200,
+            headers={"Cache-Control": "no-store"},
+        )
+    return payload
+
+
 @app.api_route("/session/shutdown", methods=["GET", "POST", "OPTIONS"])
 async def session_shutdown(
     request: Request,
     reason: str = Query("client_requested", max_length=200),
 ):
     """
-    Tab close / stop.
+    Explicit stop only (UI Stop button). Refresh must use /session/detach.
 
     Multiple shapes so browsers can always deliver:
-      POST application/json  {"reason":"tab_closed"}
-      POST text/plain         tab_closed
-      GET  ?reason=tab_closed   (Image / sendBeacon / no preflight)
+      POST application/json  {"reason":"user_stop"}
+      POST text/plain         user_stop
+      GET  ?reason=user_stop
     """
     if request.method == "OPTIONS":
         return PlainTextResponse("ok", status_code=204)
@@ -162,7 +216,6 @@ async def session_shutdown(
             pass
 
     payload = _do_shutdown(final_reason)
-    # Plain text is sendBeacon-friendly and still kills the process.
     if request.method == "GET" or "text/plain" in (
         request.headers.get("accept") or ""
     ):
@@ -172,6 +225,56 @@ async def session_shutdown(
             headers={"Cache-Control": "no-store"},
         )
     return payload
+
+
+@app.get("/models")
+async def models_list():
+    """Model picker options + hardware (RAM-fit, no hard GB cap)."""
+    watchdog.heartbeat()
+    from model_manager import list_model_options
+
+    data = await asyncio.get_running_loop().run_in_executor(
+        None, list_model_options
+    )
+    return {
+        "ok": True,
+        "current": get_model_meta(),
+        **data,
+    }
+
+
+@app.post("/models/load")
+async def models_load(body: ModelLoadRequest):
+    """Switch model: unload + GC previous, then load requested GGUF."""
+    watchdog.heartbeat()
+    if not body.repo_id.strip() or not body.filename.strip():
+        return {"ok": False, "error": "repo_id and filename required"}
+
+    def _run():
+        if body.n_ctx:
+            os.environ["EDGERUNNER_N_CTX"] = str(int(body.n_ctx))
+        return switch_model(body.repo_id.strip(), body.filename.strip())
+
+    try:
+        meta = await asyncio.get_running_loop().run_in_executor(_CHAT_POOL, _run)
+        return {"ok": True, "model": meta}
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "model": get_model_meta(),
+        }
+
+
+@app.post("/models/unload")
+async def models_unload():
+    watchdog.heartbeat()
+
+    def _run():
+        return unload_model("api")
+
+    meta = await asyncio.get_running_loop().run_in_executor(_CHAT_POOL, _run)
+    return {"ok": True, "model": meta}
 
 
 def _chat_work(user_text: str, history_msgs: list, force_harness: bool, progress_q: queue.Queue):

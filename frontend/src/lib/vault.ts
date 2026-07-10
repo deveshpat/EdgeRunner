@@ -376,9 +376,13 @@ export function savePrefs(prefs: StoredPrefs): void {
   try {
     const prev = loadPrefs();
     // never allow secrets into prefs
-    const clean = { ...prev, ...prefs };
-    delete (clean as { apiToken?: string }).apiToken;
-    delete (clean as { apiKey?: string }).apiKey;
+    const clean: Record<string, unknown> = { ...prev, ...prefs };
+    // Explicit undefined clears a key (e.g. lastBackendUrl after stop)
+    for (const [k, v] of Object.entries(prefs)) {
+      if (v === undefined) delete clean[k];
+    }
+    delete clean.apiToken;
+    delete clean.apiKey;
     localStorage.setItem(PREFS_KEY, JSON.stringify(clean));
   } catch {
     /* ignore */

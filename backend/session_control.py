@@ -59,6 +59,12 @@ class SessionWatchdog:
     first_heartbeat_at: Optional[float] = None
     shutdown_requested: bool = False
     shutdown_reason: str = ""
+    # Soft detach: page refresh should reconnect before this fires.
+    # Hard tab close → no heartbeat → die after grace (not instant like refresh).
+    detach_deadline: Optional[float] = None
+    detach_grace_seconds: float = field(
+        default_factory=lambda: _env_float("KP_DETACH_GRACE_SECONDS", 60.0)
+    )
     _thread: Optional[threading.Thread] = None
     _stop: threading.Event = field(default_factory=threading.Event)
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -79,7 +85,24 @@ class SessionWatchdog:
             self.last_heartbeat_at = now
             if self.first_heartbeat_at is None:
                 self.first_heartbeat_at = now
+            # Reconnect after refresh cancels soft-detach
+            self.detach_deadline = None
         self._touch_heartbeat_file()
+        return self.status()
+
+    def request_detach(self, reason: str = "client_detached", grace: Optional[float] = None) -> dict:
+        """Soft leave (refresh/tab hide). Does NOT kill immediately.
+
+        Heartbeat within grace cancels. Used so page refresh ≠ tab close.
+        """
+        g = self.detach_grace_seconds if grace is None else float(grace)
+        with self._lock:
+            self.detach_deadline = time.time() + max(5.0, g)
+            # Do not set shutdown_requested yet — wait for deadline
+        print(
+            f"Client detach scheduled in {g:.0f}s ({reason}) — heartbeat cancels",
+            flush=True,
+        )
         return self.status()
 
     def request_shutdown(self, reason: str = "client_requested") -> dict:
@@ -87,6 +110,7 @@ class SessionWatchdog:
         with self._lock:
             self.shutdown_requested = True
             self.shutdown_reason = reason
+            self.detach_deadline = None
         status = self.status()
         # Immediate hard kill on a short timer so HTTP response can flush
         self.force_exit_soon(reason, delay=0.15)
@@ -120,6 +144,9 @@ class SessionWatchdog:
                 if self.last_heartbeat_at is None
                 else now - self.last_heartbeat_at
             )
+            detach_in = None
+            if self.detach_deadline is not None:
+                detach_in = max(0.0, self.detach_deadline - now)
             return {
                 "started_at": self.started_at,
                 "uptime_seconds": round(age, 1),
@@ -131,6 +158,11 @@ class SessionWatchdog:
                 "idle_timeout_seconds": self.idle_timeout_seconds,
                 "startup_grace_seconds": self.startup_grace_seconds,
                 "max_lifetime_seconds": self.max_lifetime_seconds,
+                "detach_grace_seconds": self.detach_grace_seconds,
+                "detach_deadline": self.detach_deadline,
+                "seconds_until_detach_kill": None
+                if detach_in is None
+                else round(detach_in, 1),
                 "shutdown_requested": self.shutdown_requested,
                 "shutdown_reason": self.shutdown_reason,
             }
@@ -142,6 +174,9 @@ class SessionWatchdog:
 
             now = time.time()
             age = now - self.started_at
+
+            if self.detach_deadline is not None and now >= self.detach_deadline:
+                return "client_detached"
 
             if self.max_lifetime_seconds > 0 and age >= self.max_lifetime_seconds:
                 return "max_lifetime_exceeded"

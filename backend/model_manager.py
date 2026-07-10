@@ -3,6 +3,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 import psutil
 from huggingface_hub import HfApi, hf_hub_download
@@ -471,7 +472,115 @@ def _download_gguf(repo_id: str, files: list[str], primary: str) -> str:
     )
 
 
-def get_or_download_model():
+def list_model_options(limit: int = 16) -> dict:
+    """Return hardware + model options for the UI model picker (no download)."""
+    scored, hw = scan_hardware_and_score()
+    # Always surface solid fallbacks even if HF trending is empty
+    fallbacks = []
+    for m in (
+        _fallback_model(hw["total_gb"]),
+        {
+            "repo_id": "Qwen/Qwen2.5-7B-Instruct-GGUF",
+            "name": "Qwen2.5-7B-Instruct-GGUF",
+            "filename": "qwen2.5-7b-instruct-q4_k_m.gguf",
+            "file_size_gb": 4.7,
+            "required_ram_gb": 7.0,
+            "safe_ctx": 4096,
+            "sharded": False,
+            "shard_files": ["qwen2.5-7b-instruct-q4_k_m.gguf"],
+            "fit_status": "✅ CATALOG",
+            "total_score": 50,
+        },
+        {
+            "repo_id": "Qwen/Qwen2.5-3B-Instruct-GGUF",
+            "name": "Qwen2.5-3B-Instruct-GGUF",
+            "filename": "qwen2.5-3b-instruct-q4_k_m.gguf",
+            "file_size_gb": 2.0,
+            "required_ram_gb": 3.5,
+            "safe_ctx": 4096,
+            "sharded": False,
+            "shard_files": ["qwen2.5-3b-instruct-q4_k_m.gguf"],
+            "fit_status": "✅ CATALOG",
+            "total_score": 40,
+        },
+        {
+            "repo_id": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+            "name": "Qwen2.5-1.5B-Instruct-GGUF",
+            "filename": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+            "file_size_gb": 1.0,
+            "required_ram_gb": 2.0,
+            "safe_ctx": 2048,
+            "sharded": False,
+            "shard_files": ["qwen2.5-1.5b-instruct-q4_k_m.gguf"],
+            "fit_status": "✅ CATALOG",
+            "total_score": 30,
+        },
+    ):
+        fallbacks.append(m)
+
+    seen: set[tuple[str, str]] = set()
+    options: list[dict] = []
+    for m in list(scored) + fallbacks:
+        key = (m.get("repo_id") or "", m.get("filename") or "")
+        if key in seen or not key[0] or not key[1]:
+            continue
+        seen.add(key)
+        ram_ok = m.get("required_ram_gb", 0) <= hw["total_gb"] + 0.01
+        options.append(
+            {
+                "repo_id": m["repo_id"],
+                "name": m.get("name") or m["repo_id"].split("/")[-1],
+                "filename": m["filename"],
+                "file_size_gb": round(float(m.get("file_size_gb") or 0), 2),
+                "required_ram_gb": round(float(m.get("required_ram_gb") or 0), 2),
+                "safe_ctx": int(m.get("safe_ctx") or 4096),
+                "sharded": bool(m.get("sharded")),
+                "fits": ram_ok,
+                "fit_status": m.get("fit_status") or ("✅ FIT" if ram_ok else "❌ INCOMP"),
+                "recommended": ram_ok and (m.get("total_score") or 0) > 0,
+            }
+        )
+        if len(options) >= limit:
+            break
+
+    # Sort: fitting first, then by required_ram ascending among fits, trending order already in scored
+    options.sort(key=lambda o: (0 if o["fits"] else 1, -o.get("file_size_gb", 0) if o["fits"] else o.get("file_size_gb", 0)))
+    return {
+        "hardware": hw,
+        "options": options,
+        "note": "No hard max-GB cap. Models that exceed free RAM are marked fits=false.",
+    }
+
+
+def _resolve_shards(repo_id: str, filename: str) -> tuple[list[str], bool]:
+    if not _is_sharded(filename):
+        return [filename], False
+    try:
+        info = api.model_info(repo_id, files_metadata=True)
+        pref = _shard_prefix(filename)
+        sibs = [
+            f.rfilename
+            for f in (info.siblings or [])
+            if f.rfilename.endswith(".gguf")
+            and pref
+            and f.rfilename.startswith(pref)
+        ]
+        if sibs:
+            return sorted(sibs), True
+    except Exception:
+        pass
+    return [filename], True
+
+
+def get_or_download_model(
+    repo_id: Optional[str] = None,
+    filename: Optional[str] = None,
+):
+    """Pick (or use requested) model, download if needed, return load config.
+
+    No hard-coded max GB. Selection is hardware-fit only unless caller passes
+    repo_id + filename (user/model picker / env).
+    """
     _set_status("hydrate", "Restoring cache from prior Kaggle output…")
     hydrate_model_cache_from_inputs()
 
@@ -503,57 +612,32 @@ def get_or_download_model():
         )
     print("-" * 88, flush=True)
 
-    # Optional hard cap by RAM/disk — NOT for "fast download". Default: hardware fit.
-    max_gb_env = os.environ.get("EDGERUNNER_MAX_MODEL_GB", "").strip()
-    max_gb = float(max_gb_env) if max_gb_env else None
+    env_repo = os.environ.get("EDGERUNNER_MODEL_REPO")
+    env_file = os.environ.get("EDGERUNNER_MODEL_FILE")
+    # Priority: explicit args (UI switch) > env force > best hardware fit
+    pick_repo = repo_id or env_repo
+    pick_file = filename or env_file
 
-    forced_repo = os.environ.get("EDGERUNNER_MODEL_REPO")
-    forced_file = os.environ.get("EDGERUNNER_MODEL_FILE")
-
-    if forced_repo and forced_file:
+    if pick_repo and pick_file:
+        shards, sharded = _resolve_shards(pick_repo, pick_file)
         selected_model = {
-            "repo_id": forced_repo,
-            "name": forced_repo.split("/")[-1],
-            "filename": forced_file,
-            "shard_files": [forced_file],
-            "sharded": _is_sharded(forced_file),
+            "repo_id": pick_repo,
+            "name": pick_repo.split("/")[-1],
+            "filename": pick_file,
+            "shard_files": shards,
+            "sharded": sharded,
             "safe_ctx": int(os.environ.get("EDGERUNNER_N_CTX", "4096")),
             "required_ram_gb": 0,
             "file_size_gb": 0,
         }
-        # If forced file is a shard, try to discover siblings via API
-        if selected_model["sharded"]:
-            try:
-                info = api.model_info(forced_repo, files_metadata=True)
-                pref = _shard_prefix(forced_file)
-                sibs = [
-                    f.rfilename
-                    for f in (info.siblings or [])
-                    if f.rfilename.endswith(".gguf")
-                    and pref
-                    and f.rfilename.startswith(pref)
-                ]
-                if sibs:
-                    selected_model["shard_files"] = sorted(sibs)
-            except Exception:
-                pass
-        print(f"\n🤖 Using forced model from env: {selected_model['name']}", flush=True)
+        print(f"\n🤖 Using requested model: {selected_model['name']} / {pick_file}", flush=True)
     else:
-        # Default: best-scoring model that FITs RAM (and optional max cap).
-        # Download time is not a selection criterion.
         fitting = [m for m in scored_models if m.get("total_score", 0) > 0]
-        if max_gb is not None:
-            fitting = [
-                m
-                for m in fitting
-                if m.get("file_size_gb", m.get("required_ram_gb", 99)) <= max_gb
-            ]
         selected_model = fitting[0] if fitting else _fallback_model(hw["total_gb"])
         print(
             f"\n🤖 Selected model: {selected_model['name']} "
             f"(~{selected_model.get('file_size_gb', selected_model.get('required_ram_gb', '?'))} GB on disk, "
-            f"~{selected_model.get('required_ram_gb', '?')} GB RAM) "
-            f"— pick is hardware-fit, not download-speed limited",
+            f"~{selected_model.get('required_ram_gb', '?')} GB RAM) — hardware-fit, no max-GB cap",
             flush=True,
         )
         if selected_model.get("sharded"):
@@ -563,17 +647,16 @@ def get_or_download_model():
                 flush=True,
             )
 
-    filename = selected_model["filename"]
-    base_name = Path(filename).name
-    shard_files = selected_model.get("shard_files") or [filename]
+    fn = selected_model["filename"]
+    base_name = Path(fn).name
+    shard_files = selected_model.get("shard_files") or [fn]
     model_path = find_existing_gguf(base_name)
 
-    # For sharded: require all parts present
     if model_path and selected_model.get("sharded"):
         parent = Path(model_path).parent
         if not all(
-            (parent / Path(fn).name).is_file() or find_existing_gguf(fn)
-            for fn in shard_files
+            (parent / Path(s).name).is_file() or find_existing_gguf(s)
+            for s in shard_files
         ):
             model_path = None
 
@@ -582,7 +665,7 @@ def get_or_download_model():
     else:
         _set_status("download", f"Downloading {selected_model['name']}…")
         model_path = _download_gguf(
-            selected_model["repo_id"], shard_files, primary=filename
+            selected_model["repo_id"], shard_files, primary=fn
         )
 
     if not Path(model_path).is_file():
@@ -593,4 +676,7 @@ def get_or_download_model():
         "path": model_path,
         "n_ctx": selected_model.get("safe_ctx", 4096),
         "name": selected_model.get("name", "unknown"),
+        "repo_id": selected_model.get("repo_id"),
+        "filename": fn,
     }
+

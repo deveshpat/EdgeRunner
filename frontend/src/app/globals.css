@@ -1,26 +1,130 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg: #0c0c0c;
+  --bg-panel: #121212;
+  --bg-elevated: #1a1a1a;
+  --border: #2a2a2a;
+  --fg: #e8e8e8;
+  --muted: #6b6b6b;
+  --dim: #3d3d3d;
+  --accent: #7ee787;
+  --accent-dim: #3d6b42;
+  --warn: #e3b341;
+  --danger: #f85149;
+  --info: #79c0ff;
+  --prompt: #7ee787;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-background: var(--bg);
+  --color-foreground: var(--fg);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+html,
+body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo,
+    Monaco, Consolas, monospace;
+}
+
+/* CLI scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #333 transparent;
+}
+
+/* Selection */
+::selection {
+  background: #264f2e;
+  color: #e8e8e8;
+}
+
+/* Markdown in assistant output */
+.er-md {
+  line-height: 1.55;
+  font-size: 0.875rem;
+}
+.er-md p {
+  margin: 0.4em 0;
+}
+.er-md pre {
+  background: #0a0a0a;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+  margin: 0.6em 0;
+  font-size: 0.8rem;
+}
+.er-md code {
+  font-family: inherit;
+  font-size: 0.85em;
+  background: #1f1f1f;
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+}
+.er-md pre code {
+  background: transparent;
+  padding: 0;
+}
+.er-md ul,
+.er-md ol {
+  margin: 0.4em 0;
+  padding-left: 1.25rem;
+}
+.er-md h1,
+.er-md h2,
+.er-md h3 {
+  font-weight: 600;
+  margin: 0.75em 0 0.35em;
+  color: var(--accent);
+}
+.er-md a {
+  color: var(--info);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Subtle scanline / CRT optional */
+.er-shell {
+  background: radial-gradient(ellipse at top, #141414 0%, #0c0c0c 55%);
+}
+
+.er-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  display: inline-block;
+}
+.er-status-dot.online {
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+}
+.er-status-dot.booting {
+  background: var(--warn);
+  box-shadow: 0 0 8px var(--warn);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.er-status-dot.offline {
+  background: var(--danger);
+}
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+.er-prompt::before {
+  content: "› ";
+  color: var(--prompt);
+  font-weight: 700;
 }

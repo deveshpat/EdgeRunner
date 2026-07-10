@@ -1,3 +1,4 @@
+import gc
 import re
 import subprocess
 import threading
@@ -34,28 +35,113 @@ def get_model_meta() -> dict:
     return meta
 
 
-def load_model() -> dict:
-    """Download / load the GGUF model. Safe to call multiple times (thread-safe)."""
+def _release_llama_cpp(obj) -> None:
+    """Best-effort free of native llama.cpp weights (avoid OOM on switch)."""
+    if obj is None:
+        return
+    try:
+        # langchain ChatLlamaCpp → .client is often the llama_cpp.Llama
+        client = getattr(obj, "client", None) or getattr(obj, "llm", None)
+        if client is not None:
+            close = getattr(client, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            # Drop internal model pointer if present
+            for attr in ("model", "_model", "ctx", "_ctx"):
+                if hasattr(client, attr):
+                    try:
+                        setattr(client, attr, None)
+                    except Exception:
+                        pass
+            del client
+    except Exception:
+        pass
+    try:
+        del obj
+    except Exception:
+        pass
+
+
+def unload_model(reason: str = "switch") -> dict:
+    """Drop the in-RAM model and force GC so a new load won't OOM."""
     global _local_llm, _model_meta
-    if _local_llm is not None:
-        return _model_meta
+    with _load_lock:
+        print(f"♻️ Unloading model ({reason})…", flush=True)
+        old = _local_llm
+        _local_llm = None
+        _release_llama_cpp(old)
+        # Multiple GC passes help with native + Python cycles
+        for _ in range(3):
+            gc.collect()
+        try:
+            import ctypes
+
+            libc = ctypes.CDLL("libc.so.6")
+            libc.malloc_trim(0)
+        except Exception:
+            pass
+        _model_meta = {
+            "ready": False,
+            "loading": False,
+            "phase": "unloaded",
+            "detail": reason,
+        }
+        try:
+            from model_manager import _set_status
+
+            _set_status("unloaded", reason, loading=False)
+        except Exception:
+            pass
+        print("♻️ Model unloaded + GC", flush=True)
+        return dict(_model_meta)
+
+
+def load_model(
+    repo_id: Optional[str] = None,
+    filename: Optional[str] = None,
+    *,
+    force_reload: bool = False,
+) -> dict:
+    """Download / load a GGUF. Thread-safe. force_reload unloads first."""
+    global _local_llm, _model_meta
 
     with _load_lock:
-        if _local_llm is not None:
+        if _local_llm is not None and not force_reload and not (repo_id and filename):
             return _model_meta
+
+        if _local_llm is not None and (force_reload or (repo_id and filename)):
+            # Inline unload without re-entering lock
+            old = _local_llm
+            _local_llm = None
+            _release_llama_cpp(old)
+            for _ in range(3):
+                gc.collect()
+            try:
+                import ctypes
+
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except Exception:
+                pass
 
         from langchain_community.chat_models import ChatLlamaCpp
         from model_manager import get_or_download_model, _set_status
 
         _model_meta = {"ready": False, "loading": True, "phase": "download"}
         try:
-            model_config = get_or_download_model()
+            model_config = get_or_download_model(
+                repo_id=repo_id, filename=filename
+            )
             print("\nLoading model into memory...", flush=True)
             _set_status("load", f"Loading {model_config.get('name', '')} into RAM…")
+            # Cap context by free RAM later if needed; default from picker
+            n_ctx = int(model_config.get("n_ctx") or 4096)
             _local_llm = ChatLlamaCpp(
                 model_path=model_config["path"],
                 temperature=0.2,
-                n_ctx=model_config["n_ctx"],
+                n_ctx=n_ctx,
                 max_tokens=1500,
                 n_gpu_layers=-1,
                 verbose=False,
@@ -63,7 +149,9 @@ def load_model() -> dict:
             _model_meta = {
                 "name": model_config.get("name", "local"),
                 "path": model_config["path"],
-                "n_ctx": model_config["n_ctx"],
+                "n_ctx": n_ctx,
+                "repo_id": model_config.get("repo_id"),
+                "filename": model_config.get("filename"),
                 "ready": True,
                 "loading": False,
                 "phase": "ready",
@@ -71,6 +159,7 @@ def load_model() -> dict:
             _set_status("ready", _model_meta["name"], loading=False)
             print("✅ SOTA Engine Loaded!", flush=True)
         except Exception as e:
+            _local_llm = None
             _model_meta = {
                 "ready": False,
                 "loading": False,
@@ -78,8 +167,16 @@ def load_model() -> dict:
                 "error": str(e),
             }
             _set_status("error", str(e), loading=False)
+            # GC after failed load too (partial maps)
+            for _ in range(3):
+                gc.collect()
             raise
         return _model_meta
+
+
+def switch_model(repo_id: str, filename: str) -> dict:
+    """Unload current model (GC) then load the chosen GGUF."""
+    return load_model(repo_id=repo_id, filename=filename, force_reload=True)
 
 
 def _llm():
