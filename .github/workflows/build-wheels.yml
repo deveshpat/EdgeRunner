@@ -94,6 +94,7 @@ jobs:
             "fastapi" "uvicorn[standard]" "pydantic" \
             "langchain" "langchain-community" "langgraph" \
             "huggingface-hub>=0.23,<2" "psutil" "httpx" \
+            "typing-extensions" "numpy" "diskcache" "jinja2" \
             -w dist --no-cache-dir
           # Explicitly do NOT include llama-cpp-python here
           rm -f dist/llama_cpp_python-*.whl || true
