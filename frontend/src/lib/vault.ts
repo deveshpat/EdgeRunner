@@ -1,0 +1,407 @@
+/**
+ * Device vault — encrypted credentials + chat at rest (IndexedDB).
+ *
+ * Modes:
+ *  - device: non-extractable AES key stored in IDB (auto-unlock same browser)
+ *  - passphrase: key wrapped with PBKDF2-derived KEK (user unlocks once per session)
+ *
+ * Nothing sensitive is written to localStorage in plaintext.
+ */
+
+import {
+  PBKDF2_ITERATIONS,
+  type EncryptedBlob,
+  decryptJson,
+  deriveKeyFromPassphrase,
+  encryptJson,
+  generateDeviceKey,
+  generateExtractableKey,
+  randomBytes,
+  b64encode,
+  b64decode,
+  wrapKey,
+  unwrapKey,
+} from "./crypto";
+import type { Message } from "./types";
+
+const DB_NAME = "edgerunner_vault";
+const DB_VERSION = 2;
+const STORE = "vault";
+
+export type VaultMode = "device" | "passphrase";
+
+export type VaultMeta = {
+  version: 2;
+  mode: VaultMode;
+  saltB64?: string;
+  iterations?: number;
+  createdAt: number;
+  /** Wrapped DEK when mode=passphrase */
+  wrappedDek?: EncryptedBlob;
+};
+
+export type KaggleSecret = {
+  username: string;
+  apiToken?: string;
+  apiKey?: string;
+};
+
+export type ChatRecord = {
+  id: string;
+  messages: Message[];
+  updated_at: number;
+  backend_url?: string;
+  kernel_ref?: string;
+  title?: string;
+};
+
+type VaultState = {
+  meta: VaultMeta;
+  key: CryptoKey;
+  unlocked: true;
+};
+
+let memory: VaultState | null = null;
+
+function openDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") {
+      reject(new Error("IndexedDB unavailable"));
+      return;
+    }
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE)) {
+        db.createObjectStore(STORE, { keyPath: "k" });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error("vault db open failed"));
+  });
+}
+
+async function idbPut(k: string, v: unknown): Promise<void> {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).put({ k, v });
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
+async function idbGet<T>(k: string): Promise<T | undefined> {
+  const db = await openDb();
+  const row = await new Promise<{ k: string; v: T } | undefined>(
+    (resolve, reject) => {
+      const tx = db.transaction(STORE, "readonly");
+      const req = tx.objectStore(STORE).get(k);
+      req.onsuccess = () => resolve(req.result as { k: string; v: T } | undefined);
+      req.onerror = () => reject(req.error);
+    }
+  );
+  db.close();
+  return row?.v;
+}
+
+async function idbDel(k: string): Promise<void> {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).delete(k);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
+export function isUnlocked(): boolean {
+  return memory !== null;
+}
+
+export function getVaultMode(): VaultMode | null {
+  return memory?.meta.mode ?? null;
+}
+
+export async function readMeta(): Promise<VaultMeta | null> {
+  return (await idbGet<VaultMeta>("meta")) || null;
+}
+
+export async function vaultExists(): Promise<boolean> {
+  return !!(await readMeta());
+}
+
+/** Create a new vault. Destroys any previous vault data. */
+export async function createVault(opts: {
+  mode: VaultMode;
+  passphrase?: string;
+}): Promise<void> {
+  await wipeVault();
+
+  if (opts.mode === "device") {
+    const key = await generateDeviceKey();
+    // Store CryptoKey directly in IDB (structured clone of CryptoKey)
+    await idbPut("deviceKey", key);
+    const meta: VaultMeta = {
+      version: 2,
+      mode: "device",
+      createdAt: Date.now(),
+    };
+    await idbPut("meta", meta);
+    memory = { meta, key, unlocked: true };
+    clearLockFlag();
+    return;
+  }
+
+  if (!opts.passphrase || opts.passphrase.length < 8) {
+    throw new Error("Passphrase must be at least 8 characters");
+  }
+  const salt = randomBytes(16);
+  const kek = await deriveKeyFromPassphrase(opts.passphrase, salt);
+  const dek = await generateExtractableKey();
+  const wrappedDek = await wrapKey(kek, dek);
+  // Re-import as non-extractable for session use
+  const raw = await crypto.subtle.exportKey("raw", dek);
+  const sessionKey = await crypto.subtle.importKey(
+    "raw",
+    raw,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+  const meta: VaultMeta = {
+    version: 2,
+    mode: "passphrase",
+    saltB64: b64encode(salt),
+    iterations: PBKDF2_ITERATIONS,
+    wrappedDek,
+    createdAt: Date.now(),
+  };
+  await idbPut("meta", meta);
+  memory = { meta, key: sessionKey, unlocked: true };
+  clearLockFlag();
+}
+
+/** Auto-unlock device vault; returns false if passphrase required, session-locked, or missing. */
+export async function tryAutoUnlock(): Promise<boolean> {
+  if (memory) return true;
+  if (isSessionLocked()) return false;
+  const meta = await readMeta();
+  if (!meta) return false;
+  if (meta.mode === "passphrase") return false;
+  const key = await idbGet<CryptoKey>("deviceKey");
+  if (!key) return false;
+  memory = { meta, key, unlocked: true };
+  clearLockFlag();
+  return true;
+}
+
+/** Re-open a device vault after session lock (no passphrase). */
+export async function unlockDeviceVault(): Promise<void> {
+  const meta = await readMeta();
+  if (!meta || meta.mode !== "device") {
+    throw new Error("Not a device vault");
+  }
+  const key = await idbGet<CryptoKey>("deviceKey");
+  if (!key) throw new Error("Device key missing");
+  memory = { meta, key, unlocked: true };
+  clearLockFlag();
+}
+
+export async function unlockWithPassphrase(passphrase: string): Promise<void> {
+  const meta = await readMeta();
+  if (!meta || meta.mode !== "passphrase" || !meta.saltB64 || !meta.wrappedDek) {
+    throw new Error("No passphrase vault on this device");
+  }
+  const salt = b64decode(meta.saltB64);
+  const kek = await deriveKeyFromPassphrase(
+    passphrase,
+    salt,
+    meta.iterations || PBKDF2_ITERATIONS
+  );
+  try {
+    const key = await unwrapKey(kek, meta.wrappedDek);
+    memory = { meta, key, unlocked: true };
+    clearLockFlag();
+  } catch {
+    throw new Error("Wrong passphrase");
+  }
+}
+
+const LOCK_FLAG = "edgerunner_vault_locked";
+
+export function lockVault(): void {
+  memory = null;
+  try {
+    sessionStorage.setItem(LOCK_FLAG, "1");
+  } catch {
+    /* ignore */
+  }
+}
+
+function clearLockFlag(): void {
+  try {
+    sessionStorage.removeItem(LOCK_FLAG);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function isSessionLocked(): boolean {
+  try {
+    return sessionStorage.getItem(LOCK_FLAG) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export async function wipeVault(): Promise<void> {
+  memory = null;
+  try {
+    const db = await openDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  } catch {
+    /* ignore */
+  }
+  // scrub legacy plaintext stores
+  try {
+    sessionStorage.removeItem("edgerunner_kaggle_secret");
+    localStorage.removeItem("edgerunner_last_chat");
+  } catch {
+    /* ignore */
+  }
+}
+
+function requireKey(): CryptoKey {
+  if (!memory) throw new Error("Vault is locked");
+  return memory.key;
+}
+
+export async function saveSecret(secret: KaggleSecret): Promise<void> {
+  const key = requireKey();
+  const blob = await encryptJson(key, secret);
+  await idbPut("credentials", blob);
+}
+
+export async function loadSecret(): Promise<KaggleSecret | null> {
+  if (!memory) return null;
+  const blob = await idbGet<EncryptedBlob>("credentials");
+  if (!blob) return null;
+  try {
+    return await decryptJson<KaggleSecret>(memory.key, blob);
+  } catch {
+    return null;
+  }
+}
+
+export async function clearSecret(): Promise<void> {
+  await idbDel("credentials");
+}
+
+export async function saveChat(record: ChatRecord): Promise<void> {
+  if (!memory) {
+    // Ensure vault exists for chat encryption
+    const exists = await vaultExists();
+    if (!exists) {
+      await createVault({ mode: "device" });
+    } else if (!(await tryAutoUnlock())) {
+      return; // locked passphrase vault — skip persist
+    }
+  }
+  const key = requireKey();
+  const blob = await encryptJson(key, record);
+  await idbPut(`chat:${record.id}`, blob);
+  await idbPut("chat:lastId", record.id);
+}
+
+export async function loadChat(id: string): Promise<ChatRecord | null> {
+  if (!memory) {
+    if (!(await tryAutoUnlock())) return null;
+  }
+  if (!memory) return null;
+  const blob = await idbGet<EncryptedBlob>(`chat:${id}`);
+  if (!blob) return null;
+  try {
+    return await decryptJson<ChatRecord>(memory.key, blob);
+  } catch {
+    return null;
+  }
+}
+
+export async function listChatIds(): Promise<string[]> {
+  // Simple: only track last id for now; expand later
+  const last = await idbGet<string>("chat:lastId");
+  return last ? [last] : [];
+}
+
+/** Non-secret prefs only (never tokens or message bodies). */
+const PREFS_KEY = "edgerunner_prefs_v2";
+
+export type StoredPrefs = {
+  username?: string;
+  mode?: "local" | "kaggle";
+  localBackendUrl?: string;
+  accelerator?: "cpu" | "gpu";
+  idleTimeout?: number;
+  maxLifetime?: number;
+  lastBackendUrl?: string;
+  rememberCredentials?: boolean;
+  vaultMode?: VaultMode;
+};
+
+export function loadPrefs(): StoredPrefs {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY);
+    if (!raw) {
+      // migrate old prefs key
+      const old = localStorage.getItem("edgerunner_prefs");
+      if (old) return JSON.parse(old) as StoredPrefs;
+      return {};
+    }
+    return JSON.parse(raw) as StoredPrefs;
+  } catch {
+    return {};
+  }
+}
+
+export function savePrefs(prefs: StoredPrefs): void {
+  try {
+    const prev = loadPrefs();
+    // never allow secrets into prefs
+    const clean = { ...prev, ...prefs };
+    delete (clean as { apiToken?: string }).apiToken;
+    delete (clean as { apiKey?: string }).apiKey;
+    localStorage.setItem(PREFS_KEY, JSON.stringify(clean));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** One-time migration from legacy plaintext sessionStorage / IDB chats. */
+export async function migrateLegacyIfNeeded(): Promise<void> {
+  try {
+    const legacy = sessionStorage.getItem("edgerunner_kaggle_secret");
+    if (legacy && memory) {
+      const parsed = JSON.parse(legacy) as KaggleSecret;
+      if (parsed.username || parsed.apiToken || parsed.apiKey) {
+        await saveSecret(parsed);
+      }
+      sessionStorage.removeItem("edgerunner_kaggle_secret");
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    localStorage.removeItem("edgerunner_last_chat");
+  } catch {
+    /* ignore */
+  }
+}

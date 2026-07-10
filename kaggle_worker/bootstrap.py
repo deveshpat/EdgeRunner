@@ -68,17 +68,195 @@ def materialize_files() -> None:
 
 
 
-def pip_install() -> None:
-    req = WORK / "backend" / "requirements.txt"
-    # Prefer CPU wheel for llama-cpp when on CPU sessions (faster install).
-    env = os.environ.copy()
-    if ACCELERATOR == "cpu":
-        env["CMAKE_ARGS"] = "-DGGML_NATIVE=OFF"
-    log("📦 Installing Python dependencies (this can take a few minutes)...")
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "-q", "-r", str(req)],
-        env=env,
+def _py_tag() -> str:
+    return f"cp{sys.version_info.major}{sys.version_info.minor}"
+
+
+def _fetch_url(url: str, dest: Path, timeout: int = 120) -> bool:
+    """Download url → dest. Returns True on success."""
+    try:
+        subprocess.check_call(
+            ["curl", "-fsSL", "--connect-timeout", "15", "-m", str(timeout), "-o", str(dest), url],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return dest.exists() and dest.stat().st_size > 0
+    except Exception:
+        try:
+            subprocess.check_call(
+                ["wget", "-q", "-O", str(dest), url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return dest.exists() and dest.stat().st_size > 0
+        except Exception:
+            return False
+
+
+def _load_wheels_index() -> dict:
+    """Fetch wheels/index.json from GitHub (raw → release mirror)."""
+    import json
+    import urllib.request
+
+    urls = [
+        os.environ.get("EDGERUNNER_WHEELS_INDEX", "").strip(),
+        "https://raw.githubusercontent.com/deveshpat/EdgeRunner/main/wheels/index.json",
+        "https://cdn.jsdelivr.net/gh/deveshpat/EdgeRunner@main/wheels/index.json",
+    ]
+    for url in urls:
+        if not url:
+            continue
+        try:
+            with urllib.request.urlopen(url, timeout=20) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except Exception as e:
+            log(f"  wheels index miss ({url.split('/')[2] if '//' in url else url}): {e}")
+    return {}
+
+
+def _install_prebuilt_llama(env: dict) -> bool:
+    """Try to install llama-cpp-python from our GitHub release wheels (seconds)."""
+    index = _load_wheels_index()
+    if not index:
+        return False
+
+    base = (
+        os.environ.get("EDGERUNNER_WHEELS_BASE", "").strip()
+        or index.get("base_url")
+        or "https://github.com/deveshpat/EdgeRunner/releases/download/wheels-v1"
     )
+    pkg = (index.get("packages") or {}).get("llama-cpp-python") or {}
+    wheels = pkg.get("wheels") or {}
+    tag = _py_tag()
+    accel = "gpu" if str(ACCELERATOR).lower() in ("gpu", "nvidia", "cuda") else "cpu"
+    # Prefer exact accel, then cpu fallback for gpu miss
+    keys = [f"{tag}-{accel}"]
+    if accel == "gpu":
+        keys.append(f"{tag}-cpu")
+
+    wheel_name = None
+    for k in keys:
+        if k in wheels:
+            wheel_name = wheels[k]
+            break
+    if not wheel_name:
+        log(f"  no prebuilt llama wheel key for {keys} in index")
+        return False
+
+    url = f"{base.rstrip('/')}/{wheel_name}"
+    dest = WORK / "wheels" / wheel_name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    log(f"  downloading prebuilt wheel: {wheel_name}")
+    if not _fetch_url(url, dest, timeout=180):
+        log(f"  wheel download failed: {url}")
+        return False
+
+    try:
+        subprocess.check_call(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "-q",
+                "--no-cache-dir",
+                str(dest),
+            ],
+            env=env,
+        )
+        log(f"  ✅ prebuilt llama-cpp-python installed ({accel})")
+        return True
+    except subprocess.CalledProcessError as e:
+        log(f"  prebuilt wheel install failed: {e}")
+        return False
+
+
+def _install_prebuilt_bundle(env: dict) -> bool:
+    """Optional: full wheels tarball for offline-ish install of all deps."""
+    base = os.environ.get(
+        "EDGERUNNER_WHEELS_BASE",
+        "https://github.com/deveshpat/EdgeRunner/releases/download/wheels-v1",
+    ).rstrip("/")
+    tag = _py_tag()
+    accel = "gpu" if str(ACCELERATOR).lower() in ("gpu", "nvidia", "cuda") else "cpu"
+    for name in (f"edgerunner-wheels-{tag}-{accel}.tar.gz", f"edgerunner-wheels-{tag}-cpu.tar.gz"):
+        url = f"{base}/{name}"
+        dest = WORK / name
+        log(f"  trying wheels bundle {name}…")
+        if not _fetch_url(url, dest, timeout=180):
+            continue
+        extract = WORK / "wheels_bundle"
+        extract.mkdir(parents=True, exist_ok=True)
+        try:
+            subprocess.check_call(["tar", "-xzf", str(dest), "-C", str(extract)])
+            subprocess.check_call(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "-q",
+                    "--no-cache-dir",
+                    "--no-index",
+                    f"--find-links={extract}",
+                    "-r",
+                    str(WORK / "backend" / "requirements.txt"),
+                ],
+                env=env,
+            )
+            log("  ✅ installed all deps from wheels bundle")
+            return True
+        except Exception as e:
+            log(f"  bundle install failed: {e}")
+    return False
+
+
+def pip_install() -> None:
+    """Fast path: prebuilt wheels from GitHub. Slow path: compile llama-cpp."""
+    req = WORK / "backend" / "requirements.txt"
+    env = os.environ.copy()
+    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    env["PIP_DEFAULT_TIMEOUT"] = "120"
+    # Avoid accidental source builds when a wheel exists on PyPI
+    env["PIP_PREFER_BINARY"] = "1"
+
+    log("📦 Installing Python dependencies (prefer prebuilt wheels)…")
+
+    # 1) Full offline-ish bundle if published
+    if _install_prebuilt_bundle(env):
+        log("✅ pip install complete (bundle)")
+        return
+
+    # 2) Prebuilt llama-cpp-python (the expensive compile) + binary PyPI rest
+    llama_ok = _install_prebuilt_llama(env)
+    if not llama_ok:
+        log("  ⚠️ no prebuilt llama wheel — will compile (slow). "
+            "Publish wheels via scripts/kaggle_build_wheels.py + publish_wheels.sh")
+        if str(ACCELERATOR).lower() in ("gpu", "nvidia", "cuda"):
+            env["CMAKE_ARGS"] = "-DGGML_CUDA=on"
+            env["FORCE_CMAKE"] = "1"
+        else:
+            env["CMAKE_ARGS"] = "-DGGML_NATIVE=OFF"
+            env["FORCE_CMAKE"] = "1"
+
+    # Install remaining requirements. If llama already installed, pip skips rebuild.
+    # --prefer-binary keeps pure/manylinux wheels snappy.
+    cmd = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "-q",
+        "--no-cache-dir",
+        "--prefer-binary",
+        "-r",
+        str(req),
+    ]
+    if llama_ok:
+        # Don't let pip try to upgrade llama from sdist
+        cmd.extend(["--upgrade-strategy", "only-if-needed"])
+
+    subprocess.check_call(cmd, env=env)
     log("✅ pip install complete")
 
 

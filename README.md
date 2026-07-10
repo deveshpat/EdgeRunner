@@ -13,10 +13,21 @@ Live UI: [https://deveshpat.github.io/EdgeRunner/](https://deveshpat.github.io/E
 3. **Local:** paste `http://127.0.0.1:8000` (or any reachable backend)
 4. Chat as usual
 5. **Close the tab:**  
-   - Chat history is stored in the browser (**IndexedDB**)  
+   - Chat stays **encrypted at rest** (AES-256-GCM in IndexedDB)  
    - A `sendBeacon` shutdown + missing heartbeats tear down the Kaggle worker (protects ~30 GPU hrs/month)
 
-Secrets stay in `sessionStorage` only (cleared when the tab closes). They are never written to IndexedDB or localStorage.
+### Device vault (credentials + chat)
+
+- **Default:** non-extractable WebCrypto key on this browser — token remembered encrypted, auto-unlock next visit  
+- **Optional passphrase:** PBKDF2 (600k) wraps the key — unlock once per session on shared machines  
+- Tokens are **never** stored in plaintext `localStorage` / `sessionStorage`  
+- See [SECURITY.md](SECURITY.md)
+
+### Fast Kaggle install (prebuilt wheels)
+
+Compiling `llama-cpp-python` every launch is the main delay. The worker installs
+**prebuilt Linux wheels** from the GitHub release tag [`wheels-v1`](https://github.com/deveshpat/EdgeRunner/releases/tag/wheels-v1)
+(see [wheels/README.md](wheels/README.md)). CI builds CPU wheels; GPU wheels are built once on Kaggle.
 
 ## Repo layout
 

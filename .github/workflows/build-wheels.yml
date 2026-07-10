@@ -1,0 +1,87 @@
+name: Build prebuilt wheels (CPU)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths:
+      - "backend/requirements.txt"
+      - "wheels/**"
+      - "scripts/kaggle_build_wheels.py"
+      - ".github/workflows/build-wheels.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  wheels:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install build tooling
+        run: |
+          python -m pip install -U pip wheel setuptools cmake ninja
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Build llama-cpp-python CPU wheel
+        env:
+          CMAKE_ARGS: "-DGGML_NATIVE=OFF"
+          FORCE_CMAKE: "1"
+        run: |
+          mkdir -p dist
+          pip wheel "llama-cpp-python==0.3.33" -w dist --no-deps --no-cache-dir
+
+      - name: Build remaining runtime wheels
+        run: |
+          pip wheel \
+            "fastapi" "uvicorn[standard]" "pydantic" \
+            "langchain" "langchain-community" "langgraph" \
+            "huggingface-hub" "psutil" "httpx" \
+            -w dist --no-cache-dir
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-cp${{ matrix.python-version }}
+          path: dist/*.whl
+
+  publish:
+    needs: wheels
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-wheels
+          merge-multiple: true
+
+      - name: Collect wheels
+        run: |
+          mkdir -p publish
+          find all-wheels -name '*.whl' -exec cp {} publish/ \;
+          ls -lah publish
+
+      - name: Publish / update release wheels-v1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view wheels-v1 >/dev/null 2>&1; then
+            gh release create wheels-v1 \
+              --title "Prebuilt wheels (Kaggle fast install)" \
+              --notes "Auto-built CPU wheels for EdgeRunner. GPU wheels: run scripts/kaggle_build_wheels.py on a Kaggle GPU session, then ./scripts/publish_wheels.sh."
+          fi
+          # clobber so re-runs refresh assets
+          gh release upload wheels-v1 publish/*.whl --clobber

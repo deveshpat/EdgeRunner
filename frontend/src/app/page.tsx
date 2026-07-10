@@ -17,6 +17,10 @@ import {
   Link2,
   HardDrive,
   Trash2,
+  Shield,
+  Lock,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import {
@@ -26,12 +30,23 @@ import {
 } from "@/lib/kaggle";
 import {
   clearSecret,
+  createVault,
+  isUnlocked,
   loadChat,
   loadPrefs,
   loadSecret,
+  lockVault,
+  migrateLegacyIfNeeded,
+  readMeta,
   saveChat,
   savePrefs,
   saveSecret,
+  tryAutoUnlock,
+  unlockDeviceVault,
+  unlockWithPassphrase,
+  vaultExists,
+  wipeVault,
+  type VaultMode,
 } from "@/lib/storage";
 import type {
   Accelerator,
@@ -43,7 +58,19 @@ import type {
 
 const CHAT_KEY = "current";
 
+type VaultGate = "loading" | "ready" | "need_passphrase" | "create";
+
 export default function EdgeRunnerUI() {
+  const [vaultGate, setVaultGate] = useState<VaultGate>("loading");
+  const [passphrase, setPassphrase] = useState("");
+  const [passphrase2, setPassphrase2] = useState("");
+  const [vaultModeChoice, setVaultModeChoice] = useState<VaultMode>("device");
+  const [lockedVaultMode, setLockedVaultMode] = useState<VaultMode | null>(
+    null
+  );
+  const [vaultError, setVaultError] = useState<string | null>(null);
+  const [showPass, setShowPass] = useState(false);
+
   const [phase, setPhase] = useState<ConnectionMode>("setup");
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -53,16 +80,17 @@ export default function EdgeRunnerUI() {
   const [modelReady, setModelReady] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
-  // Setup form
   const [setupTab, setSetupTab] = useState<"kaggle" | "local">("kaggle");
   const [username, setUsername] = useState("");
   const [apiToken, setApiToken] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [hasStoredCreds, setHasStoredCreds] = useState(false);
   const [localUrl, setLocalUrl] = useState("http://127.0.0.1:8000");
   const [accelerator, setAccelerator] = useState<Accelerator>("gpu");
   const [idleTimeout, setIdleTimeout] = useState(90);
   const [maxLifetime, setMaxLifetime] = useState(3600);
   const [fallbackCpu, setFallbackCpu] = useState(true);
+  const [rememberCreds, setRememberCreds] = useState(true);
 
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [sessionBusy, setSessionBusy] = useState(false);
@@ -82,8 +110,46 @@ export default function EdgeRunnerUI() {
     backendUrlRef.current = backendUrl;
   }, [backendUrl]);
 
-  // Restore prefs + chat + in-tab secrets
+  // ── Vault bootstrap ─────────────────────────────────────────────────────
   useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const exists = await vaultExists();
+        if (!exists) {
+          if (!cancelled) setVaultGate("create");
+          return;
+        }
+        const meta = await readMeta();
+        if (meta?.mode === "passphrase") {
+          if (!cancelled) {
+            setLockedVaultMode("passphrase");
+            setVaultGate("need_passphrase");
+          }
+          return;
+        }
+        const ok = await tryAutoUnlock();
+        if (!ok) {
+          if (!cancelled) {
+            setLockedVaultMode(meta?.mode || "device");
+            setVaultGate("need_passphrase");
+          }
+          return;
+        }
+        await migrateLegacyIfNeeded();
+        if (!cancelled) setVaultGate("ready");
+      } catch {
+        if (!cancelled) setVaultGate("create");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // After vault ready: restore prefs + encrypted secrets + chat
+  useEffect(() => {
+    if (vaultGate !== "ready") return;
     const prefs = loadPrefs();
     if (prefs.username) setUsername(prefs.username);
     if (prefs.localBackendUrl) setLocalUrl(prefs.localBackendUrl);
@@ -91,24 +157,29 @@ export default function EdgeRunnerUI() {
     if (prefs.idleTimeout) setIdleTimeout(prefs.idleTimeout);
     if (prefs.maxLifetime) setMaxLifetime(prefs.maxLifetime);
     if (prefs.mode === "local") setSetupTab("local");
-
-    const secret = loadSecret();
-    if (secret) {
-      setUsername(secret.username || prefs.username || "");
-      if (secret.apiToken) setApiToken(secret.apiToken);
-      if (secret.apiKey) setApiKey(secret.apiKey);
+    if (typeof prefs.rememberCredentials === "boolean") {
+      setRememberCreds(prefs.rememberCredentials);
     }
 
-    loadChat(CHAT_KEY).then((rec) => {
+    void (async () => {
+      const secret = await loadSecret();
+      if (secret) {
+        setUsername(secret.username || prefs.username || "");
+        if (secret.apiToken) setApiToken(secret.apiToken);
+        if (secret.apiKey) setApiKey(secret.apiKey);
+        setHasStoredCreds(!!(secret.apiToken || secret.apiKey));
+      }
+      const rec = await loadChat(CHAT_KEY);
       if (rec?.messages?.length) {
         setMessages(rec.messages);
         chatIdRef.current = rec.id;
       }
-    });
-  }, []);
+    })();
+  }, [vaultGate]);
 
-  // Persist messages
+  // Encrypted chat persistence
   useEffect(() => {
+    if (vaultGate !== "ready" || !isUnlocked()) return;
     if (messages.length === 0) return;
     const t = setTimeout(() => {
       void saveChat({
@@ -120,13 +191,13 @@ export default function EdgeRunnerUI() {
       });
     }, 400);
     return () => clearTimeout(t);
-  }, [messages, backendUrl, session?.kernel_ref]);
+  }, [messages, backendUrl, session?.kernel_ref, vaultGate]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Health check
+  // Health
   useEffect(() => {
     if (!backendUrl) {
       setIsOnline(null);
@@ -138,6 +209,7 @@ export default function EdgeRunnerUI() {
       try {
         const res = await fetch(`${backendUrl.replace(/\/$/, "")}/health`, {
           signal: AbortSignal.timeout(8000),
+          referrerPolicy: "no-referrer",
         });
         if (cancelled) return;
         setIsOnline(res.ok);
@@ -157,29 +229,30 @@ export default function EdgeRunnerUI() {
     };
   }, [backendUrl]);
 
-  // Heartbeat keeps Kaggle worker alive
+  // Heartbeat
   useEffect(() => {
     if (!backendUrl || isOnline === false || phase === "setup") return;
     const beat = () => {
       const url = `${backendUrlRef.current.replace(/\/$/, "")}/session/heartbeat`;
-      fetch(url, { method: "POST", keepalive: true }).catch(() => {});
+      fetch(url, {
+        method: "POST",
+        keepalive: true,
+        referrerPolicy: "no-referrer",
+      }).catch(() => {});
     };
     beat();
     const interval = setInterval(beat, 25000);
     return () => clearInterval(interval);
   }, [backendUrl, isOnline, phase]);
 
-  // Tab close → kill Kaggle session (chat already in IndexedDB)
+  // Tab close → kill Kaggle
   useEffect(() => {
     const shutdown = () => {
       const url = backendUrlRef.current;
       if (!url) return;
-      // Only auto-kill Kaggle-hosted backends (tunnel hosts), not pure localhost
-      // when user is in local mode — still send shutdown for tunneled sessions.
       const isTunnel =
         /trycloudflare\.com|loca\.lt|localtunnel\.me|bore\.pub/i.test(url);
       if (phase === "local" && !isTunnel) return;
-
       const endpoint = `${url.replace(/\/$/, "")}/session/shutdown`;
       const body = JSON.stringify({ reason: "tab_closed" });
       try {
@@ -194,13 +267,13 @@ export default function EdgeRunnerUI() {
             body,
             headers: { "Content-Type": "application/json" },
             keepalive: true,
+            referrerPolicy: "no-referrer",
           });
         }
       } catch {
         /* best effort */
       }
     };
-
     window.addEventListener("pagehide", shutdown);
     window.addEventListener("beforeunload", shutdown);
     return () => {
@@ -209,14 +282,61 @@ export default function EdgeRunnerUI() {
     };
   }, [phase]);
 
+  const finishVaultCreate = async () => {
+    setVaultError(null);
+    try {
+      if (vaultModeChoice === "passphrase") {
+        if (passphrase.length < 8) {
+          throw new Error("Passphrase must be at least 8 characters");
+        }
+        if (passphrase !== passphrase2) {
+          throw new Error("Passphrases do not match");
+        }
+        await createVault({ mode: "passphrase", passphrase });
+      } else {
+        await createVault({ mode: "device" });
+      }
+      setPassphrase("");
+      setPassphrase2("");
+      savePrefs({ vaultMode: vaultModeChoice });
+      setVaultGate("ready");
+    } catch (e) {
+      setVaultError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const finishVaultUnlock = async () => {
+    setVaultError(null);
+    try {
+      if (lockedVaultMode === "device") {
+        await unlockDeviceVault();
+      } else {
+        await unlockWithPassphrase(passphrase);
+        setPassphrase("");
+      }
+      await migrateLegacyIfNeeded();
+      setVaultGate("ready");
+    } catch (e) {
+      setVaultError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   const attachLocal = async () => {
     setSessionError(null);
     setSessionBusy(true);
     try {
       const url = localUrl.trim().replace(/\/$/, "");
       if (!url) throw new Error("Enter a backend URL");
+      // Only allow loopback / private for local mode (SSRF-ish safety in UI)
+      if (!/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?\/?$/i.test(url)) {
+        // still allow user LAN if they insist — warn only for non-http(s)
+        if (!/^https?:\/\//i.test(url)) {
+          throw new Error("Backend URL must be http(s)");
+        }
+      }
       const res = await fetch(`${url}/health`, {
         signal: AbortSignal.timeout(8000),
+        referrerPolicy: "no-referrer",
       });
       if (!res.ok) throw new Error(`Health check failed (${res.status})`);
       const data = await res.json();
@@ -241,47 +361,48 @@ export default function EdgeRunnerUI() {
     }
   };
 
-  const onLaunchProgress = useCallback((p: LaunchProgress) => {
-    setProgressMsg(p.message || null);
-    if (p.state === "retrying_cpu") {
-      setAccelerator("cpu");
-    }
-    setSession((prev) => {
-      const base: SessionInfo = prev || {
-        id: p.sessionId || "…",
-        username: username,
-        kernel_ref: p.kernelRef || "",
-        accelerator: p.accelerator,
-        state: "idle",
-        public_url: null,
-        error: null,
-        kernel_status: null,
-        logs_tail: "",
-        created_at: Date.now(),
-        idle_timeout: idleTimeout,
-        max_lifetime: maxLifetime,
-      };
-      const stateMap: Record<string, SessionState> = {
-        packing: "packing",
-        pushing: "pushing",
-        provisioning: "provisioning",
-        online: "online",
-        failed: "failed",
-        retrying_cpu: "pushing",
-      };
-      return {
-        ...base,
-        id: p.sessionId || base.id,
-        kernel_ref: p.kernelRef || base.kernel_ref,
-        accelerator: p.accelerator,
-        state: stateMap[p.state] || base.state,
-        public_url: p.publicUrl || base.public_url,
-        kernel_status: p.kernelStatus || base.kernel_status,
-        logs_tail: p.logsTail || base.logs_tail,
-        error: p.error || base.error,
-      };
-    });
-  }, [username, idleTimeout, maxLifetime]);
+  const onLaunchProgress = useCallback(
+    (p: LaunchProgress) => {
+      setProgressMsg(p.message || null);
+      if (p.state === "retrying_cpu") setAccelerator("cpu");
+      setSession((prev) => {
+        const base: SessionInfo = prev || {
+          id: p.sessionId || "…",
+          username: username,
+          kernel_ref: p.kernelRef || "",
+          accelerator: p.accelerator,
+          state: "idle",
+          public_url: null,
+          error: null,
+          kernel_status: null,
+          logs_tail: "",
+          created_at: Date.now(),
+          idle_timeout: idleTimeout,
+          max_lifetime: maxLifetime,
+        };
+        const stateMap: Record<string, SessionState> = {
+          packing: "packing",
+          pushing: "pushing",
+          provisioning: "provisioning",
+          online: "online",
+          failed: "failed",
+          retrying_cpu: "pushing",
+        };
+        return {
+          ...base,
+          id: p.sessionId || base.id,
+          kernel_ref: p.kernelRef || base.kernel_ref,
+          accelerator: p.accelerator,
+          state: stateMap[p.state] || base.state,
+          public_url: p.publicUrl || base.public_url,
+          kernel_status: p.kernelStatus || base.kernel_status,
+          logs_tail: p.logsTail || base.logs_tail,
+          error: p.error || base.error,
+        };
+      });
+    },
+    [username, idleTimeout, maxLifetime]
+  );
 
   const launchKaggle = async () => {
     setSessionError(null);
@@ -303,12 +424,17 @@ export default function EdgeRunnerUI() {
         accelerator,
         idleTimeout,
         maxLifetime,
+        rememberCredentials: rememberCreds,
       });
-      saveSecret({
-        username: username.trim(),
-        apiToken: apiToken.trim() || undefined,
-        apiKey: apiKey.trim() || undefined,
-      });
+
+      if (rememberCreds && isUnlocked()) {
+        await saveSecret({
+          username: username.trim(),
+          apiToken: apiToken.trim() || undefined,
+          apiKey: apiKey.trim() || undefined,
+        });
+        setHasStoredCreds(true);
+      }
 
       const result = await launchKaggleSession({
         auth: {
@@ -342,9 +468,11 @@ export default function EdgeRunnerUI() {
       setPhase("kaggle");
       setShowSettings(false);
       setProgressMsg("Waiting for model to finish loading…");
-      savePrefs({ lastBackendUrl: result.publicUrl, accelerator: result.accelerator });
+      savePrefs({
+        lastBackendUrl: result.publicUrl,
+        accelerator: result.accelerator,
+      });
 
-      // Soft-wait for model (chat works once ready; health already online)
       void waitForBackendHealth(result.publicUrl, {
         timeoutMs: 300_000,
         signal: ac.signal,
@@ -374,6 +502,7 @@ export default function EdgeRunnerUI() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ reason: "user_stop" }),
+          referrerPolicy: "no-referrer",
         }).catch(() => {});
       }
       setSession((s) => (s ? { ...s, state: "stopped" } : s));
@@ -386,12 +515,6 @@ export default function EdgeRunnerUI() {
     }
   };
 
-  const disconnectKeepData = () => {
-    // Leave Kaggle running? Prefer kill — user said teardown on close.
-    // Manual "disconnect" also kills to protect quota.
-    void stopSession();
-  };
-
   const clearChat = () => {
     setMessages([]);
     void saveChat({
@@ -399,6 +522,13 @@ export default function EdgeRunnerUI() {
       messages: [],
       updated_at: Date.now(),
     });
+  };
+
+  const forgetCredentials = async () => {
+    await clearSecret();
+    setApiToken("");
+    setApiKey("");
+    setHasStoredCreds(false);
   };
 
   const handleSend = async () => {
@@ -423,6 +553,7 @@ export default function EdgeRunnerUI() {
             content: m.content,
           })),
         }),
+        referrerPolicy: "no-referrer",
       });
 
       if (!response.ok) throw new Error("Backend connection failed");
@@ -468,7 +599,185 @@ export default function EdgeRunnerUI() {
     }
   };
 
-  // ─── LAUNCHING OVERLAY ────────────────────────────────────────────────────
+  const maskToken = (t: string) =>
+    t.length <= 8 ? "••••••••" : `${t.slice(0, 4)}…${t.slice(-4)}`;
+
+  // ── Vault gates ─────────────────────────────────────────────────────────
+  if (vaultGate === "loading") {
+    return (
+      <div className="min-h-screen bg-neutral-950 text-neutral-200 flex items-center justify-center">
+        <Loader2 className="animate-spin text-cyan-500" size={32} />
+      </div>
+    );
+  }
+
+  if (vaultGate === "create" || vaultGate === "need_passphrase") {
+    return (
+      <div className="min-h-screen bg-neutral-950 text-neutral-200 flex flex-col">
+        <header className="flex items-center gap-3 p-6 border-b border-neutral-800">
+          <div className="p-2 bg-cyan-950 rounded-lg text-cyan-400">
+            <Shield size={24} />
+          </div>
+          <div>
+            <h1 className="text-lg font-bold tracking-wider">EDGERUNNER</h1>
+            <p className="text-xs text-neutral-500">
+              Local encrypted vault · keys never leave this device
+            </p>
+          </div>
+        </header>
+        <main className="flex-1 flex items-start justify-center p-6">
+          <div className="w-full max-w-md space-y-5">
+            {vaultGate === "create" ? (
+              <>
+                <div>
+                  <h2 className="text-xl font-semibold">Create device vault</h2>
+                  <p className="text-sm text-neutral-500 mt-1">
+                    Credentials and chat are encrypted with AES-256-GCM on this
+                    browser only. Choose how the vault key is protected.
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <button
+                    type="button"
+                    onClick={() => setVaultModeChoice("device")}
+                    className={`w-full text-left p-4 rounded-xl border text-sm ${
+                      vaultModeChoice === "device"
+                        ? "border-cyan-700 bg-cyan-950/40"
+                        : "border-neutral-800 bg-neutral-900"
+                    }`}
+                  >
+                    <div className="font-medium text-cyan-300">
+                      This device (recommended)
+                    </div>
+                    <div className="text-xs text-neutral-500 mt-1">
+                      Non-extractable key in IndexedDB. Auto-unlocks on this
+                      browser — you won&apos;t re-enter the Kaggle token.
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setVaultModeChoice("passphrase")}
+                    className={`w-full text-left p-4 rounded-xl border text-sm ${
+                      vaultModeChoice === "passphrase"
+                        ? "border-cyan-700 bg-cyan-950/40"
+                        : "border-neutral-800 bg-neutral-900"
+                    }`}
+                  >
+                    <div className="font-medium text-amber-300 flex items-center gap-2">
+                      <Lock size={14} /> Passphrase lock
+                    </div>
+                    <div className="text-xs text-neutral-500 mt-1">
+                      PBKDF2 (600k) + AES-GCM. Stronger on shared machines —
+                      unlock once per session.
+                    </div>
+                  </button>
+                </div>
+                {vaultModeChoice === "passphrase" && (
+                  <div className="space-y-3">
+                    <label className="block text-xs text-neutral-400">
+                      Passphrase
+                      <div className="relative mt-1">
+                        <input
+                          type={showPass ? "text" : "password"}
+                          value={passphrase}
+                          onChange={(e) => setPassphrase(e.target.value)}
+                          className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2.5 text-sm pr-10"
+                          autoComplete="new-password"
+                        />
+                        <button
+                          type="button"
+                          className="absolute right-2 top-2.5 text-neutral-500"
+                          onClick={() => setShowPass((v) => !v)}
+                        >
+                          {showPass ? <EyeOff size={16} /> : <Eye size={16} />}
+                        </button>
+                      </div>
+                    </label>
+                    <label className="block text-xs text-neutral-400">
+                      Confirm
+                      <input
+                        type={showPass ? "text" : "password"}
+                        value={passphrase2}
+                        onChange={(e) => setPassphrase2(e.target.value)}
+                        className="mt-1 w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2.5 text-sm"
+                        autoComplete="new-password"
+                      />
+                    </label>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={finishVaultCreate}
+                  className="w-full py-3 rounded-xl bg-cyan-700 hover:bg-cyan-600 text-sm font-medium"
+                >
+                  Create vault
+                </button>
+              </>
+            ) : (
+              <>
+                <div>
+                  <h2 className="text-xl font-semibold flex items-center gap-2">
+                    <Lock size={20} /> Unlock vault
+                  </h2>
+                  <p className="text-sm text-neutral-500 mt-1">
+                    {lockedVaultMode === "device"
+                      ? "Vault locked for this tab. Unlock to use saved credentials and encrypted chat."
+                      : "Enter your vault passphrase. Encrypted credentials and chat stay on this device."}
+                  </p>
+                </div>
+                {lockedVaultMode === "passphrase" && (
+                  <label className="block text-xs text-neutral-400">
+                    Passphrase
+                    <input
+                      type={showPass ? "text" : "password"}
+                      value={passphrase}
+                      onChange={(e) => setPassphrase(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void finishVaultUnlock();
+                      }}
+                      className="mt-1 w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2.5 text-sm"
+                      autoComplete="current-password"
+                      autoFocus
+                    />
+                  </label>
+                )}
+                <button
+                  type="button"
+                  onClick={finishVaultUnlock}
+                  className="w-full py-3 rounded-xl bg-cyan-700 hover:bg-cyan-600 text-sm font-medium"
+                >
+                  Unlock
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (
+                      confirm(
+                        "Wipe the local vault? Encrypted credentials and chat on this device will be deleted."
+                      )
+                    ) {
+                      await wipeVault();
+                      setVaultGate("create");
+                    }
+                  }}
+                  className="w-full text-xs text-neutral-600 hover:text-red-400"
+                >
+                  Wipe vault
+                </button>
+              </>
+            )}
+            {vaultError && (
+              <p className="text-xs text-red-400 bg-red-950/30 border border-red-900/40 rounded-lg p-3">
+                {vaultError}
+              </p>
+            )}
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  // ── Launching ───────────────────────────────────────────────────────────
   if (phase === "setup" && sessionBusy) {
     return (
       <div className="min-h-screen bg-neutral-950 text-neutral-200 flex flex-col items-center justify-center p-6">
@@ -476,7 +785,7 @@ export default function EdgeRunnerUI() {
         <h2 className="text-lg font-semibold">Starting Kaggle session</h2>
         <p className="text-sm text-neutral-500 mt-2 max-w-md text-center">
           {progressMsg ||
-            "Pushing worker, installing deps, opening tunnel… first boot can take several minutes."}
+            "Pushing worker + installing prebuilt wheels… first model download may still take a minute."}
         </p>
         {session && (
           <div className="mt-6 text-xs font-mono bg-neutral-900 border border-neutral-800 rounded-xl p-4 max-w-lg w-full space-y-1 text-neutral-400">
@@ -492,12 +801,6 @@ export default function EdgeRunnerUI() {
               <span className="text-neutral-600">accel </span>
               {session.accelerator}
             </div>
-            {session.kernel_status && (
-              <div>
-                <span className="text-neutral-600">kaggle </span>
-                {session.kernel_status}
-              </div>
-            )}
             {session.logs_tail && (
               <pre className="mt-2 max-h-40 overflow-y-auto text-[10px] text-neutral-500 whitespace-pre-wrap">
                 {session.logs_tail.slice(-1500)}
@@ -521,19 +824,24 @@ export default function EdgeRunnerUI() {
     );
   }
 
-  // ─── SETUP GATE ───────────────────────────────────────────────────────────
+  // ── Setup ───────────────────────────────────────────────────────────────
   if (phase === "setup") {
     return (
       <div className="min-h-screen bg-neutral-950 text-neutral-200 flex flex-col">
-        <header className="flex items-center gap-3 p-6 border-b border-neutral-800">
-          <div className="p-2 bg-cyan-950 rounded-lg text-cyan-400">
-            <Cpu size={24} />
+        <header className="flex items-center justify-between p-6 border-b border-neutral-800">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-cyan-950 rounded-lg text-cyan-400">
+              <Cpu size={24} />
+            </div>
+            <div>
+              <h1 className="text-lg font-bold tracking-wider">EDGERUNNER</h1>
+              <p className="text-xs text-neutral-500">
+                GitHub Pages · encrypted vault · fast prebuilt wheels
+              </p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-lg font-bold tracking-wider">EDGERUNNER</h1>
-            <p className="text-xs text-neutral-500">
-              GitHub Pages · Kaggle CPU/GPU · local backend
-            </p>
+          <div className="flex items-center gap-1 text-xs text-emerald-500/80">
+            <Shield size={14} /> Vault unlocked
           </div>
         </header>
 
@@ -544,9 +852,9 @@ export default function EdgeRunnerUI() {
                 Connect a backend
               </h2>
               <p className="text-sm text-neutral-500 mt-1">
-                Paste a Kaggle API token to spin up a remote session, or point
-                at a backend already running on your machine. Chat history is
-                saved in this browser (IndexedDB) and survives reloads.
+                Kaggle token is stored encrypted on this device. Chat is
+                AES-GCM encrypted at rest. Closing the tab kills the Kaggle
+                session.
               </p>
             </div>
 
@@ -578,22 +886,41 @@ export default function EdgeRunnerUI() {
             {setupTab === "kaggle" ? (
               <div className="space-y-4 rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
                 <div className="flex items-start gap-2 text-xs text-neutral-500">
-                  <KeyRound size={14} className="mt-0.5 shrink-0 text-cyan-600" />
+                  <KeyRound
+                    size={14}
+                    className="mt-0.5 shrink-0 text-cyan-600"
+                  />
                   <p>
-                    Token stays in{" "}
-                    <span className="text-neutral-400">sessionStorage</span> only
-                    (cleared when the tab closes). Create one at{" "}
+                    Token encrypted with your vault key (never sent to our
+                    servers — only to Kaggle&apos;s API from your browser).{" "}
                     <a
                       href="https://www.kaggle.com/settings"
                       target="_blank"
-                      rel="noreferrer"
+                      rel="noopener noreferrer"
                       className="text-cyan-500 hover:underline"
                     >
-                      kaggle.com/settings
+                      Get a token
                     </a>
                     .
                   </p>
                 </div>
+
+                {hasStoredCreds && (
+                  <div className="flex items-center justify-between text-xs bg-emerald-950/30 border border-emerald-900/40 rounded-lg px-3 py-2 text-emerald-400/90">
+                    <span className="flex items-center gap-2">
+                      <Shield size={12} />
+                      Saved credentials{" "}
+                      {apiToken ? `(${maskToken(apiToken)})` : ""}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={forgetCredentials}
+                      className="text-neutral-500 hover:text-red-400"
+                    >
+                      Forget
+                    </button>
+                  </div>
+                )}
 
                 <label className="block text-xs text-neutral-400">
                   Kaggle username
@@ -613,7 +940,11 @@ export default function EdgeRunnerUI() {
                     onChange={(e) => setApiToken(e.target.value)}
                     className="mt-1 w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2.5 text-sm font-mono"
                     autoComplete="off"
-                    placeholder="Bearer access token"
+                    placeholder={
+                      hasStoredCreds
+                        ? "•••• saved — paste to replace"
+                        : "Bearer access token"
+                    }
                   />
                 </label>
                 <label className="block text-xs text-neutral-500">
@@ -625,6 +956,19 @@ export default function EdgeRunnerUI() {
                     className="mt-1 w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm"
                     autoComplete="off"
                   />
+                </label>
+
+                <label className="flex items-start gap-2 text-xs text-neutral-400 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={rememberCreds}
+                    onChange={(e) => setRememberCreds(e.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    Remember token on this device (encrypted AES-256-GCM in
+                    IndexedDB)
+                  </span>
                 </label>
 
                 <div>
@@ -661,8 +1005,7 @@ export default function EdgeRunnerUI() {
                       className="mt-0.5"
                     />
                     <span>
-                      If GPU fails (e.g. ~30h monthly quota exhausted), fall
-                      back to CPU automatically.
+                      If GPU fails (quota), fall back to CPU automatically.
                     </span>
                   </label>
                 </div>
@@ -692,12 +1035,6 @@ export default function EdgeRunnerUI() {
                   </label>
                 </div>
 
-                <p className="text-xs text-neutral-600">
-                  Closing this tab sends a shutdown beacon and stops heartbeats
-                  so the Kaggle worker exits (frees quota). Chat messages stay
-                  in your browser.
-                </p>
-
                 <button
                   onClick={launchKaggle}
                   disabled={
@@ -715,10 +1052,7 @@ export default function EdgeRunnerUI() {
                 <div className="flex items-start gap-2 text-xs text-neutral-500">
                   <Link2 size={14} className="mt-0.5 shrink-0 text-cyan-600" />
                   <p>
-                    Run the FastAPI backend locally, then paste its URL. Example:{" "}
-                    <code className="text-neutral-400">
-                      cd backend && EDGERUNNER_AUTO=1 python main.py
-                    </code>
+                    Run the FastAPI backend locally, then paste its URL.
                   </p>
                 </div>
                 <label className="block text-xs text-neutral-400">
@@ -748,7 +1082,7 @@ export default function EdgeRunnerUI() {
 
             {messages.length > 0 && (
               <p className="text-xs text-neutral-600 text-center">
-                {messages.length} saved message
+                {messages.length} encrypted message
                 {messages.length === 1 ? "" : "s"} will reappear after you
                 connect.
               </p>
@@ -759,7 +1093,7 @@ export default function EdgeRunnerUI() {
     );
   }
 
-  // ─── MAIN CHAT ────────────────────────────────────────────────────────────
+  // ── Chat ────────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col h-screen bg-neutral-950 text-neutral-200 font-sans selection:bg-cyan-900 selection:text-cyan-50">
       <header className="flex items-center justify-between p-4 bg-neutral-900 border-b border-neutral-800 shadow-md">
@@ -773,8 +1107,8 @@ export default function EdgeRunnerUI() {
             </h1>
             <p className="text-xs text-neutral-400">
               {phase === "kaggle"
-                ? "Kaggle session · auto-tunnel · kill on tab close"
-                : "Local backend"}
+                ? "Kaggle · encrypted chat · kill on close"
+                : "Local backend · encrypted chat"}
             </p>
           </div>
         </div>
@@ -838,8 +1172,7 @@ export default function EdgeRunnerUI() {
               </button>
               <button
                 onClick={() => {
-                  disconnectKeepData();
-                  clearSecret();
+                  void stopSession();
                 }}
                 className="flex items-center gap-2 px-4 py-2 rounded-xl border border-neutral-700 text-neutral-400 text-sm hover:bg-neutral-800"
               >
@@ -850,6 +1183,39 @@ export default function EdgeRunnerUI() {
                 className="flex items-center gap-2 px-4 py-2 rounded-xl border border-neutral-700 text-neutral-400 text-sm hover:bg-neutral-800"
               >
                 <Trash2 size={14} /> Clear chat
+              </button>
+              <button
+                onClick={async () => {
+                  const meta = await readMeta();
+                  lockVault();
+                  setLockedVaultMode(meta?.mode || "device");
+                  setPhase("setup");
+                  setBackendUrl("");
+                  setVaultGate("need_passphrase");
+                }}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl border border-neutral-700 text-neutral-400 text-sm hover:bg-neutral-800"
+              >
+                <Lock size={14} /> Lock vault
+              </button>
+              <button
+                onClick={async () => {
+                  if (
+                    confirm(
+                      "Wipe vault? Removes encrypted credentials and chat from this browser."
+                    )
+                  ) {
+                    await wipeVault();
+                    setMessages([]);
+                    setApiToken("");
+                    setApiKey("");
+                    setHasStoredCreds(false);
+                    setPhase("setup");
+                    setVaultGate("create");
+                  }
+                }}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl border border-red-900/40 text-red-400/80 text-sm hover:bg-red-950/30"
+              >
+                Wipe vault
               </button>
             </div>
             {backendUrl && (
@@ -864,7 +1230,7 @@ export default function EdgeRunnerUI() {
                   className="text-neutral-400 hover:underline"
                   href={`https://www.kaggle.com/code/${session.kernel_ref}`}
                   target="_blank"
-                  rel="noreferrer"
+                  rel="noopener noreferrer"
                 >
                   {session.kernel_ref}
                 </a>
@@ -892,7 +1258,7 @@ export default function EdgeRunnerUI() {
                   : "Connect a backend to start chatting."}
             </p>
             <p className="text-xs text-neutral-600 flex items-center gap-1">
-              <Zap size={12} /> Chat is persisted in this browser via IndexedDB
+              <Zap size={12} /> Chat encrypted at rest (AES-256-GCM)
             </p>
           </div>
         )}
@@ -911,7 +1277,10 @@ export default function EdgeRunnerUI() {
                   </div>
                   <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-3 space-y-3 font-mono text-xs text-neutral-400 overflow-x-auto">
                     {msg.thoughts.map((thought, i) => (
-                      <div key={i} className="border-l-2 border-neutral-700 pl-3">
+                      <div
+                        key={i}
+                        className="border-l-2 border-neutral-700 pl-3"
+                      >
                         {thought}
                       </div>
                     ))}
@@ -927,7 +1296,17 @@ export default function EdgeRunnerUI() {
               }`}
             >
               <div className="prose prose-invert prose-p:leading-relaxed prose-pre:bg-neutral-900 prose-pre:border prose-pre:border-neutral-700 max-w-none">
-                <ReactMarkdown>{msg.content}</ReactMarkdown>
+                <ReactMarkdown
+                  // No rehype-raw — markdown cannot inject HTML/scripts
+                  skipHtml
+                  urlTransform={(url) => {
+                    // Block javascript: / data: navigation
+                    if (/^(https?:|mailto:)/i.test(url)) return url;
+                    return "";
+                  }}
+                >
+                  {msg.content}
+                </ReactMarkdown>
               </div>
             </div>
           </div>
@@ -956,9 +1335,7 @@ export default function EdgeRunnerUI() {
               }
             }}
             placeholder={
-              backendUrl
-                ? "Give the agent a task…"
-                : "Connect a backend first…"
+              backendUrl ? "Give the agent a task…" : "Connect a backend first…"
             }
             disabled={!backendUrl}
             className="flex-1 bg-neutral-950 border border-neutral-800 rounded-xl p-4 text-neutral-200 focus:outline-none focus:border-cyan-700 focus:ring-1 focus:ring-cyan-700 resize-none disabled:opacity-50"
