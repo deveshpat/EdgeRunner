@@ -5,9 +5,9 @@ pydantic>=2,<3
 langchain>=0.3,<1
 langchain-community>=0.3,<1
 langgraph>=0.2,<1
-# Prefer manylinux prebuilt wheel from GitHub release wheels-v1 (glibc 2.28).
-# Ubuntu 24.04 wheels break on Kaggle (need GLIBC_2.38). Bootstrap verifies
-# import and compiles from source if the wheel is incompatible.
+# Installed SEPARATELY by bootstrap from manylinux_2_28 release wheel.
+# Do NOT let plain `pip install -r` resolve this on Kaggle — it compiles (slow).
+# Bootstrap strips this line and installs the prebuilt wheel instead.
 llama-cpp-python==0.3.33
 # Kaggle images may ship transformers needing hub>=1.3 — keep a wide range
 huggingface-hub>=0.23,<2

@@ -118,16 +118,54 @@ jobs:
         with:
           path: all
           merge-multiple: true
-      - name: Collect
+      - name: Collect + rebuild full bundles (pure + manylinux llama)
         run: |
+          set -euo pipefail
           mkdir -p publish
           find all -name '*.whl' -exec cp {} publish/ \;
-          find all -name 'edgerunner-wheels-*.tar.gz' -exec cp {} publish/ \;
+          # Drop host-glibc linux_x86_64 aliases that break on Kaggle (keep manylinux only)
+          # Keep py3-none-linux only if no manylinux exists — prefer manylinux names.
           echo "=== llama wheels ==="
           ls -lah publish/llama* 2>/dev/null || true
+
+          # Rebuild per-py tarballs so Kaggle gets ONE download with llama included
+          for PY in cp310 cp311 cp312; do
+            stage=$(mktemp -d)
+            # pure / shared wheels that match this py or are py3-none
+            shopt -s nullglob
+            for w in publish/*.whl; do
+              bn=$(basename "$w")
+              bl=$(echo "$bn" | tr '[:upper:]' '[:lower:]')
+              # skip cuda
+              if echo "$bl" | grep -qE 'cu1[0-9]|cuda|\+cu'; then continue; fi
+              # skip wrong-abi binary wheels
+              if echo "$bl" | grep -qE 'cp[0-9]+-cp[0-9]+' && ! echo "$bl" | grep -q "$PY"; then
+                # still allow abi3
+                if ! echo "$bl" | grep -qE 'abi3|cp37-abi3|none-any|py2\.py3|py3-none'; then
+                  continue
+                fi
+              fi
+              # llama: only manylinux for this py
+              if echo "$bl" | grep -q 'llama_cpp_python'; then
+                if echo "$bl" | grep -q "manylinux" && echo "$bl" | grep -q "$PY"; then
+                  cp -f "$w" "$stage/"
+                fi
+                continue
+              fi
+              cp -f "$w" "$stage/" || true
+            done
+            # Ensure at least the stable manylinux llama name is present
+            for w in publish/llama_cpp_python-*-${PY}-${PY}-manylinux_2_28_x86_64.whl; do
+              [ -f "$w" ] && cp -f "$w" "$stage/"
+            done
+            out="publish/edgerunner-wheels-${PY}-cpu.tar.gz"
+            tar -C "$stage" -czf "$out" .
+            echo "=== $out ($(du -h "$out" | cut -f1)) files=$(ls "$stage" | wc -l) ==="
+            ls "$stage" | grep -i llama || echo "(no llama in bundle — check manylinux job)"
+            rm -rf "$stage"
+          done
           echo "=== bundles ==="
           ls -lah publish/edgerunner-wheels* 2>/dev/null || true
-          # Drop any accidental non-manylinux glibc-bleeding wheels if both exist
           ls publish | wc -l
       - name: Publish wheels-v1
         env:
