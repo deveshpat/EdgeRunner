@@ -497,20 +497,96 @@ def _compile_llama_from_source(env: dict) -> bool:
         return False
 
 
-def _ensure_working_llama(env: dict) -> bool:
-    """Make sure `import llama_cpp` works; recompile if prebuilt is wrong glibc."""
-    ok, detail = _verify_llama_import()
-    if ok:
-        log(f"  ✅ llama_cpp import ok ({detail})")
-        return True
-    log(f"  ⚠️ prebuilt llama_cpp unusable: {detail[:300]}")
-    if "GLIBC" in detail or "libllama" in detail or "shared library" in detail:
-        log("  (GLIBC/shared-lib mismatch — common when wheels were built on newer Ubuntu)")
-    # Remove broken install then compile on-box
+def _pip_uninstall_llama() -> None:
     subprocess.run(
         [sys.executable, "-m", "pip", "uninstall", "-y", "llama-cpp-python"],
         capture_output=True,
     )
+
+
+def _try_install_wheel_url(url: str, env: dict) -> bool:
+    """Download one wheel, install, verify import. Returns True only if import works."""
+    wheel_name = url.rsplit("/", 1)[-1]
+    dest = WORK / "wheels" / wheel_name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    log(f"  trying llama wheel: {wheel_name}")
+    if not _fetch_url(url, dest, timeout=180):
+        log(f"  download failed: {wheel_name}")
+        return False
+    _pip_uninstall_llama()
+    try:
+        subprocess.check_call(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "-q",
+                "--no-cache-dir",
+                "--force-reinstall",
+                "--no-deps",
+                str(dest),
+            ],
+            env=env,
+        )
+    except subprocess.CalledProcessError as e:
+        log(f"  pip install failed: {e}")
+        return False
+    ok, detail = _verify_llama_import()
+    if ok:
+        log(f"  ✅ llama_cpp works via {wheel_name} ({detail})")
+        return True
+    log(f"  import failed for {wheel_name}: {detail[:280]}")
+    _pip_uninstall_llama()
+    return False
+
+
+def _install_working_llama(env: dict) -> bool:
+    """Install a llama-cpp that actually imports on this host (Kaggle glibc).
+
+    Order: already-installed → manylinux release wheels → source compile.
+    """
+    ok, detail = _verify_llama_import()
+    if ok:
+        log(f"  ✅ llama_cpp already ok ({detail})")
+        return True
+
+    log("  installing llama-cpp-python (prefer manylinux_2_28 prebuilt)…")
+    index = _load_wheels_index()
+    base = (
+        os.environ.get("EDGERUNNER_WHEELS_BASE", "").strip()
+        or (index.get("base_url") if index else None)
+        or "https://github.com/deveshpat/EdgeRunner/releases/download/wheels-v1"
+    ).rstrip("/")
+    release_tag = (index.get("release_tag") if index else None) or "wheels-v1"
+    tag = _py_tag()
+    want_gpu = str(ACCELERATOR).lower() in ("gpu", "nvidia", "cuda")
+
+    assets = _list_release_assets(str(release_tag))
+    candidates = _rank_llama_urls(assets, tag, want_gpu)
+    if want_gpu:
+        candidates += [
+            u
+            for u in _rank_llama_urls(assets, tag, want_gpu=False)
+            if u not in candidates
+        ]
+
+    # Explicit manylinux aliases first (published by CI)
+    preferred = [
+        f"{base}/llama_cpp_python-0.3.33-{tag}-{tag}-manylinux_2_28_x86_64.whl",
+        f"{base}/llama_cpp_python-0.3.33-{tag}-{tag}-manylinux2014_x86_64.whl",
+        f"{base}/llama_cpp_python-0.3.33-{tag}-{tag}-linux_x86_64.whl",
+    ]
+    ordered: list[str] = []
+    for u in preferred + candidates:
+        if u not in ordered:
+            ordered.append(u)
+
+    for url in ordered:
+        if _try_install_wheel_url(url, env):
+            return True
+
+    log("  all prebuilt llama wheels failed import — compiling on Kaggle…")
     return _compile_llama_from_source(env)
 
 
@@ -524,35 +600,37 @@ def pip_install() -> None:
 
     log("📦 Installing Python dependencies (prefer prebuilt wheels)…")
 
-    # 1) Full tarball bundle if published (pure deps + maybe llama)
+    # 1) Pure-deps tarball / find-links (may or may not include llama)
     bundle_ok = _install_prebuilt_bundle(env)
+
+    # 2) Always ensure a *working* llama (manylinux prebuilt → source)
+    if not _install_working_llama(env):
+        raise RuntimeError(
+            "Could not install a working llama-cpp-python "
+            "(prebuilt wheels failed import; source build failed)"
+        )
+
     if bundle_ok:
-        if _ensure_working_llama(env):
-            log("✅ pip install complete (bundle + verified llama)")
-            return
-        log("  bundle ok but llama broken — will fix llama then continue")
+        # Bundle already installed the rest; re-check llama wasn't clobbered
+        ok, detail = _verify_llama_import()
+        if not ok:
+            log(f"  llama broken after bundle path: {detail[:200]}")
+            if not _install_working_llama(env):
+                raise RuntimeError("llama_cpp unusable after bundle install")
+        log("✅ pip install complete (bundle + verified llama)")
+        return
 
-    # 2) Dedicated llama wheel from release, then verify
-    llama_ok = _install_prebuilt_llama(env)
-    if llama_ok:
-        llama_ok = _ensure_working_llama(env)
-    if not llama_ok:
-        log("  no working prebuilt llama — compiling on Kaggle (slow but compatible)")
-        if not _compile_llama_from_source(env):
-            raise RuntimeError(
-                "Could not install a working llama-cpp-python "
-                "(prebuilt glibc mismatch and source build failed)"
-            )
-
-    # 3) Remaining deps via release find-links or PyPI (do not reinstall llama)
+    # 3) Remaining deps via release find-links or PyPI
     if _install_from_release_find_links(env):
-        # find-links might have re-pulled a bad llama — re-verify
-        if not _ensure_working_llama(env):
-            raise RuntimeError("llama_cpp broken after find-links install")
+        ok, detail = _verify_llama_import()
+        if not ok:
+            log(f"  find-links clobbered llama ({detail[:160]}) — reinstalling")
+            if not _install_working_llama(env):
+                raise RuntimeError("llama_cpp broken after find-links install")
         log("✅ pip install complete (release find-links)")
         return
 
-    # 4) PyPI for remaining requirements (skip reinstalling llama if present)
+    # 4) PyPI for remaining requirements
     cmd = [
         sys.executable,
         "-m",
@@ -567,8 +645,11 @@ def pip_install() -> None:
         str(req),
     ]
     subprocess.check_call(cmd, env=env)
-    if not _ensure_working_llama(env):
-        raise RuntimeError("llama_cpp broken after pip install -r")
+    ok, detail = _verify_llama_import()
+    if not ok:
+        log(f"  pip -r broke llama ({detail[:160]}) — reinstalling")
+        if not _install_working_llama(env):
+            raise RuntimeError("llama_cpp broken after pip install -r")
     log("✅ pip install complete")
 
 
