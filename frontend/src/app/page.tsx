@@ -229,58 +229,105 @@ export default function EdgeRunnerUI() {
     };
   }, [backendUrl]);
 
-  // Heartbeat
+  // Heartbeat — GET avoids CORS preflight through tunnels
   useEffect(() => {
     if (!backendUrl || isOnline === false || phase === "setup") return;
     const beat = () => {
-      const url = `${backendUrlRef.current.replace(/\/$/, "")}/session/heartbeat`;
-      fetch(url, {
-        method: "POST",
+      const base = backendUrlRef.current.replace(/\/$/, "");
+      if (!base) return;
+      // Prefer GET (no preflight); also POST keepalive as backup
+      fetch(`${base}/session/heartbeat`, {
+        method: "GET",
         keepalive: true,
+        mode: "cors",
+        cache: "no-store",
         referrerPolicy: "no-referrer",
-      }).catch(() => {});
+      }).catch(() => {
+        fetch(`${base}/session/heartbeat`, {
+          method: "POST",
+          keepalive: true,
+          referrerPolicy: "no-referrer",
+        }).catch(() => {});
+      });
     };
     beat();
-    const interval = setInterval(beat, 25000);
+    // 15s — well under default 90s idle so a few missed beats still OK
+    const interval = setInterval(beat, 15000);
     return () => clearInterval(interval);
   }, [backendUrl, isOnline, phase]);
 
-  // Tab close → kill Kaggle
+  // Tab close / hide → kill Kaggle (multiple channels; sendBeacon JSON often fails CORS)
   useEffect(() => {
-    const shutdown = () => {
+    const killRemoteSession = (reason: string) => {
       const url = backendUrlRef.current;
       if (!url) return;
       const isTunnel =
         /trycloudflare\.com|loca\.lt|localtunnel\.me|bore\.pub/i.test(url);
-      if (phase === "local" && !isTunnel) return;
-      const endpoint = `${url.replace(/\/$/, "")}/session/shutdown`;
-      const body = JSON.stringify({ reason: "tab_closed" });
+      // Local loopback: only kill if it's a tunneled Kaggle URL
+      if (!isTunnel && /127\.0\.0\.1|localhost/i.test(url)) return;
+
+      const base = url.replace(/\/$/, "");
+      const getUrl = `${base}/session/shutdown?reason=${encodeURIComponent(reason)}`;
+      const postUrl = `${base}/session/shutdown`;
+
       try {
+        // 1) GET via Image — no CORS preflight, highly reliable on unload
+        const img = new Image();
+        img.src = getUrl;
+      } catch {
+        /* ignore */
+      }
+      try {
+        // 2) sendBeacon POST with text/plain (simple content-type, no preflight)
         if (navigator.sendBeacon) {
           navigator.sendBeacon(
-            endpoint,
-            new Blob([body], { type: "application/json" })
+            postUrl,
+            new Blob([reason], { type: "text/plain" })
           );
-        } else {
-          fetch(endpoint, {
-            method: "POST",
-            body,
-            headers: { "Content-Type": "application/json" },
-            keepalive: true,
-            referrerPolicy: "no-referrer",
-          });
+          // 3) Also beacon the GET-style URL (some browsers POST empty to it — server accepts)
+          navigator.sendBeacon(getUrl);
         }
+      } catch {
+        /* ignore */
+      }
+      try {
+        // 4) fetch keepalive GET + POST
+        fetch(getUrl, {
+          method: "GET",
+          keepalive: true,
+          mode: "no-cors",
+          cache: "no-store",
+          referrerPolicy: "no-referrer",
+        }).catch(() => {});
+        fetch(postUrl, {
+          method: "POST",
+          body: reason,
+          headers: { "Content-Type": "text/plain" },
+          keepalive: true,
+          mode: "cors",
+          referrerPolicy: "no-referrer",
+        }).catch(() => {});
       } catch {
         /* best effort */
       }
     };
-    window.addEventListener("pagehide", shutdown);
-    window.addEventListener("beforeunload", shutdown);
-    return () => {
-      window.removeEventListener("pagehide", shutdown);
-      window.removeEventListener("beforeunload", shutdown);
+
+    const onPageHide = (e: PageTransitionEvent) => {
+      // persisted=true means bfcache — still kill Kaggle to protect quota
+      void e;
+      killRemoteSession("tab_closed");
     };
-  }, [phase]);
+    const onBeforeUnload = () => killRemoteSession("tab_closed");
+    // visibility hidden is a strong signal on mobile; only kill if page is unloading
+    // (don't kill on tab switch). Handled by pagehide.
+
+    window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => {
+      window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("beforeunload", onBeforeUnload);
+    };
+  }, []);
 
   const finishVaultCreate = async () => {
     setVaultError(null);

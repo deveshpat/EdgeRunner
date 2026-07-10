@@ -517,6 +517,7 @@ def start_tunnel(cloudflared: Path) -> tuple[subprocess.Popen, str]:
 
 
 def start_api(public_url: str) -> subprocess.Popen:
+    hb_file = WORK / ".heartbeat"
     env = os.environ.copy()
     env.update(
         {
@@ -527,16 +528,116 @@ def start_api(public_url: str) -> subprocess.Popen:
             "KP_IDLE_TIMEOUT_SECONDS": str(IDLE_TIMEOUT),
             "KP_MAX_LIFETIME_SECONDS": str(MAX_LIFETIME),
             "KP_STARTUP_GRACE_SECONDS": str(STARTUP_GRACE),
+            "KP_WORK_DIR": str(WORK),
+            "KP_HEARTBEAT_FILE": str(hb_file),
             "PORT": str(PORT),
             "PYTHONUNBUFFERED": "1",
         }
     )
+    # Seed heartbeat so parent monitor doesn't kill during model download
+    try:
+        hb_file.write_text(str(time.time()), encoding="utf-8")
+    except Exception:
+        pass
     log("🚀 Starting FastAPI backend...")
     return subprocess.Popen(
         [sys.executable, str(WORK / "backend" / "main.py")],
         cwd=str(WORK / "backend"),
         env=env,
     )
+
+
+def _kill_proc(p: subprocess.Popen | None, label: str) -> None:
+    if p is None:
+        return
+    try:
+        p.send_signal(signal.SIGTERM)
+    except Exception:
+        pass
+    try:
+        p.wait(timeout=3)
+    except Exception:
+        try:
+            p.kill()
+        except Exception:
+            pass
+    log(f"  killed {label}")
+
+
+def supervise_api(
+    api_proc: subprocess.Popen,
+    tunnel_proc: subprocess.Popen | None,
+) -> int:
+    """Wait on API; also kill if heartbeat file goes stale (belt-and-suspenders).
+
+    The API process has its own thread watchdog. This parent monitor catches
+    cases where uvicorn hangs on a blocked worker and never exits.
+    """
+    hb_file = WORK / ".heartbeat"
+    try:
+        idle = float(IDLE_TIMEOUT)
+    except (TypeError, ValueError):
+        idle = 90.0
+    try:
+        grace = float(STARTUP_GRACE)
+    except (TypeError, ValueError):
+        grace = 600.0
+    try:
+        max_life = float(MAX_LIFETIME)
+    except (TypeError, ValueError):
+        max_life = 3600.0
+
+    started = time.time()
+    # Parent is slightly more lenient than the API idle timeout
+    stale_limit = max(idle + 30.0, 120.0)
+
+    log(
+        f"Supervisor active | stale_heartbeat>{stale_limit:.0f}s "
+        f"grace={grace:.0f}s max={max_life:.0f}s"
+    )
+
+    while True:
+        code = api_proc.poll()
+        if code is not None:
+            return code
+
+        now = time.time()
+        age = now - started
+        if max_life > 0 and age >= max_life + 15:
+            log(f"Supervisor: max lifetime exceeded ({age:.0f}s) — killing")
+            _kill_proc(api_proc, "api")
+            _kill_proc(tunnel_proc, "tunnel")
+            return 1
+
+        if hb_file.exists():
+            try:
+                mtime = hb_file.stat().st_mtime
+                # Also read embedded timestamp if present
+                try:
+                    ts = float(hb_file.read_text(encoding="utf-8").strip())
+                    mtime = max(mtime, ts)
+                except Exception:
+                    pass
+                stale = now - mtime
+                # During startup grace, allow longer silence (model download)
+                limit = stale_limit if age > grace else max(stale_limit, grace)
+                if stale > limit:
+                    log(
+                        f"Supervisor: heartbeat stale {stale:.0f}s "
+                        f"(limit {limit:.0f}s) — killing session"
+                    )
+                    _kill_proc(api_proc, "api")
+                    _kill_proc(tunnel_proc, "tunnel")
+                    return 1
+            except Exception as e:
+                log(f"Supervisor heartbeat check error: {e}")
+        elif age > grace:
+            log("Supervisor: no heartbeat file after grace — killing")
+            _kill_proc(api_proc, "api")
+            _kill_proc(tunnel_proc, "tunnel")
+            return 1
+
+        time.sleep(5.0)
 
 
 def wait_healthy(timeout: float = 120.0) -> bool:
@@ -601,33 +702,23 @@ def main() -> None:
 
     api_proc = start_api(public_url)
 
-
     if wait_healthy(180):
         log("✅ Backend health check passed")
-        # Re-print URL so late log scrapers always catch it near "healthy"
         log(f"{URL_MARKER}{public_url}")
     else:
         log("⚠️ Backend health check timed out; continuing anyway")
 
-    # Block until API exits (watchdog os._exit or crash)
+    # Supervise until API dies (self-kill on shutdown/idle) or heartbeat goes stale
     try:
-        code = api_proc.wait()
+        code = supervise_api(api_proc, tunnel_proc)
         log(f"API process exited with code {code}")
     except KeyboardInterrupt:
         log("Interrupted")
+        _kill_proc(api_proc, "api")
+        _kill_proc(tunnel_proc, "tunnel")
     finally:
-        for p in (api_proc, tunnel_proc):
-            try:
-                p.send_signal(signal.SIGTERM)
-            except Exception:
-                pass
-        time.sleep(1)
-        for p in (api_proc, tunnel_proc):
-            try:
-                if p.poll() is None:
-                    p.kill()
-            except Exception:
-                pass
+        _kill_proc(api_proc, "api")
+        _kill_proc(tunnel_proc, "tunnel")
     log("Worker finished — Kaggle session will end.")
 
 
