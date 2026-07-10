@@ -1,1 +1,1 @@
-# KagglePilot orchestrator package
+# EdgeRunner Kaggle orchestrator package

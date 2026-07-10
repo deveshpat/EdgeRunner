@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-KagglePilot worker bootstrap — this is the single script pushed to Kaggle.
+EdgeRunner Kaggle worker bootstrap — single script pushed to Kaggle.
 
 It:
   1. Materializes the embedded backend source files
   2. Installs Python deps + cloudflared (HTTPS tunnel)
   3. Starts FastAPI on :8000
-  4. Prints KAGGLE_PILOT_URL=... so the orchestrator can scrape logs
+  4. Prints EDGERUNNER_URL=... so the orchestrator can scrape logs
   5. Blocks until the session self-kills (idle / shutdown / max lifetime)
 
 NOTE: The orchestrator rewrites the FILES dict and SESSION header before push.
 """
+
 
 from __future__ import annotations
 
@@ -36,7 +37,7 @@ STARTUP_GRACE = "__STARTUP_GRACE__"
 FILES: dict[str, str] = {}
 # ─── End injection zone ──────────────────────────────────────────────────────
 
-WORK = Path("/kaggle/working/kagglepilot")
+WORK = Path("/kaggle/working/edgerunner")
 PORT = 8000
 URL_MARKER = "EDGERUNNER_URL="
 

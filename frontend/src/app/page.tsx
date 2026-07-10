@@ -46,7 +46,7 @@ const STORAGE_KEYS = {
   orchestrator: "kp_orchestrator",
 };
 
-export default function KagglePilotUI() {
+export default function EdgeRunnerUI() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);

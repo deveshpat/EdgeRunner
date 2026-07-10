@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from kaggle_client import KaggleCredentials
 from session_manager import SessionManager
 
-WORK_ROOT = Path(os.environ.get("KP_WORK_ROOT", Path.home() / ".kagglepilot" / "sessions"))
+WORK_ROOT = Path(os.environ.get("KP_WORK_ROOT", Path.home() / ".edgerunner" / "sessions"))
 manager = SessionManager(work_root=WORK_ROOT)
 
 app = FastAPI(
