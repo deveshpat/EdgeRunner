@@ -1,19 +1,18 @@
 {
-  "version": 1,
+  "version": 2,
   "release_tag": "wheels-v1",
   "base_url": "https://github.com/deveshpat/EdgeRunner/releases/download/wheels-v1",
-  "notes": "Prebuilt wheels for Kaggle (linux x86_64). Built once via CI/Kaggle; bootstrap installs these instead of compiling llama-cpp-python.",
+  "notes": "Prefer live GitHub release assets. CI builds a py3-none linux wheel for llama-cpp-python that works on Kaggle CPython 3.10–3.12.",
   "python_tags": ["cp310", "cp311", "cp312"],
   "packages": {
     "llama-cpp-python": {
       "version": "0.3.33",
       "wheels": {
-        "cp310-cpu": "llama_cpp_python-0.3.33-cp310-cp310-linux_x86_64.whl",
-        "cp311-cpu": "llama_cpp_python-0.3.33-cp311-cp311-linux_x86_64.whl",
-        "cp312-cpu": "llama_cpp_python-0.3.33-cp312-cp312-linux_x86_64.whl",
-        "cp310-gpu": "llama_cpp_python-0.3.33+cu121-cp310-cp310-linux_x86_64.whl",
-        "cp311-gpu": "llama_cpp_python-0.3.33+cu121-cp311-cp311-linux_x86_64.whl",
-        "cp312-gpu": "llama_cpp_python-0.3.33+cu121-cp312-cp312-linux_x86_64.whl"
+        "any-cpu": "llama_cpp_python-0.3.33-py3-none-linux_x86_64.whl",
+        "py3-cpu": "llama_cpp_python-0.3.33-py3-none-linux_x86_64.whl",
+        "cp310-cpu": "llama_cpp_python-0.3.33-py3-none-linux_x86_64.whl",
+        "cp311-cpu": "llama_cpp_python-0.3.33-py3-none-linux_x86_64.whl",
+        "cp312-cpu": "llama_cpp_python-0.3.33-py3-none-linux_x86_64.whl"
       }
     }
   }

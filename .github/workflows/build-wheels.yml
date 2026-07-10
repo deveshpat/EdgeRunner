@@ -40,6 +40,13 @@ jobs:
         run: |
           mkdir -p dist
           pip wheel "llama-cpp-python==0.3.33" -w dist --no-deps --no-cache-dir
+          # Stable alias so Kaggle bootstrap can find a predictable name
+          PYTAG="cp$(echo ${{ matrix.python-version }} | tr -d .)"
+          for w in dist/llama_cpp_python-*.whl; do
+            cp -f "$w" "dist/llama_cpp_python-0.3.33-${PYTAG}-${PYTAG}-linux_x86_64.whl" || true
+            cp -f "$w" "dist/llama_cpp_python-0.3.33-py3-none-linux_x86_64.whl" || true
+          done
+          ls -lah dist/llama*
 
       - name: Build remaining runtime wheels
         run: |
@@ -49,11 +56,19 @@ jobs:
             "huggingface-hub" "psutil" "httpx" \
             -w dist --no-cache-dir
 
+      - name: Pack per-python tarball
+        run: |
+          PYTAG="cp$(echo ${{ matrix.python-version }} | tr -d .)"
+          tar -C dist -czf "edgerunner-wheels-${PYTAG}-cpu.tar.gz" .
+          ls -lah edgerunner-wheels-*.tar.gz
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: wheels-cp${{ matrix.python-version }}
-          path: dist/*.whl
+          path: |
+            dist/*.whl
+            edgerunner-wheels-*.tar.gz
 
   publish:
     needs: wheels
@@ -68,11 +83,15 @@ jobs:
           path: all-wheels
           merge-multiple: true
 
-      - name: Collect wheels
+      - name: Collect wheels + bundles
         run: |
           mkdir -p publish
-          find all-wheels -name '*.whl' -exec cp {} publish/ \;
-          ls -lah publish
+          find all-wheels -name '*.whl' -exec cp -n {} publish/ \; 2>/dev/null || \
+            find all-wheels -name '*.whl' -exec cp {} publish/ \;
+          find all-wheels -name 'edgerunner-wheels-*.tar.gz' -exec cp {} publish/ \;
+          ls -lah publish | head -80
+          ls publish/llama* 2>/dev/null || true
+          ls publish/edgerunner-wheels* 2>/dev/null || true
 
       - name: Publish / update release wheels-v1
         env:
@@ -81,7 +100,6 @@ jobs:
           if ! gh release view wheels-v1 >/dev/null 2>&1; then
             gh release create wheels-v1 \
               --title "Prebuilt wheels (Kaggle fast install)" \
-              --notes "Auto-built CPU wheels for EdgeRunner. GPU wheels: run scripts/kaggle_build_wheels.py on a Kaggle GPU session, then ./scripts/publish_wheels.sh."
+              --notes "Auto-built CPU wheels + tarballs for EdgeRunner. GPU: scripts/kaggle_build_wheels.py + publish_wheels.sh."
           fi
-          # clobber so re-runs refresh assets
-          gh release upload wheels-v1 publish/*.whl --clobber
+          gh release upload wheels-v1 publish/* --clobber

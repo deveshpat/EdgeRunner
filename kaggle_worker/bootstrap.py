@@ -72,25 +72,49 @@ def _py_tag() -> str:
     return f"cp{sys.version_info.major}{sys.version_info.minor}"
 
 
-def _fetch_url(url: str, dest: Path, timeout: int = 120) -> bool:
-    """Download url → dest. Returns True on success."""
+def _fetch_url(url: str, dest: Path, timeout: int = 180) -> bool:
+    """Download url → dest. Follows redirects. Returns True on success."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    # curl: fail on HTTP errors, follow redirects, show errors to log via capture
     try:
-        subprocess.check_call(
-            ["curl", "-fsSL", "--connect-timeout", "15", "-m", str(timeout), "-o", str(dest), url],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        r = subprocess.run(
+            [
+                "curl",
+                "-fL",
+                "--connect-timeout",
+                "20",
+                "-m",
+                str(timeout),
+                "-o",
+                str(dest),
+                url,
+            ],
+            capture_output=True,
+            text=True,
         )
-        return dest.exists() and dest.stat().st_size > 0
+        if r.returncode == 0 and dest.exists() and dest.stat().st_size > 64:
+            return True
+        err = (r.stderr or r.stdout or "")[-200:]
+        log(f"  curl failed ({r.returncode}) for {url.rsplit('/', 1)[-1]}: {err}")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log(f"  curl exception: {e}")
+    try:
+        r = subprocess.run(
+            ["wget", "-q", "-O", str(dest), url],
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode == 0 and dest.exists() and dest.stat().st_size > 64:
+            return True
     except Exception:
-        try:
-            subprocess.check_call(
-                ["wget", "-q", "-O", str(dest), url],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return dest.exists() and dest.stat().st_size > 0
-        except Exception:
-            return False
+        pass
+    try:
+        dest.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return False
 
 
 def _load_wheels_index() -> dict:
@@ -114,101 +138,217 @@ def _load_wheels_index() -> dict:
     return {}
 
 
-def _list_release_wheel_urls(tag: str = "wheels-v1") -> list[str]:
-    """GitHub release asset URLs (browser_download_url) for prebuilt wheels."""
+_RELEASE_ASSETS_CACHE: dict[str, list[tuple[str, str]]] = {}
+
+
+def _list_release_assets(tag: str = "wheels-v1") -> list[tuple[str, str]]:
+    """Return (name, browser_download_url) for release assets (cached)."""
     import json
     import urllib.request
+
+    if tag in _RELEASE_ASSETS_CACHE:
+        return _RELEASE_ASSETS_CACHE[tag]
 
     api = f"https://api.github.com/repos/deveshpat/EdgeRunner/releases/tags/{tag}"
     try:
         req = urllib.request.Request(
             api,
-            headers={"Accept": "application/vnd.github+json", "User-Agent": "EdgeRunner"},
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "EdgeRunner-worker",
+            },
         )
-        with urllib.request.urlopen(req, timeout=20) as r:
+        with urllib.request.urlopen(req, timeout=30) as r:
             data = json.loads(r.read().decode("utf-8"))
-        urls = []
+        out: list[tuple[str, str]] = []
         for a in data.get("assets") or []:
             name = a.get("name") or ""
             url = a.get("browser_download_url") or ""
-            if name.endswith(".whl") and url:
-                urls.append(url)
-        return urls
+            if name and url:
+                out.append((name, url))
+        log(f"  release {tag}: {len(out)} assets")
+        _RELEASE_ASSETS_CACHE[tag] = out
+        return out
     except Exception as e:
         log(f"  release asset list failed: {e}")
+        _RELEASE_ASSETS_CACHE[tag] = []
         return []
 
 
-def _pick_llama_wheel_url(urls: list[str], py_tag: str, want_gpu: bool) -> str | None:
-    """Pick best llama-cpp-python wheel for this interpreter / accel."""
-    llama = [u for u in urls if "llama_cpp_python" in u.lower() or "llama-cpp-python" in u.lower()]
-    if not llama:
+def _llama_wheel_score(name: str, py_tag: str, want_gpu: bool) -> int | None:
+    """Lower is better. None = not a usable llama wheel for this env."""
+    n = name.lower()
+    if "llama_cpp_python" not in n and "llama-cpp-python" not in n:
         return None
-    # Prefer matching abi tag
-    tagged = [u for u in llama if py_tag in u]
-    pool = tagged or llama
+    if not n.endswith(".whl"):
+        return None
+    gpuish = any(x in n for x in ("cu11", "cu12", "cuda", "+cu"))
+    if want_gpu and not gpuish:
+        # cpu wheel still usable as fallback (scored worse)
+        base = 100
+    elif not want_gpu and gpuish:
+        return None  # don't install CUDA wheel on CPU session
+    else:
+        base = 0
+    # Prefer exact CPython tag, then generic py3-none linux
+    if py_tag in n:
+        base += 0
+    elif "py3-none" in n and "linux" in n:
+        base += 5  # CI currently publishes this shape for any CPython
+    elif "manylinux" in n and "linux" in n:
+        base += 10
+    else:
+        base += 50
+    if "x86_64" in n or "amd64" in n:
+        base += 0
+    else:
+        base += 20
+    return base
 
-    def score(u: str) -> tuple:
-        name = u.rsplit("/", 1)[-1].lower()
-        gpuish = any(x in name for x in ("cu11", "cu12", "cuda", "+cu"))
-        # want_gpu → prefer gpuish; else prefer non-gpuish
-        return (
-            0 if (gpuish == want_gpu) else 1,
-            0 if py_tag in name else 1,
-            len(name),
-        )
 
-    pool.sort(key=score)
-    return pool[0] if pool else None
+def _rank_llama_urls(
+    assets: list[tuple[str, str]], py_tag: str, want_gpu: bool
+) -> list[str]:
+    scored: list[tuple[int, str]] = []
+    for name, url in assets:
+        s = _llama_wheel_score(name, py_tag, want_gpu)
+        if s is not None:
+            scored.append((s, url))
+    scored.sort(key=lambda x: x[0])
+    # de-dupe preserving order
+    seen: set[str] = set()
+    out: list[str] = []
+    for _, u in scored:
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
 
 
 def _install_prebuilt_llama(env: dict) -> bool:
-    """Try to install llama-cpp-python from our GitHub release wheels (seconds)."""
+    """Install llama-cpp-python from GitHub release wheels (seconds, not minutes)."""
     index = _load_wheels_index()
     base = (
         os.environ.get("EDGERUNNER_WHEELS_BASE", "").strip()
         or (index.get("base_url") if index else None)
         or "https://github.com/deveshpat/EdgeRunner/releases/download/wheels-v1"
-    )
+    ).rstrip("/")
     release_tag = (index.get("release_tag") if index else None) or "wheels-v1"
     tag = _py_tag()
     want_gpu = str(ACCELERATOR).lower() in ("gpu", "nvidia", "cuda")
     accel = "gpu" if want_gpu else "cpu"
 
-    candidates: list[str] = []
+    # Prefer LIVE release assets (correct filenames) over stale index.json names
+    assets = _list_release_assets(str(release_tag))
+    candidates = _rank_llama_urls(assets, tag, want_gpu)
+    if want_gpu:
+        # also allow cpu fallbacks
+        candidates += [u for u in _rank_llama_urls(assets, tag, want_gpu=False) if u not in candidates]
 
-    # 1) Manifest-declared names (may be approximate)
+    # Known good aliases (updated when CI renames wheels)
+    for alias in (
+        f"llama_cpp_python-0.3.33-{tag}-{tag}-linux_x86_64.whl",
+        f"llama_cpp_python-0.3.33-{tag}-{tag}-manylinux2014_x86_64.whl",
+        "llama_cpp_python-0.3.33-py3-none-linux_x86_64.whl",
+        "llama_cpp_python-0.3.33-py3-none-manylinux2014_x86_64.whl",
+    ):
+        url = f"{base}/{alias}"
+        if url not in candidates:
+            candidates.append(url)
+
+    # Stale index names last (often 404)
     if index:
         pkg = (index.get("packages") or {}).get("llama-cpp-python") or {}
         wheels = pkg.get("wheels") or {}
-        keys = [f"{tag}-{accel}"]
-        if want_gpu:
-            keys.append(f"{tag}-cpu")
-        for k in keys:
+        for k in (f"{tag}-{accel}", f"{tag}-cpu", "any-cpu", "py3-cpu"):
             name = wheels.get(k)
             if name:
-                candidates.append(f"{base.rstrip('/')}/{name}")
+                url = f"{base}/{name}"
+                if url not in candidates:
+                    candidates.append(url)
 
-    # 2) Live release assets (handles manylinux filename tags from CI)
-    for url in _list_release_wheel_urls(str(release_tag)):
-        candidates.append(url)
-    picked = _pick_llama_wheel_url(candidates, tag, want_gpu)
-    if not picked:
-        # try cpu if gpu pick failed
-        if want_gpu:
-            picked = _pick_llama_wheel_url(candidates, tag, want_gpu=False)
-    if not picked:
-        log(f"  no prebuilt llama wheel for {tag}/{accel}")
+    if not candidates:
+        log(f"  no prebuilt llama candidates for {tag}/{accel}")
         return False
 
-    wheel_name = picked.rsplit("/", 1)[-1]
-    dest = WORK / "wheels" / wheel_name
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    log(f"  downloading prebuilt wheel: {wheel_name}")
-    if not _fetch_url(picked, dest, timeout=180):
-        log(f"  wheel download failed: {picked}")
+    log(f"  trying {len(candidates)} prebuilt llama wheel candidate(s)…")
+    wheels_dir = WORK / "wheels"
+    wheels_dir.mkdir(parents=True, exist_ok=True)
+
+    for picked in candidates:
+        wheel_name = picked.rsplit("/", 1)[-1]
+        dest = wheels_dir / wheel_name
+        log(f"  downloading: {wheel_name}")
+        if not _fetch_url(picked, dest, timeout=180):
+            log(f"  skip (download failed): {wheel_name}")
+            continue
+        try:
+            subprocess.check_call(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "-q",
+                    "--no-cache-dir",
+                    "--force-reinstall",
+                    "--no-deps",
+                    str(dest),
+                ],
+                env=env,
+            )
+            log(f"  ✅ prebuilt llama-cpp-python installed ({wheel_name})")
+            return True
+        except subprocess.CalledProcessError as e:
+            log(f"  pip install failed for {wheel_name}: {e}")
+            continue
+
+    log("  all prebuilt llama candidates failed")
+    return False
+
+
+def _install_from_release_find_links(env: dict) -> bool:
+    """Download many release wheels into a folder and pip install -r with --find-links.
+
+    Much faster than hitting PyPI for every package when release is populated.
+    """
+    assets = _list_release_assets("wheels-v1")
+    if len(assets) < 5:
+        return False
+    tag = _py_tag()
+    wheels_dir = WORK / "wheels_all"
+    wheels_dir.mkdir(parents=True, exist_ok=True)
+
+    # Prefer pure py3 + matching cp tag + py3-none linux
+    wanted = 0
+    for name, url in assets:
+        n = name.lower()
+        if not n.endswith(".whl"):
+            continue
+        if any(x in n for x in ("cu11", "cu12", "+cu")) and str(ACCELERATOR).lower() == "cpu":
+            continue
+        keep = (
+            "py3-none-any" in n
+            or f"{tag}-{tag}" in n
+            or (tag in n and "manylinux" in n)
+            or ("py3-none" in n and "linux" in n)
+            or "llama_cpp" in n
+        )
+        if not keep:
+            continue
+        dest = wheels_dir / name
+        if dest.exists() and dest.stat().st_size > 64:
+            wanted += 1
+            continue
+        if _fetch_url(url, dest, timeout=120):
+            wanted += 1
+        if wanted >= 80:  # enough for our dependency tree
+            break
+
+    if wanted < 3:
         return False
 
+    log(f"  find-links install from {wanted} local wheels…")
     try:
         subprocess.check_call(
             [
@@ -218,14 +358,17 @@ def _install_prebuilt_llama(env: dict) -> bool:
                 "install",
                 "-q",
                 "--no-cache-dir",
-                str(dest),
+                "--prefer-binary",
+                f"--find-links={wheels_dir}",
+                "-r",
+                str(WORK / "backend" / "requirements.txt"),
             ],
             env=env,
         )
-        log(f"  ✅ prebuilt llama-cpp-python installed ({accel})")
+        log("  ✅ deps installed via release find-links")
         return True
     except subprocess.CalledProcessError as e:
-        log(f"  prebuilt wheel install failed: {e}")
+        log(f"  find-links install failed: {e}")
         return False
 
 
@@ -237,16 +380,42 @@ def _install_prebuilt_bundle(env: dict) -> bool:
     ).rstrip("/")
     tag = _py_tag()
     accel = "gpu" if str(ACCELERATOR).lower() in ("gpu", "nvidia", "cuda") else "cpu"
-    for name in (f"edgerunner-wheels-{tag}-{accel}.tar.gz", f"edgerunner-wheels-{tag}-cpu.tar.gz"):
-        url = f"{base}/{name}"
+    assets = _list_release_assets("wheels-v1")
+    by_name = {n: u for n, u in assets}
+
+    candidates: list[tuple[str, str]] = []
+    for name in (
+        f"edgerunner-wheels-{tag}-{accel}.tar.gz",
+        f"edgerunner-wheels-{tag}-cpu.tar.gz",
+    ):
+        if name in by_name:
+            candidates.append((name, by_name[name]))
+        else:
+            candidates.append((name, f"{base}/{name}"))
+    for aname, aurl in assets:
+        if aname.endswith(".tar.gz") and "edgerunner-wheels" in aname.lower():
+            if tag in aname or "py3" in aname:
+                if all(aname != c[0] for c in candidates):
+                    candidates.append((aname, aurl))
+
+    for name, url in candidates:
         dest = WORK / name
         log(f"  trying wheels bundle {name}…")
         if not _fetch_url(url, dest, timeout=180):
             continue
         extract = WORK / "wheels_bundle"
+        if extract.exists():
+            import shutil
+
+            shutil.rmtree(extract, ignore_errors=True)
         extract.mkdir(parents=True, exist_ok=True)
         try:
             subprocess.check_call(["tar", "-xzf", str(dest), "-C", str(extract)])
+            whls = list(extract.rglob("*.whl"))
+            if not whls:
+                log(f"  bundle {name} has no .whl files")
+                continue
+            links = whls[0].parent
             subprocess.check_call(
                 [
                     sys.executable,
@@ -255,14 +424,14 @@ def _install_prebuilt_bundle(env: dict) -> bool:
                     "install",
                     "-q",
                     "--no-cache-dir",
-                    "--no-index",
-                    f"--find-links={extract}",
+                    "--prefer-binary",
+                    f"--find-links={links}",
                     "-r",
                     str(WORK / "backend" / "requirements.txt"),
                 ],
                 env=env,
             )
-            log("  ✅ installed all deps from wheels bundle")
+            log("  ✅ installed deps from wheels bundle")
             return True
         except Exception as e:
             log(f"  bundle install failed: {e}")
@@ -275,21 +444,24 @@ def pip_install() -> None:
     env = os.environ.copy()
     env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
     env["PIP_DEFAULT_TIMEOUT"] = "120"
-    # Avoid accidental source builds when a wheel exists on PyPI
     env["PIP_PREFER_BINARY"] = "1"
+    # Never compile if a wheel is available somewhere
+    env["PIP_ONLY_BINARY"] = ""  # allow sdists only as last resort below
 
     log("📦 Installing Python dependencies (prefer prebuilt wheels)…")
 
-    # 1) Full offline-ish bundle if published
+    # 1) Full tarball bundle if published
     if _install_prebuilt_bundle(env):
         log("✅ pip install complete (bundle)")
         return
 
-    # 2) Prebuilt llama-cpp-python (the expensive compile) + binary PyPI rest
+    # 2) Install the expensive native package from our release first
     llama_ok = _install_prebuilt_llama(env)
     if not llama_ok:
-        log("  ⚠️ no prebuilt llama wheel — will compile (slow). "
-            "Publish wheels via scripts/kaggle_build_wheels.py + publish_wheels.sh")
+        log(
+            "  ⚠️ no prebuilt llama wheel — compile fallback (SLOW). "
+            "Check https://github.com/deveshpat/EdgeRunner/releases/tag/wheels-v1"
+        )
         if str(ACCELERATOR).lower() in ("gpu", "nvidia", "cuda"):
             env["CMAKE_ARGS"] = "-DGGML_CUDA=on"
             env["FORCE_CMAKE"] = "1"
@@ -297,8 +469,12 @@ def pip_install() -> None:
             env["CMAKE_ARGS"] = "-DGGML_NATIVE=OFF"
             env["FORCE_CMAKE"] = "1"
 
-    # Install remaining requirements. If llama already installed, pip skips rebuild.
-    # --prefer-binary keeps pure/manylinux wheels snappy.
+    # 3) Prefer release find-links for the rest (or full tree if llama already in)
+    if _install_from_release_find_links(env):
+        log("✅ pip install complete (release find-links)")
+        return
+
+    # 4) PyPI for remaining deps
     cmd = [
         sys.executable,
         "-m",
@@ -311,8 +487,10 @@ def pip_install() -> None:
         str(req),
     ]
     if llama_ok:
-        # Don't let pip try to upgrade llama from sdist
+        # Don't let pip replace our wheel with an sdist compile
         cmd.extend(["--upgrade-strategy", "only-if-needed"])
+        # Pin installed llama so pip doesn't rebuild
+        cmd.extend(["llama-cpp-python==0.3.33"])
 
     subprocess.check_call(cmd, env=env)
     log("✅ pip install complete")
