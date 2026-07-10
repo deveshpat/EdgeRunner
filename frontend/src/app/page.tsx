@@ -26,6 +26,13 @@ import {
 } from "@/lib/google-auth";
 import { syncAfterGoogleLogin } from "@/lib/cloud-sync";
 import { loadConfig } from "@/lib/config";
+import {
+  clearLiveSession,
+  loadLiveSession,
+  pokeHeartbeat,
+  probeBackend,
+  saveLiveSession,
+} from "@/lib/session-persist";
 import ReactMarkdown from "react-markdown";
 import {
   launchKaggleSession,
@@ -288,7 +295,7 @@ export default function EdgeRunnerUI() {
   };
 
 
-  // After vault ready: restore prefs + try silent reconnect (no setup nag)
+  // After vault ready: restore prefs + auto-reconnect Kaggle (no Launch click)
   useEffect(() => {
     if (vaultGate !== "ready") return;
     let cancelled = false;
@@ -318,53 +325,71 @@ export default function EdgeRunnerUI() {
         chatIdRef.current = rec.id;
       }
 
-      // Silent reconnect to last tunnel / local backend
-      const last = (prefs.lastBackendUrl || "").replace(/\/$/, "");
+      // Prefer same-tab sessionStorage (survives refresh), then prefs
+      const live = loadLiveSession();
+      const last = (
+        live?.backendUrl ||
+        prefs.lastBackendUrl ||
+        ""
+      ).replace(/\/$/, "");
+
       if (last) {
-        try {
-          const res = await fetch(`${last}/health`, {
-            signal: AbortSignal.timeout(6000),
-            cache: "no-store",
-            referrerPolicy: "no-referrer",
+        setProgressMsg("reconnecting to session…");
+        // Cancel any soft-detach / keep idle watchdog happy immediately
+        pokeHeartbeat(last);
+        const probe = await probeBackend(last, { retries: 6, timeoutMs: 8000 });
+        if (probe.ok && !cancelled) {
+          const isTunnel =
+            /trycloudflare\.com|loca\.lt|localtunnel\.me|bore\.pub/i.test(last);
+          const phase: "kaggle" | "local" =
+            live?.phase || (isTunnel ? "kaggle" : "local");
+          setBackendUrl(last);
+          setIsOnline(true);
+          setModelReady(probe.model_ready);
+          setModelName(probe.modelName);
+          setPhase(phase);
+          setProgressMsg(
+            probe.model_ready ? null : "backend up; model still loading…"
+          );
+          saveLiveSession({
+            backendUrl: last,
+            phase,
+            kernelRef: live?.kernelRef,
+            accelerator: live?.accelerator || prefs.accelerator,
+            savedAt: Date.now(),
           });
-          if (res.ok && !cancelled) {
-            const data = (await res.json()) as {
-              model_ready?: boolean;
-              model?: { ready?: boolean; name?: string };
-            };
-            setBackendUrl(last);
-            setIsOnline(true);
-            setModelReady(!!(data.model_ready || data.model?.ready));
-            setModelName(data.model?.name || null);
-            const isTunnel =
-              /trycloudflare\.com|loca\.lt|localtunnel\.me|bore\.pub/i.test(
-                last
-              );
-            setPhase(isTunnel ? "kaggle" : "local");
-            setMessages((m) =>
-              m.length
-                ? m
-                : [sysLine(`reconnected · ${last.replace(/^https?:\/\//, "")}`)]
+          savePrefs({ lastBackendUrl: last });
+          setMessages((m) => {
+            const line = sysLine(
+              `session restored · ${last.replace(/^https?:\/\//, "")}`
             );
-            if (!cancelled) setRestoring(false);
-            return;
-          }
-        } catch {
-          /* fall through — session dead */
+            if (!m.length) return [line];
+            // Don't spam if already noted
+            if (m.some((x) => x.content?.includes("session restored"))) return m;
+            return [...m, line];
+          });
+          if (!cancelled) setRestoring(false);
+          return;
         }
       }
 
-      // Configured user: don't force the big setup form
+      // Session dead (tab was closed long enough for idle kill, or first visit)
+      clearLiveSession();
       const hasCreds = !!(secret?.apiToken || secret?.apiKey || prefs.username);
       if (!cancelled) {
         if (hasCreds || prefs.localBackendUrl || prefs.mode) {
-          setPhase("setup"); // compact resume UI, not first-run wizard
-          setMessages([
-            sysLine(
-              "session offline · press Launch or open settings to connect"
-            ),
-          ]);
+          setPhase("setup");
+          setMessages((m) =>
+            m.length
+              ? m
+              : [
+                  sysLine(
+                    "no live session · launch kaggle once (refresh will reconnect automatically)"
+                  ),
+                ]
+          );
         }
+        setProgressMsg(null);
         setRestoring(false);
       }
     })();
@@ -459,73 +484,44 @@ export default function EdgeRunnerUI() {
     };
   }, [backendUrl, modelReady]);
 
-  // Heartbeat
+  // Heartbeat + keep session bookmark fresh for refresh-reconnect
   useEffect(() => {
     if (!backendUrl || isOnline === false) return;
     const beat = () => {
       const base = backendUrlRef.current.replace(/\/$/, "");
       if (!base) return;
-      fetch(`${base}/session/heartbeat`, {
-        method: "GET",
-        keepalive: true,
-        mode: "cors",
-        cache: "no-store",
-        referrerPolicy: "no-referrer",
-      }).catch(() => {
-        fetch(`${base}/session/heartbeat`, {
-          method: "POST",
-          keepalive: true,
-          referrerPolicy: "no-referrer",
-        }).catch(() => {});
+      pokeHeartbeat(base);
+      const isTunnel =
+        /trycloudflare\.com|loca\.lt|localtunnel\.me|bore\.pub/i.test(base);
+      saveLiveSession({
+        backendUrl: base,
+        phase: isTunnel ? "kaggle" : "local",
+        savedAt: Date.now(),
       });
     };
     beat();
-    const interval = setInterval(beat, 15000);
+    // 12s — well under default 90s idle
+    const interval = setInterval(beat, 12000);
     return () => clearInterval(interval);
   }, [backendUrl, isOnline]);
 
-  // Soft detach on leave — NOT hard kill (refresh reconnects within grace)
+  // Refresh must NOT kill Kaggle. Only tab close stops heartbeats → idle kill.
+  // On pagehide we only refresh sessionStorage bookmark (no /session/detach).
   useEffect(() => {
-    const softDetach = () => {
+    const onPageHide = () => {
       if (intentionalStopRef.current) return;
       const url = backendUrlRef.current;
       if (!url) return;
       const isTunnel =
         /trycloudflare\.com|loca\.lt|localtunnel\.me|bore\.pub/i.test(url);
-      if (!isTunnel && /127\.0\.0\.1|localhost/i.test(url)) return;
-
-      const base = url.replace(/\/$/, "");
-      const getUrl = `${base}/session/detach?reason=${encodeURIComponent("pagehide")}&grace=60`;
-      try {
-        const img = new Image();
-        img.src = getUrl;
-      } catch {
-        /* ignore */
-      }
-      try {
-        if (navigator.sendBeacon) {
-          navigator.sendBeacon(
-            `${base}/session/detach`,
-            new Blob(["pagehide"], { type: "text/plain" })
-          );
-        }
-      } catch {
-        /* ignore */
-      }
-      try {
-        fetch(getUrl, {
-          method: "GET",
-          keepalive: true,
-          mode: "no-cors",
-          cache: "no-store",
-          referrerPolicy: "no-referrer",
-        }).catch(() => {});
-      } catch {
-        /* best effort */
-      }
+      saveLiveSession({
+        backendUrl: url,
+        phase: isTunnel ? "kaggle" : "local",
+        savedAt: Date.now(),
+      });
+      // One last heartbeat so a quick refresh doesn't trip idle timeout
+      pokeHeartbeat(url);
     };
-
-    const onPageHide = () => softDetach();
     window.addEventListener("pagehide", onPageHide);
     return () => window.removeEventListener("pagehide", onPageHide);
   }, []);
@@ -598,6 +594,11 @@ export default function EdgeRunnerUI() {
         mode: "local",
         localBackendUrl: url,
         lastBackendUrl: url,
+      });
+      saveLiveSession({
+        backendUrl: url,
+        phase: "local",
+        savedAt: Date.now(),
       });
     } catch (e) {
       setSessionError(
@@ -728,7 +729,17 @@ export default function EdgeRunnerUI() {
       savePrefs({
         lastBackendUrl: result.publicUrl,
         accelerator: result.accelerator,
+        mode: "kaggle",
       });
+      // Survives page refresh in this tab — no need to click Launch again
+      saveLiveSession({
+        backendUrl: result.publicUrl,
+        phase: "kaggle",
+        kernelRef: result.kernelRef,
+        accelerator: result.accelerator,
+        savedAt: Date.now(),
+      });
+      pokeHeartbeat(result.publicUrl);
 
       void waitForBackendHealth(result.publicUrl, {
         timeoutMs: 600_000,
@@ -776,6 +787,7 @@ export default function EdgeRunnerUI() {
       setModelReady(false);
       setModelName(null);
       setMessages((m) => [...m, sysLine("session stopped")]);
+      clearLiveSession();
       savePrefs({ lastBackendUrl: undefined });
     } finally {
       setSessionBusy(false);
@@ -1623,8 +1635,8 @@ export default function EdgeRunnerUI() {
                   </label>
                 </div>
                 <p className="text-[var(--dim)] leading-relaxed">
-                  refresh keeps the session (soft detach + reconnect). stop /
-                  idle timeout kills Kaggle. page close → ~60s detach grace.
+                  refresh auto-reconnects (no re-launch). stop / close tab +
+                  idle timeout kills Kaggle.
                 </p>
                 <button
                   type="button"
