@@ -197,7 +197,15 @@ export default function EdgeRunnerUI() {
           const ok = await tryAutoUnlock();
           if (ok || isUnlocked()) {
             await migrateLegacyIfNeeded();
-            if (!cancelled) setVaultGate("ready");
+            if (!cancelled) {
+              setVaultGate("ready");
+              // Pull cloud vault if signed in (multi-device)
+              if (isGoogleSignedIn()) {
+                setTimeout(() => {
+                  void runGoogleSync().catch(() => {});
+                }, 0);
+              }
+            }
             return;
           }
         }
