@@ -1,66 +1,90 @@
 # EdgeRunner
 
-Local agentic coding harness with optional **one-click Kaggle CPU/GPU** deploy.
+Agentic coding harness that runs **locally** or on **Kaggle CPU/GPU**, with a static UI on **GitHub Pages**.
 
-- **Local:** run the FastAPI backend + Next.js UI on your machine  
-- **Kaggle:** paste API credentials in the UI → orchestrator pushes a headless kernel → Cloudflare HTTPS tunnel → chat works → session self-kills on tab close / idle (protects monthly GPU quota)
+Live UI: [https://deveshpat.github.io/EdgeRunner/](https://deveshpat.github.io/EdgeRunner/)
+
+## User flow (GitHub Pages)
+
+1. Open the site → choose **Kaggle** or **Local URL**
+2. **Kaggle:** paste username + API token, pick GPU or CPU  
+   - If GPU fails (e.g. monthly hour quota), it **falls back to CPU** by default  
+   - Browser talks to the [Kaggle Public API](https://www.kaggle.com/docs/api) directly (CORS allowed), packs the worker, pushes a kernel, scrapes the HTTPS tunnel from logs, and attaches it
+3. **Local:** paste `http://127.0.0.1:8000` (or any reachable backend)
+4. Chat as usual
+5. **Close the tab:**  
+   - Chat history is stored in the browser (**IndexedDB**)  
+   - A `sendBeacon` shutdown + missing heartbeats tear down the Kaggle worker (protects ~30 GPU hrs/month)
+
+Secrets stay in `sessionStorage` only (cleared when the tab closes). They are never written to IndexedDB or localStorage.
 
 ## Repo layout
 
 ```
 EdgeRunner/
-├── backend/           # FastAPI + LangGraph agent (local or on Kaggle)
-├── frontend/          # Next.js UI (chat + Kaggle session panel)
-├── orchestrator/      # Local control plane: pack + push kernel, scrape tunnel URL
-├── kaggle_worker/     # Bootstrap template embedded into the Kaggle script
-└── scripts/dev.sh     # Start orchestrator + frontend together
+├── backend/              # FastAPI + LangGraph agent (local or on Kaggle)
+├── frontend/             # Next.js static UI (GH Pages)
+│   └── public/kernel-bundle.json   # packed worker (generated)
+├── orchestrator/         # Optional local control plane (dev / offline)
+├── kaggle_worker/        # Bootstrap template embedded into the Kaggle script
+└── scripts/
+    ├── pack_kernel_bundle.py   # rebuild kernel-bundle.json
+    └── dev.sh
 ```
 
-## Quick start (local backend only)
+## Quick start (local backend + UI)
 
 ```bash
+# Terminal 1 — backend
 cd backend
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 EDGERUNNER_AUTO=1 python main.py    # http://127.0.0.1:8000
-```
 
-```bash
+# Terminal 2 — UI (basePath /EdgeRunner → open that path)
 cd frontend
-npm install && npm run dev          # http://127.0.0.1:3000
+python3 ../scripts/pack_kernel_bundle.py
+npm install && npm run dev
+# http://127.0.0.1:3000/EdgeRunner/
 ```
 
-Point the UI backend URL at `http://127.0.0.1:8000`.
+On the setup screen, use **Local URL** → `http://127.0.0.1:8000`.
 
-## Quick start (Kaggle deploy)
+## Kaggle credentials
 
-1. Create a Kaggle API token: [kaggle.com/settings](https://www.kaggle.com/settings) → API  
-2. Start orchestrator + UI:
-
-```bash
-./scripts/dev.sh
-# or manually:
-#   cd orchestrator && python -m venv .venv && source .venv/bin/activate
-#   pip install -r requirements.txt && python main.py   # :9000
-#   cd frontend && npm install && npm run dev           # :3000
-```
-
-3. Open the UI → session panel → username + token → **CPU** (for testing) → **Launch**  
-4. Wait for state `online` (first boot: pip + model download can take several minutes)  
-5. Chat as usual — backend URL is filled automatically  
+1. [kaggle.com/settings](https://www.kaggle.com/settings) → API → create token  
+2. On the Pages UI: username + token → **GPU** or **CPU** → **Launch**  
+3. First boot installs pip deps + model (several minutes). Status shows log tail until `EDGERUNNER_URL=…` appears.
 
 ### Session lifecycle (GPU safety)
 
 | Event | Behavior |
 |-------|----------|
-| Heartbeat | UI POSTs `/session/heartbeat` every ~25s |
+| Heartbeat | UI `POST /session/heartbeat` every ~25s |
 | Tab close | `sendBeacon` → `/session/shutdown` |
 | Idle | No heartbeat for 90s (configurable) → worker `os._exit(0)` |
 | Max lifetime | Hard cap (default 1h) |
 
 Kaggle has **no public stop-session API**. Teardown is the worker process exiting.
 
-**Use CPU while developing.** GPU sessions burn monthly quota if left running.
+## Optional local orchestrator
+
+Still available for offline/dev without browser→Kaggle:
+
+```bash
+./scripts/dev.sh
+# orchestrator :9000 + frontend :3000
+```
+
+The Pages flow does **not** require the orchestrator.
+
+## Deploy (GitHub Pages)
+
+Push to `main`. Workflow [`.github/workflows/nextjs.yml`](.github/workflows/nextjs.yml):
+
+1. `python3 scripts/pack_kernel_bundle.py`
+2. `next build` (static export, `basePath=/EdgeRunner`)
+3. Deploy `frontend/out` to Pages
 
 ## Environment (worker)
 
@@ -74,9 +98,7 @@ Kaggle has **no public stop-session API**. Teardown is the worker process exitin
 
 ## API sketch
 
-**Orchestrator** (`:9000`): `POST /sessions/start`, `GET /sessions/{id}`, `POST /sessions/{id}/stop`  
-
-**Worker** (tunneled): `GET /health`, `POST /chat`, `POST /session/heartbeat`, `POST /session/shutdown`
+**Worker** (local or tunneled): `GET /health`, `POST /chat`, `POST /session/heartbeat`, `POST /session/shutdown`
 
 ## License
 
