@@ -1,18 +1,17 @@
 {
-  "version": 2,
+  "version": 3,
   "release_tag": "wheels-v1",
   "base_url": "https://github.com/deveshpat/EdgeRunner/releases/download/wheels-v1",
-  "notes": "Prefer live GitHub release assets. CI builds a py3-none linux wheel for llama-cpp-python that works on Kaggle CPython 3.10–3.12.",
+  "notes": "llama-cpp-python must be manylinux_2_28 (or built on Kaggle). Ubuntu 24.04 GHA wheels need GLIBC_2.38 and fail on Kaggle.",
   "python_tags": ["cp310", "cp311", "cp312"],
   "packages": {
     "llama-cpp-python": {
       "version": "0.3.33",
       "wheels": {
-        "any-cpu": "llama_cpp_python-0.3.33-py3-none-linux_x86_64.whl",
-        "py3-cpu": "llama_cpp_python-0.3.33-py3-none-linux_x86_64.whl",
-        "cp310-cpu": "llama_cpp_python-0.3.33-py3-none-linux_x86_64.whl",
-        "cp311-cpu": "llama_cpp_python-0.3.33-py3-none-linux_x86_64.whl",
-        "cp312-cpu": "llama_cpp_python-0.3.33-py3-none-linux_x86_64.whl"
+        "cp310-cpu": "llama_cpp_python-0.3.33-cp310-cp310-manylinux_2_28_x86_64.whl",
+        "cp311-cpu": "llama_cpp_python-0.3.33-cp311-cp311-manylinux_2_28_x86_64.whl",
+        "cp312-cpu": "llama_cpp_python-0.3.33-cp312-cp312-manylinux_2_28_x86_64.whl",
+        "any-cpu": "llama_cpp_python-0.3.33-cp312-cp312-manylinux_2_28_x86_64.whl"
       }
     }
   }

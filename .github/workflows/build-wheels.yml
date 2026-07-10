@@ -1,5 +1,9 @@
 name: Build prebuilt wheels (CPU)
 
+# llama-cpp-python MUST be built on manylinux (older glibc).
+# Ubuntu 24.04 GHA runners produce GLIBC_2.38 wheels that fail on Kaggle:
+#   version `GLIBC_2.38' not found
+
 on:
   workflow_dispatch:
   push:
@@ -14,7 +18,64 @@ permissions:
   contents: write
 
 jobs:
-  wheels:
+  # ── Native extension: manylinux_2_28 (glibc 2.28) ─────────────────────────
+  llama-manylinux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # manylinux python tags
+        py: ["cp310-cp310", "cp311-cp311", "cp312-cp312"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build llama-cpp-python inside manylinux_2_28
+        run: |
+          mkdir -p wheelhouse
+          docker run --rm \
+            -v "$PWD":/io \
+            -e CMAKE_ARGS="-DGGML_NATIVE=OFF -DGGML_CUDA=OFF" \
+            -e FORCE_CMAKE=1 \
+            quay.io/pypa/manylinux_2_28_x86_64 \
+            bash -lc '
+              set -euo pipefail
+              PYBIN=/opt/python/${{ matrix.py }}/bin
+              "$PYBIN/python" -m pip install -U pip wheel setuptools cmake ninja
+              rm -rf /tmp/ldist && mkdir -p /tmp/ldist
+              "$PYBIN/pip" wheel "llama-cpp-python==0.3.33" \
+                -w /tmp/ldist --no-deps --no-cache-dir
+              # Prefer auditwheel repair for proper manylinux tag
+              mkdir -p /io/wheelhouse
+              for w in /tmp/ldist/llama_cpp_python-*.whl; do
+                if command -v auditwheel >/dev/null 2>&1; then
+                  auditwheel repair "$w" -w /io/wheelhouse || cp "$w" /io/wheelhouse/
+                else
+                  cp "$w" /io/wheelhouse/
+                fi
+              done
+              ls -lah /io/wheelhouse/
+            '
+
+      - name: Alias stable filenames
+        run: |
+          PYTAG=$(echo "${{ matrix.py }}" | cut -d- -f1)  # cp312
+          mkdir -p dist
+          shopt -s nullglob
+          for w in wheelhouse/llama_cpp_python-*.whl; do
+            cp -f "$w" dist/
+            # Stable names bootstrap looks for
+            cp -f "$w" "dist/llama_cpp_python-0.3.33-${PYTAG}-${PYTAG}-manylinux_2_28_x86_64.whl"
+            cp -f "$w" "dist/llama_cpp_python-0.3.33-${PYTAG}-${PYTAG}-linux_x86_64.whl"
+          done
+          ls -lah dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: llama-${{ matrix.py }}
+          path: dist/*.whl
+
+  # ── Pure / binary deps (any modern linux is fine) ─────────────────────────
+  pure-wheels:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -22,84 +83,59 @@ jobs:
         python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-
-      - name: Install build tooling
+      - name: Wheel pure/runtime deps
         run: |
-          python -m pip install -U pip wheel setuptools cmake ninja
-          sudo apt-get update
-          sudo apt-get install -y build-essential
-
-      - name: Build llama-cpp-python CPU wheel
-        env:
-          CMAKE_ARGS: "-DGGML_NATIVE=OFF"
-          FORCE_CMAKE: "1"
-        run: |
+          python -m pip install -U pip wheel
           mkdir -p dist
-          pip wheel "llama-cpp-python==0.3.33" -w dist --no-deps --no-cache-dir
-          # Stable alias so Kaggle bootstrap can find a predictable name
-          PYTAG="cp$(echo ${{ matrix.python-version }} | tr -d .)"
-          for w in dist/llama_cpp_python-*.whl; do
-            cp -f "$w" "dist/llama_cpp_python-0.3.33-${PYTAG}-${PYTAG}-linux_x86_64.whl" || true
-            cp -f "$w" "dist/llama_cpp_python-0.3.33-py3-none-linux_x86_64.whl" || true
-          done
-          ls -lah dist/llama*
-
-      - name: Build remaining runtime wheels
-        run: |
           pip wheel \
             "fastapi" "uvicorn[standard]" "pydantic" \
             "langchain" "langchain-community" "langgraph" \
-            "huggingface-hub" "psutil" "httpx" \
+            "huggingface-hub>=0.23,<2" "psutil" "httpx" \
             -w dist --no-cache-dir
-
-      - name: Pack per-python tarball
-        run: |
+          # Explicitly do NOT include llama-cpp-python here
+          rm -f dist/llama_cpp_python-*.whl || true
           PYTAG="cp$(echo ${{ matrix.python-version }} | tr -d .)"
           tar -C dist -czf "edgerunner-wheels-${PYTAG}-cpu.tar.gz" .
-          ls -lah edgerunner-wheels-*.tar.gz
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          ls -lah
+      - uses: actions/upload-artifact@v4
         with:
-          name: wheels-cp${{ matrix.python-version }}
+          name: pure-cp${{ matrix.python-version }}
           path: |
             dist/*.whl
             edgerunner-wheels-*.tar.gz
 
   publish:
-    needs: wheels
+    needs: [llama-manylinux, pure-wheels]
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download all wheel artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          path: all-wheels
+          path: all
           merge-multiple: true
-
-      - name: Collect wheels + bundles
+      - name: Collect
         run: |
           mkdir -p publish
-          find all-wheels -name '*.whl' -exec cp -n {} publish/ \; 2>/dev/null || \
-            find all-wheels -name '*.whl' -exec cp {} publish/ \;
-          find all-wheels -name 'edgerunner-wheels-*.tar.gz' -exec cp {} publish/ \;
-          ls -lah publish | head -80
-          ls publish/llama* 2>/dev/null || true
-          ls publish/edgerunner-wheels* 2>/dev/null || true
-
-      - name: Publish / update release wheels-v1
+          find all -name '*.whl' -exec cp {} publish/ \;
+          find all -name 'edgerunner-wheels-*.tar.gz' -exec cp {} publish/ \;
+          echo "=== llama wheels ==="
+          ls -lah publish/llama* 2>/dev/null || true
+          echo "=== bundles ==="
+          ls -lah publish/edgerunner-wheels* 2>/dev/null || true
+          # Drop any accidental non-manylinux glibc-bleeding wheels if both exist
+          ls publish | wc -l
+      - name: Publish wheels-v1
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if ! gh release view wheels-v1 >/dev/null 2>&1; then
             gh release create wheels-v1 \
-              --title "Prebuilt wheels (Kaggle fast install)" \
-              --notes "Auto-built CPU wheels + tarballs for EdgeRunner. GPU: scripts/kaggle_build_wheels.py + publish_wheels.sh."
+              --title "Prebuilt wheels (Kaggle-compatible manylinux)" \
+              --notes "llama-cpp-python built on manylinux_2_28 (glibc 2.28) for Kaggle. Pure deps + tarballs included."
           fi
           gh release upload wheels-v1 publish/* --clobber

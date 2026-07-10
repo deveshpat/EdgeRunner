@@ -438,43 +438,117 @@ def _install_prebuilt_bundle(env: dict) -> bool:
     return False
 
 
+def _verify_llama_import() -> tuple[bool, str]:
+    """Return (ok, detail). Catches GLIBC mismatches on prebuilt wheels."""
+    r = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import llama_cpp; print(getattr(llama_cpp, '__version__', 'ok'))",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if r.returncode == 0:
+        return True, (r.stdout or "").strip()
+    err = ((r.stderr or "") + (r.stdout or "")).strip()
+    return False, err[-500:]
+
+
+def _compile_llama_from_source(env: dict) -> bool:
+    """Build llama-cpp-python on this machine (Kaggle) — correct glibc."""
+    e = env.copy()
+    if str(ACCELERATOR).lower() in ("gpu", "nvidia", "cuda"):
+        e["CMAKE_ARGS"] = "-DGGML_CUDA=on"
+        e["FORCE_CMAKE"] = "1"
+        log("  compiling llama-cpp-python from source (CUDA)…")
+    else:
+        e["CMAKE_ARGS"] = "-DGGML_NATIVE=OFF"
+        e["FORCE_CMAKE"] = "1"
+        log("  compiling llama-cpp-python from source (CPU, this can take a few minutes)…")
+    try:
+        subprocess.check_call(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "-q",
+                "--no-cache-dir",
+                "--force-reinstall",
+                "--no-binary=llama-cpp-python",
+                "llama-cpp-python==0.3.33",
+            ],
+            env=e,
+        )
+        ok, detail = _verify_llama_import()
+        if ok:
+            log(f"  ✅ source-built llama-cpp-python works ({detail})")
+            return True
+        log(f"  source build import still failed: {detail}")
+        return False
+    except subprocess.CalledProcessError as ex:
+        log(f"  source build failed: {ex}")
+        return False
+
+
+def _ensure_working_llama(env: dict) -> bool:
+    """Make sure `import llama_cpp` works; recompile if prebuilt is wrong glibc."""
+    ok, detail = _verify_llama_import()
+    if ok:
+        log(f"  ✅ llama_cpp import ok ({detail})")
+        return True
+    log(f"  ⚠️ prebuilt llama_cpp unusable: {detail[:300]}")
+    if "GLIBC" in detail or "libllama" in detail or "shared library" in detail:
+        log("  (GLIBC/shared-lib mismatch — common when wheels were built on newer Ubuntu)")
+    # Remove broken install then compile on-box
+    subprocess.run(
+        [sys.executable, "-m", "pip", "uninstall", "-y", "llama-cpp-python"],
+        capture_output=True,
+    )
+    return _compile_llama_from_source(env)
+
+
 def pip_install() -> None:
-    """Fast path: prebuilt wheels from GitHub. Slow path: compile llama-cpp."""
+    """Fast path: prebuilt wheels from GitHub. Verify llama; compile if needed."""
     req = WORK / "backend" / "requirements.txt"
     env = os.environ.copy()
     env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
     env["PIP_DEFAULT_TIMEOUT"] = "120"
     env["PIP_PREFER_BINARY"] = "1"
-    # Never compile if a wheel is available somewhere
-    env["PIP_ONLY_BINARY"] = ""  # allow sdists only as last resort below
 
     log("📦 Installing Python dependencies (prefer prebuilt wheels)…")
 
-    # 1) Full tarball bundle if published
-    if _install_prebuilt_bundle(env):
-        log("✅ pip install complete (bundle)")
-        return
+    # 1) Full tarball bundle if published (pure deps + maybe llama)
+    bundle_ok = _install_prebuilt_bundle(env)
+    if bundle_ok:
+        if _ensure_working_llama(env):
+            log("✅ pip install complete (bundle + verified llama)")
+            return
+        log("  bundle ok but llama broken — will fix llama then continue")
 
-    # 2) Install the expensive native package from our release first
+    # 2) Dedicated llama wheel from release, then verify
     llama_ok = _install_prebuilt_llama(env)
+    if llama_ok:
+        llama_ok = _ensure_working_llama(env)
     if not llama_ok:
-        log(
-            "  ⚠️ no prebuilt llama wheel — compile fallback (SLOW). "
-            "Check https://github.com/deveshpat/EdgeRunner/releases/tag/wheels-v1"
-        )
-        if str(ACCELERATOR).lower() in ("gpu", "nvidia", "cuda"):
-            env["CMAKE_ARGS"] = "-DGGML_CUDA=on"
-            env["FORCE_CMAKE"] = "1"
-        else:
-            env["CMAKE_ARGS"] = "-DGGML_NATIVE=OFF"
-            env["FORCE_CMAKE"] = "1"
+        log("  no working prebuilt llama — compiling on Kaggle (slow but compatible)")
+        if not _compile_llama_from_source(env):
+            raise RuntimeError(
+                "Could not install a working llama-cpp-python "
+                "(prebuilt glibc mismatch and source build failed)"
+            )
 
-    # 3) Prefer release find-links for the rest (or full tree if llama already in)
+    # 3) Remaining deps via release find-links or PyPI (do not reinstall llama)
     if _install_from_release_find_links(env):
+        # find-links might have re-pulled a bad llama — re-verify
+        if not _ensure_working_llama(env):
+            raise RuntimeError("llama_cpp broken after find-links install")
         log("✅ pip install complete (release find-links)")
         return
 
-    # 4) PyPI for remaining deps
+    # 4) PyPI for remaining requirements (skip reinstalling llama if present)
     cmd = [
         sys.executable,
         "-m",
@@ -483,16 +557,14 @@ def pip_install() -> None:
         "-q",
         "--no-cache-dir",
         "--prefer-binary",
+        "--upgrade-strategy",
+        "only-if-needed",
         "-r",
         str(req),
     ]
-    if llama_ok:
-        # Don't let pip replace our wheel with an sdist compile
-        cmd.extend(["--upgrade-strategy", "only-if-needed"])
-        # Pin installed llama so pip doesn't rebuild
-        cmd.extend(["llama-cpp-python==0.3.33"])
-
     subprocess.check_call(cmd, env=env)
+    if not _ensure_working_llama(env):
+        raise RuntimeError("llama_cpp broken after pip install -r")
     log("✅ pip install complete")
 
 
