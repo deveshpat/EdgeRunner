@@ -114,41 +114,99 @@ def _load_wheels_index() -> dict:
     return {}
 
 
+def _list_release_wheel_urls(tag: str = "wheels-v1") -> list[str]:
+    """GitHub release asset URLs (browser_download_url) for prebuilt wheels."""
+    import json
+    import urllib.request
+
+    api = f"https://api.github.com/repos/deveshpat/EdgeRunner/releases/tags/{tag}"
+    try:
+        req = urllib.request.Request(
+            api,
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "EdgeRunner"},
+        )
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        urls = []
+        for a in data.get("assets") or []:
+            name = a.get("name") or ""
+            url = a.get("browser_download_url") or ""
+            if name.endswith(".whl") and url:
+                urls.append(url)
+        return urls
+    except Exception as e:
+        log(f"  release asset list failed: {e}")
+        return []
+
+
+def _pick_llama_wheel_url(urls: list[str], py_tag: str, want_gpu: bool) -> str | None:
+    """Pick best llama-cpp-python wheel for this interpreter / accel."""
+    llama = [u for u in urls if "llama_cpp_python" in u.lower() or "llama-cpp-python" in u.lower()]
+    if not llama:
+        return None
+    # Prefer matching abi tag
+    tagged = [u for u in llama if py_tag in u]
+    pool = tagged or llama
+
+    def score(u: str) -> tuple:
+        name = u.rsplit("/", 1)[-1].lower()
+        gpuish = any(x in name for x in ("cu11", "cu12", "cuda", "+cu"))
+        # want_gpu → prefer gpuish; else prefer non-gpuish
+        return (
+            0 if (gpuish == want_gpu) else 1,
+            0 if py_tag in name else 1,
+            len(name),
+        )
+
+    pool.sort(key=score)
+    return pool[0] if pool else None
+
+
 def _install_prebuilt_llama(env: dict) -> bool:
     """Try to install llama-cpp-python from our GitHub release wheels (seconds)."""
     index = _load_wheels_index()
-    if not index:
-        return False
-
     base = (
         os.environ.get("EDGERUNNER_WHEELS_BASE", "").strip()
-        or index.get("base_url")
+        or (index.get("base_url") if index else None)
         or "https://github.com/deveshpat/EdgeRunner/releases/download/wheels-v1"
     )
-    pkg = (index.get("packages") or {}).get("llama-cpp-python") or {}
-    wheels = pkg.get("wheels") or {}
+    release_tag = (index.get("release_tag") if index else None) or "wheels-v1"
     tag = _py_tag()
-    accel = "gpu" if str(ACCELERATOR).lower() in ("gpu", "nvidia", "cuda") else "cpu"
-    # Prefer exact accel, then cpu fallback for gpu miss
-    keys = [f"{tag}-{accel}"]
-    if accel == "gpu":
-        keys.append(f"{tag}-cpu")
+    want_gpu = str(ACCELERATOR).lower() in ("gpu", "nvidia", "cuda")
+    accel = "gpu" if want_gpu else "cpu"
 
-    wheel_name = None
-    for k in keys:
-        if k in wheels:
-            wheel_name = wheels[k]
-            break
-    if not wheel_name:
-        log(f"  no prebuilt llama wheel key for {keys} in index")
+    candidates: list[str] = []
+
+    # 1) Manifest-declared names (may be approximate)
+    if index:
+        pkg = (index.get("packages") or {}).get("llama-cpp-python") or {}
+        wheels = pkg.get("wheels") or {}
+        keys = [f"{tag}-{accel}"]
+        if want_gpu:
+            keys.append(f"{tag}-cpu")
+        for k in keys:
+            name = wheels.get(k)
+            if name:
+                candidates.append(f"{base.rstrip('/')}/{name}")
+
+    # 2) Live release assets (handles manylinux filename tags from CI)
+    for url in _list_release_wheel_urls(str(release_tag)):
+        candidates.append(url)
+    picked = _pick_llama_wheel_url(candidates, tag, want_gpu)
+    if not picked:
+        # try cpu if gpu pick failed
+        if want_gpu:
+            picked = _pick_llama_wheel_url(candidates, tag, want_gpu=False)
+    if not picked:
+        log(f"  no prebuilt llama wheel for {tag}/{accel}")
         return False
 
-    url = f"{base.rstrip('/')}/{wheel_name}"
+    wheel_name = picked.rsplit("/", 1)[-1]
     dest = WORK / "wheels" / wheel_name
     dest.parent.mkdir(parents=True, exist_ok=True)
     log(f"  downloading prebuilt wheel: {wheel_name}")
-    if not _fetch_url(url, dest, timeout=180):
-        log(f"  wheel download failed: {url}")
+    if not _fetch_url(picked, dest, timeout=180):
+        log(f"  wheel download failed: {picked}")
         return False
 
     try:
