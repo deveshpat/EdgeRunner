@@ -217,12 +217,30 @@ export default function EdgeRunnerUI() {
         if (res.ok) {
           const data = (await res.json()) as {
             model_ready?: boolean;
-            model?: { ready?: boolean; name?: string; loading?: boolean };
+            model_error?: string;
+            model?: {
+              ready?: boolean;
+              name?: string;
+              loading?: boolean;
+              phase?: string;
+              error?: string;
+              detail?: string;
+            };
           };
           const ready = !!(data.model_ready || data.model?.ready);
           setModelReady(ready);
+          const err =
+            data.model_error ||
+            data.model?.error ||
+            (data.model?.phase === "error" ? data.model?.detail : undefined);
           if (ready) {
             setProgressMsg(null);
+          } else if (err) {
+            setProgressMsg(
+              err.includes("GLIBC")
+                ? "Model engine incompatible (GLIBC) — relaunch after manylinux wheel deploy"
+                : `Model error: ${err.slice(0, 160)}`
+            );
           } else if (data.model?.loading || data.model?.name) {
             setProgressMsg(
               data.model?.name

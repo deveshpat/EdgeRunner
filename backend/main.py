@@ -81,11 +81,13 @@ async def root():
 async def health_check():
     meta = get_model_meta()
     ready = is_model_ready()
+    # Surface load errors (e.g. GLIBC mismatch) so the UI can show more than "loading"
+    err = (meta or {}).get("error") or (meta or {}).get("detail") if (meta or {}).get("phase") == "error" else None
     return {
         "status": "online",
         "model_ready": ready,
-        # Always include model meta so UI can show loading phase / name
         "model": meta if meta else {"ready": False, "loading": not ready},
+        "model_error": err,
         "session_id": SESSION_ID,
         "accelerator": ACCELERATOR,
         "session": watchdog.status(),
