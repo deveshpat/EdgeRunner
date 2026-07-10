@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Geist, Geist_Mono, Orbitron, Share_Tech_Mono } from "next/font/google";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -12,6 +12,18 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const orbitron = Orbitron({
+  variable: "--font-orbitron",
+  subsets: ["latin"],
+  weight: ["500", "600", "700", "800", "900"],
+});
+
+const shareTech = Share_Tech_Mono({
+  variable: "--font-share-tech",
+  subsets: ["latin"],
+  weight: "400",
+});
+
 /**
  * Security posture for a static GitHub Pages app:
  * - No third-party analytics
@@ -20,14 +32,12 @@ const geistMono = Geist_Mono({
  * - Secrets + chat encrypted client-side (see src/lib/vault.ts)
  */
 export const metadata: Metadata = {
-  title: "EdgeRunner — Local & Kaggle Agentic Harness",
+  title: "EdgeRunner — Night City Agent Harness",
   description:
-    "Run EdgeRunner locally or launch on Kaggle CPU/GPU with automatic HTTPS tunnels. Credentials and chat encrypted on-device.",
+    "Cyberpunk agentic coding harness. Run on Kaggle CPU/GPU or local — encrypted vault, neon CLI, SOTA models.",
   robots: { index: true, follow: true },
   referrer: "no-referrer",
   other: {
-    // CSP: allow self + Kaggle API + arbitrary https backends (tunnels) + loopback.
-    // 'unsafe-inline' needed for Next static CSS/style injection; no remote scripts.
     "Content-Security-Policy": [
       "default-src 'self'",
       "base-uri 'self'",
@@ -51,7 +61,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#0a0a0a",
+  themeColor: "#07010f",
   colorScheme: "dark",
 };
 
@@ -63,7 +73,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${geistSans.variable} ${geistMono.variable} ${orbitron.variable} ${shareTech.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">{children}</body>
     </html>

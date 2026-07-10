@@ -11,7 +11,6 @@ import {
   Eye,
   EyeOff,
   ChevronRight,
-  Terminal,
   X,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -929,33 +928,33 @@ export default function EdgeRunnerUI() {
   // ── Vault gates ─────────────────────────────────────────────────────────
   if (vaultGate === "loading" || (vaultGate === "ready" && restoring)) {
     return (
-      <div className="er-shell min-h-screen flex items-center justify-center text-[var(--muted)] text-sm">
-        <Loader2 className="animate-spin text-[var(--accent)] mr-3" size={18} />
-        <span className="font-mono">booting vault…</span>
+      <div className="er-shell min-h-screen flex flex-col items-center justify-center text-sm gap-3">
+        <div className="er-logo">EDGERUNNER</div>
+        <div className="flex items-center gap-2 text-[var(--cyan)]">
+          <Loader2 className="animate-spin" size={16} />
+          <span className="er-logo-sub">jacking into vault…</span>
+        </div>
       </div>
     );
   }
 
   if (vaultGate === "create" || vaultGate === "need_passphrase") {
     return (
-      <div className="er-shell min-h-screen flex flex-col font-mono text-sm">
-        <header className="flex items-center gap-3 px-5 py-4 border-b border-[var(--border)]">
-          <Terminal size={18} className="text-[var(--accent)]" />
-          <span className="text-[var(--accent)] tracking-widest text-xs font-semibold">
-            EDGERUNNER
-          </span>
-          <span className="text-[var(--muted)] text-xs">// vault</span>
+      <div className="er-shell min-h-screen flex flex-col text-sm">
+        <div className="er-hazard" />
+        <header className="er-header flex items-center gap-3 px-5 py-4">
+          <span className="er-logo">EDGERUNNER</span>
+          <span className="er-logo-sub">// chrome vault</span>
         </header>
         <main className="flex-1 flex items-start justify-center p-6">
-          <div className="w-full max-w-md space-y-4">
+          <div className="w-full max-w-md space-y-4 er-panel er-panel-hot er-clip p-5">
             {vaultGate === "create" ? (
               <>
                 <p className="text-[var(--fg)]">
-                  <span className="text-[var(--prompt)]">›</span> create encrypted
-                  vault
+                  <span className="er-prompt-char">›</span> initialize encrypted vault
                 </p>
                 <p className="text-xs text-[var(--muted)]">
-                  AES-256-GCM on-device. Keys never leave this browser.
+                  AES-256-GCM chrome on-device. Keys never leave Night City (this browser).
                 </p>
                 <div className="space-y-2">
                   {(
@@ -968,10 +967,10 @@ export default function EdgeRunnerUI() {
                       key={mode}
                       type="button"
                       onClick={() => setVaultModeChoice(mode)}
-                      className={`w-full text-left px-3 py-2.5 rounded border text-xs ${
+                      className={`w-full text-left px-3 py-2.5 text-xs er-btn ${
                         vaultModeChoice === mode
-                          ? "border-[var(--accent-dim)] bg-[#0f1a10] text-[var(--accent)]"
-                          : "border-[var(--border)] text-[var(--muted)] hover:border-[#444]"
+                          ? "border-[var(--accent)] text-[var(--accent)] shadow-[0_0_12px_var(--accent-glow)]"
+                          : ""
                       }`}
                     >
                       {label}
@@ -985,14 +984,14 @@ export default function EdgeRunnerUI() {
                       value={passphrase}
                       onChange={(e) => setPassphrase(e.target.value)}
                       placeholder="passphrase"
-                      className="w-full bg-[var(--bg-panel)] border border-[var(--border)] rounded px-3 py-2 text-sm"
+                      className="er-input w-full px-3 py-2 text-sm"
                     />
                     <input
                       type={showPass ? "text" : "password"}
                       value={passphrase2}
                       onChange={(e) => setPassphrase2(e.target.value)}
                       placeholder="confirm"
-                      className="w-full bg-[var(--bg-panel)] border border-[var(--border)] rounded px-3 py-2 text-sm"
+                      className="er-input w-full px-3 py-2 text-sm"
                     />
                     <button
                       type="button"
@@ -1007,7 +1006,7 @@ export default function EdgeRunnerUI() {
                 <button
                   type="button"
                   onClick={finishVaultCreate}
-                  className="w-full py-2.5 rounded bg-[var(--accent-dim)] text-[var(--accent)] text-sm hover:brightness-110"
+                  className="er-btn-primary w-full py-2.5"
                 >
                   create vault
                 </button>
@@ -1026,14 +1025,14 @@ export default function EdgeRunnerUI() {
                       if (e.key === "Enter") void finishVaultUnlock();
                     }}
                     placeholder="passphrase"
-                    className="w-full bg-[var(--bg-panel)] border border-[var(--border)] rounded px-3 py-2 text-sm"
+                    className="er-input w-full px-3 py-2 text-sm"
                     autoFocus
                   />
                 )}
                 <button
                   type="button"
                   onClick={finishVaultUnlock}
-                  className="w-full py-2.5 rounded bg-[var(--accent-dim)] text-[var(--accent)] text-sm"
+                  className="er-btn-primary w-full py-2.5"
                 >
                   unlock
                 </button>
@@ -1064,17 +1063,15 @@ export default function EdgeRunnerUI() {
 
   // ── Main CLI shell (always — setup is a panel, not a dead-end page) ─────
   return (
-    <div className="er-shell min-h-screen flex flex-col font-mono text-sm">
+    <div className="er-shell min-h-screen flex flex-col text-sm">
+      <div className="er-hazard shrink-0" />
       {/* Title bar */}
-      <header className="flex items-center gap-3 px-3 sm:px-4 py-2 border-b border-[var(--border)] bg-[var(--bg-panel)] shrink-0">
-        <Terminal size={16} className="text-[var(--accent)] shrink-0" />
+      <header className="er-header flex items-center gap-3 px-3 sm:px-4 py-2.5 shrink-0">
         <div className="flex items-center gap-2 min-w-0 flex-1">
-          <span className="text-[var(--accent)] tracking-widest text-xs font-semibold shrink-0">
-            EDGERUNNER
-          </span>
+          <span className="er-logo shrink-0">EDGERUNNER</span>
           <span className="text-[var(--dim)] hidden sm:inline">│</span>
-          <span className="text-[var(--muted)] text-xs truncate">
-            agent harness
+          <span className="er-logo-sub truncate hidden sm:inline">
+            night city · agent harness
           </span>
         </div>
         <div className="flex items-center gap-2 sm:gap-3 text-xs shrink-0">
@@ -1102,7 +1099,7 @@ export default function EdgeRunnerUI() {
             <button
               type="button"
               onClick={() => void openModelPicker()}
-              className="text-[var(--muted)] hover:text-[var(--fg)] px-1.5 py-0.5 border border-[var(--border)] rounded"
+              className="er-btn-cyan px-2 py-0.5"
               title="Models"
             >
               model
@@ -1113,7 +1110,7 @@ export default function EdgeRunnerUI() {
               type="button"
               onClick={() => void stopSession()}
               disabled={sessionBusy}
-              className="text-[var(--danger)] hover:brightness-125 px-1.5 py-0.5"
+              className="er-btn-danger px-2 py-0.5"
               title="Stop Kaggle session"
             >
               <Square size={12} className="inline" /> stop
@@ -1122,7 +1119,7 @@ export default function EdgeRunnerUI() {
           <button
             type="button"
             onClick={() => setShowSettings(true)}
-            className="text-[var(--muted)] hover:text-[var(--fg)] p-1"
+            className="er-btn-ghost p-1"
             title="Settings"
           >
             <Settings2 size={15} />
@@ -1132,9 +1129,9 @@ export default function EdgeRunnerUI() {
 
       {/* Status strip */}
       {(progressMsg || sessionBusy) && (
-        <div className="px-4 py-1.5 text-xs text-[var(--warn)] border-b border-[var(--border)] bg-[#1a1608] flex items-center gap-2">
+        <div className="er-status-strip px-4 py-1.5 text-xs flex items-center gap-2">
           <Loader2 size={12} className="animate-spin shrink-0" />
-          <span className="truncate">
+          <span className="truncate uppercase tracking-wider text-[10px]">
             {progressMsg || "working…"}
           </span>
         </div>
@@ -1143,19 +1140,23 @@ export default function EdgeRunnerUI() {
       {/* Transcript */}
       <main className="flex-1 overflow-y-auto px-3 sm:px-6 py-4 space-y-3">
         {messages.length === 0 && (
-          <div className="text-[var(--muted)] text-xs space-y-1 pt-8 max-w-xl">
-            <p>
-              <span className="text-[var(--prompt)]">›</span> EdgeRunner CLI
-              agent
+          <div className="text-[var(--muted)] text-xs space-y-2 pt-10 max-w-xl">
+            <div className="er-hero-tag">CHOOMS · NETRUNNERS · ONLY</div>
+            <p className="text-[var(--fg)] text-sm">
+              <span className="er-prompt-char">›</span>{" "}
+              <span className="er-logo" style={{ letterSpacing: "0.15em", fontSize: "0.85rem" }}>
+                EDGERUNNER
+              </span>{" "}
+              <span className="text-[var(--cyan)]">agent net</span>
             </p>
             <p className="pl-3">
-              chat casually · prefix coding with{" "}
+              jack in · chat casually · prefix coding with{" "}
               <code className="text-[var(--accent)]">/code</code>
             </p>
-            <p className="pl-3">
+            <p className="pl-3 text-[var(--dim)]">
               {configured
-                ? "credentials saved — open settings only to change them"
-                : "open settings to launch Kaggle or attach a local backend"}
+                ? "chrome saved — settings only when you need a new run"
+                : "open settings to launch Kaggle or attach local chrome"}
             </p>
           </div>
         )}
@@ -1163,11 +1164,8 @@ export default function EdgeRunnerUI() {
         {messages.map((m, i) => {
           if (m.role === "system") {
             return (
-              <div
-                key={i}
-                className="text-xs text-[var(--muted)] flex gap-2 items-start"
-              >
-                <span className="text-[var(--dim)] select-none">#</span>
+              <div key={i} className="er-sys-line flex gap-2 items-start">
+                <span className="er-sys-char">#</span>
                 <span>{m.content}</span>
               </div>
             );
@@ -1175,10 +1173,8 @@ export default function EdgeRunnerUI() {
           if (m.role === "user") {
             return (
               <div key={i} className="flex gap-2 items-start">
-                <span className="text-[var(--prompt)] select-none shrink-0">
-                  ›
-                </span>
-                <div className="text-[var(--fg)] whitespace-pre-wrap break-words flex-1">
+                <span className="er-prompt-char shrink-0">›</span>
+                <div className="er-user-line whitespace-pre-wrap break-words flex-1">
                   {m.content}
                 </div>
               </div>
@@ -1186,9 +1182,7 @@ export default function EdgeRunnerUI() {
           }
           return (
             <div key={i} className="flex gap-2 items-start">
-              <span className="text-[var(--info)] select-none shrink-0">
-                ‹
-              </span>
+              <span className="er-reply-char shrink-0">‹</span>
               <div className="flex-1 min-w-0">
                 {m.thoughts && m.thoughts.length > 0 && (
                   <details className="mb-1 text-xs text-[var(--muted)]">
@@ -1211,7 +1205,7 @@ export default function EdgeRunnerUI() {
       </main>
 
       {/* Composer */}
-      <footer className="border-t border-[var(--border)] bg-[var(--bg-panel)] p-3 shrink-0">
+      <footer className="er-footer p-3 shrink-0">
         {!backendUrl && (
           <div className="mb-2 flex flex-wrap gap-2 text-xs">
             {hasStoredCreds || username ? (
@@ -1219,17 +1213,17 @@ export default function EdgeRunnerUI() {
                 type="button"
                 disabled={sessionBusy}
                 onClick={() => void launchKaggle()}
-                className="px-3 py-1.5 rounded border border-[var(--accent-dim)] text-[var(--accent)] hover:bg-[#0f1a10]"
+                className="er-btn-primary px-3 py-1.5"
               >
-                {sessionBusy ? "launching…" : "▶ launch kaggle"}
+                {sessionBusy ? "jacking in…" : "▶ launch kaggle"}
               </button>
             ) : (
               <button
                 type="button"
                 onClick={() => setShowSettings(true)}
-                className="px-3 py-1.5 rounded border border-[var(--border)] text-[var(--muted)] hover:text-[var(--fg)]"
+                className="er-btn px-3 py-1.5"
               >
-                configure backend
+                configure chrome
               </button>
             )}
             <button
@@ -1238,16 +1232,14 @@ export default function EdgeRunnerUI() {
                 setSetupTab("local");
                 setShowSettings(true);
               }}
-              className="px-3 py-1.5 rounded border border-[var(--border)] text-[var(--muted)] hover:text-[var(--fg)]"
+              className="er-btn px-3 py-1.5"
             >
               local
             </button>
           </div>
         )}
         <div className="flex gap-2 items-end max-w-4xl mx-auto">
-          <span className="text-[var(--prompt)] pb-2.5 select-none shrink-0">
-            ›
-          </span>
+          <span className="er-prompt-char pb-2.5 shrink-0">›</span>
           <textarea
             ref={inputRef}
             value={input}
@@ -1267,13 +1259,13 @@ export default function EdgeRunnerUI() {
                 : "launch a session first…"
             }
             disabled={isLoading || modelSwitching}
-            className="flex-1 bg-transparent border-0 outline-none resize-none text-sm text-[var(--fg)] placeholder:text-[var(--dim)] max-h-32 py-2"
+            className="flex-1 bg-transparent border-0 outline-none resize-none text-sm text-[var(--fg)] placeholder:text-[var(--dim)] max-h-32 py-2 caret-[var(--warn)]"
           />
           <button
             type="button"
             onClick={() => void handleSend()}
             disabled={isLoading || !input.trim()}
-            className="p-2 text-[var(--accent)] disabled:text-[var(--dim)] hover:brightness-125"
+            className="p-2 text-[var(--accent)] disabled:text-[var(--dim)] hover:drop-shadow-[0_0_8px_var(--accent-glow)]"
           >
             {isLoading ? (
               <Loader2 size={16} className="animate-spin" />
@@ -1306,9 +1298,9 @@ export default function EdgeRunnerUI() {
             aria-label="Close"
             onClick={() => setShowSettings(false)}
           />
-          <aside className="w-full max-w-md h-full bg-[var(--bg-panel)] border-l border-[var(--border)] overflow-y-auto p-4 space-y-4 text-xs">
+          <aside className="er-drawer w-full max-w-md h-full overflow-y-auto p-4 space-y-4 text-xs">
             <div className="flex items-center justify-between">
-              <span className="text-[var(--accent)] tracking-wider">
+              <span className="er-logo" style={{ fontSize: "0.65rem" }}>
                 SETTINGS
               </span>
               <button
@@ -1320,26 +1312,18 @@ export default function EdgeRunnerUI() {
               </button>
             </div>
 
-            <div className="flex rounded border border-[var(--border)] overflow-hidden">
+            <div className="er-tabs">
               <button
                 type="button"
                 onClick={() => setSetupTab("kaggle")}
-                className={`flex-1 py-2 ${
-                  setupTab === "kaggle"
-                    ? "bg-[#0f1a10] text-[var(--accent)]"
-                    : "text-[var(--muted)]"
-                }`}
+                className={`er-tab ${setupTab === "kaggle" ? "active" : ""}`}
               >
                 kaggle
               </button>
               <button
                 type="button"
                 onClick={() => setSetupTab("local")}
-                className={`flex-1 py-2 ${
-                  setupTab === "local"
-                    ? "bg-[#0f1a10] text-[var(--accent)]"
-                    : "text-[var(--muted)]"
-                }`}
+                className={`er-tab ${setupTab === "local" ? "active" : ""}`}
               >
                 local
               </button>
@@ -1348,7 +1332,7 @@ export default function EdgeRunnerUI() {
             {setupTab === "kaggle" ? (
               <div className="space-y-3">
                 {hasStoredCreds && (
-                  <div className="flex items-center justify-between text-[var(--accent)] border border-[var(--accent-dim)] rounded px-2 py-1.5">
+                  <div className="flex items-center justify-between text-[var(--accent)] border border-[var(--accent)]/40 px-2 py-1.5 shadow-[0_0_12px_var(--accent-glow)]">
                     <span className="flex items-center gap-1">
                       <Shield size={12} /> credentials saved
                     </span>
@@ -1366,7 +1350,7 @@ export default function EdgeRunnerUI() {
                   <input
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
-                    className="mt-1 w-full bg-[var(--bg)] border border-[var(--border)] rounded px-2 py-2 text-[var(--fg)]"
+                    className="er-input mt-1 w-full px-2 py-2"
                   />
                 </label>
                 <label className="block text-[var(--muted)]">
@@ -1376,7 +1360,7 @@ export default function EdgeRunnerUI() {
                     value={apiToken}
                     onChange={(e) => setApiToken(e.target.value)}
                     placeholder={hasStoredCreds ? "•••• saved" : "KGAT_…"}
-                    className="mt-1 w-full bg-[var(--bg)] border border-[var(--border)] rounded px-2 py-2 text-[var(--fg)]"
+                    className="er-input mt-1 w-full px-2 py-2"
                   />
                 </label>
                 <label className="block text-[var(--muted)]">
@@ -1385,7 +1369,7 @@ export default function EdgeRunnerUI() {
                     type="password"
                     value={apiKey}
                     onChange={(e) => setApiKey(e.target.value)}
-                    className="mt-1 w-full bg-[var(--bg)] border border-[var(--border)] rounded px-2 py-2 text-[var(--fg)]"
+                    className="er-input mt-1 w-full px-2 py-2"
                   />
                 </label>
                 <div className="flex gap-2">
@@ -1394,10 +1378,10 @@ export default function EdgeRunnerUI() {
                       key={a}
                       type="button"
                       onClick={() => setAccelerator(a)}
-                      className={`flex-1 py-1.5 rounded border ${
+                      className={`flex-1 py-1.5 er-btn uppercase tracking-wider ${
                         accelerator === a
-                          ? "border-[var(--accent-dim)] text-[var(--accent)]"
-                          : "border-[var(--border)] text-[var(--muted)]"
+                          ? "border-[var(--warn)] text-[var(--warn)] shadow-[0_0_10px_rgba(249,240,2,0.3)]"
+                          : ""
                       }`}
                     >
                       {a}
@@ -1427,7 +1411,7 @@ export default function EdgeRunnerUI() {
                       type="number"
                       value={idleTimeout}
                       onChange={(e) => setIdleTimeout(Number(e.target.value))}
-                      className="mt-1 w-full bg-[var(--bg)] border border-[var(--border)] rounded px-2 py-1.5"
+                      className="er-input mt-1 w-full px-2 py-1.5"
                     />
                   </label>
                   <label className="text-[var(--muted)]">
@@ -1436,7 +1420,7 @@ export default function EdgeRunnerUI() {
                       type="number"
                       value={maxLifetime}
                       onChange={(e) => setMaxLifetime(Number(e.target.value))}
-                      className="mt-1 w-full bg-[var(--bg)] border border-[var(--border)] rounded px-2 py-1.5"
+                      className="er-input mt-1 w-full px-2 py-1.5"
                     />
                   </label>
                 </div>
@@ -1448,9 +1432,9 @@ export default function EdgeRunnerUI() {
                   type="button"
                   disabled={sessionBusy}
                   onClick={() => void launchKaggle()}
-                  className="w-full py-2.5 rounded bg-[var(--accent-dim)] text-[var(--accent)] hover:brightness-110 disabled:opacity-50"
+                  className="er-btn-primary w-full py-2.5 disabled:opacity-50"
                 >
-                  {sessionBusy ? "launching…" : "launch kaggle"}
+                  {sessionBusy ? "jacking in…" : "launch kaggle"}
                 </button>
                 {sessionError && (
                   <p className="text-[var(--danger)]">{sessionError}</p>
@@ -1463,14 +1447,14 @@ export default function EdgeRunnerUI() {
                   <input
                     value={localUrl}
                     onChange={(e) => setLocalUrl(e.target.value)}
-                    className="mt-1 w-full bg-[var(--bg)] border border-[var(--border)] rounded px-2 py-2 text-[var(--fg)]"
+                    className="er-input mt-1 w-full px-2 py-2"
                   />
                 </label>
                 <button
                   type="button"
                   disabled={sessionBusy}
                   onClick={() => void attachLocal()}
-                  className="w-full py-2.5 rounded bg-[var(--accent-dim)] text-[var(--accent)]"
+                  className="er-btn-primary w-full py-2.5"
                 >
                   attach
                 </button>
@@ -1488,7 +1472,7 @@ export default function EdgeRunnerUI() {
                 <button
                   type="button"
                   onClick={() => void openModelPicker()}
-                  className="w-full py-2 border border-[var(--border)] rounded text-[var(--info)]"
+                  className="er-btn-cyan w-full py-2"
                 >
                   choose model
                 </button>
@@ -1501,15 +1485,14 @@ export default function EdgeRunnerUI() {
       {/* Model picker */}
       {showModels && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 p-0 sm:p-4">
-          <div className="w-full max-w-lg max-h-[85vh] bg-[var(--bg-panel)] border border-[var(--border)] rounded-t-xl sm:rounded-xl overflow-hidden flex flex-col">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border)]">
+          <div className="er-modal w-full max-w-lg max-h-[85vh] overflow-hidden flex flex-col rounded-t-sm sm:rounded-sm">
+            <div className="er-modal-head flex items-center justify-between px-4 py-3">
               <div>
-                <div className="text-[var(--accent)] text-xs tracking-wider">
+                <div className="er-logo" style={{ fontSize: "0.65rem" }}>
                   MODELS
                 </div>
-                <div className="text-[10px] text-[var(--muted)]">
-                  {modelHw || "scanning hardware…"} · no max-GB cap · unload+GC
-                  on switch
+                <div className="text-[10px] text-[var(--cyan)] mt-0.5">
+                  {modelHw || "scanning chrome…"} · no max-GB · unload+GC on switch
                 </div>
               </div>
               <button
@@ -1539,10 +1522,8 @@ export default function EdgeRunnerUI() {
                     type="button"
                     disabled={modelSwitching}
                     onClick={() => void switchToModel(opt)}
-                    className={`w-full text-left px-3 py-2.5 rounded border text-xs transition-colors ${
-                      opt.fits
-                        ? "border-[var(--border)] hover:border-[var(--accent-dim)] hover:bg-[#0f1a10]"
-                        : "border-[var(--border)] opacity-60 hover:opacity-90"
+                    className={`er-model-card w-full text-left px-3 py-2.5 text-xs ${
+                      opt.fits ? "fits" : "opacity-60"
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
