@@ -88,6 +88,96 @@ def _llm():
     return _local_llm
 
 
+# Optional progress callback set by /chat for streaming keepalives.
+_progress_cb = None
+
+
+def set_progress_callback(cb) -> None:
+    """cb(message: str) — called from worker threads during long runs."""
+    global _progress_cb
+    _progress_cb = cb
+
+
+def _progress(msg: str) -> None:
+    print(msg, flush=True)
+    cb = _progress_cb
+    if cb is not None:
+        try:
+            cb(msg)
+        except Exception:
+            pass
+
+
+# Coding-harness keywords. Casual chat ("hi") must NOT run plan→code→test.
+_CODE_HINT = re.compile(
+    r"\b("
+    r"code|python|function|class|implement|algorithm|debug|fix|bug|"
+    r"write\s+(a|an|the|me|some)|script|program|leetcode|solve|assert|"
+    r"refactor|optimize|test\s+case|unit\s+test|api|regex|parse|"
+    r"sort|binary\s+search|linked\s*list|tree|graph|dfs|bfs|"
+    r"sql|query|html|css|javascript|typescript|rust|golang|"
+    r"compile|runtime|exception|traceback|stack\s*overflow"
+    r")\b|"
+    r"```|def\s+\w+\s*\(|class\s+\w+",
+    re.IGNORECASE,
+)
+
+
+def looks_like_coding_task(text: str) -> bool:
+    """True when the full SOTA coding harness is worth the multi-LLM cost."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    # Very short greetings / chitchat → simple reply
+    if len(t) < 40 and not _CODE_HINT.search(t):
+        return False
+    if _CODE_HINT.search(t):
+        return True
+    # Longer free-form without code signals → still chat, not harness
+    return False
+
+
+def simple_chat(user_text: str, history: Optional[list] = None) -> dict:
+    """Single short LLM turn — used for hi / Q&A so tunnels don't time out."""
+    _progress("💬 [Chat] Generating reply…")
+    hist = history or []
+    # Keep prompt small for CPU inference speed
+    hist_snip = ""
+    for m in hist[-4:]:
+        role = getattr(m, "role", None) or (m.get("role") if isinstance(m, dict) else "")
+        content = getattr(m, "content", None) or (
+            m.get("content") if isinstance(m, dict) else str(m)
+        )
+        if role and content:
+            hist_snip += f"{role}: {str(content)[:400]}\n"
+
+    prompt = (
+        "You are EdgeRunner, a helpful local coding assistant running on the user's "
+        "Kaggle/CPU session. Reply briefly and clearly. If they want code later, "
+        "you'll use a multi-step harness — for now just converse.\n\n"
+        f"{hist_snip}"
+        f"user: {user_text}\nassistant:"
+    )
+    # Cap generation length so "hi" isn't a multi-minute wait on CPU
+    llm = _llm()
+    try:
+        # ChatLlamaCpp / LlamaCpp support max_tokens override via bind or config
+        bound = llm.bind(max_tokens=256) if hasattr(llm, "bind") else llm
+        response = bound.invoke([HumanMessage(content=prompt)])
+    except Exception:
+        response = llm.invoke([HumanMessage(content=prompt)])
+
+    content = getattr(response, "content", None) or str(response)
+    _progress("💬 [Chat] Done.")
+    return {
+        "mode": "chat",
+        "response": content.strip(),
+        "thought_process": ["Direct chat reply (coding harness skipped for this message)."],
+        "code": "",
+        "terminal_output": "",
+    }
+
+
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], operator.add]
     plan: str
@@ -122,7 +212,7 @@ def execute_code_locally(code: str, tests: str) -> str:
 
 
 def planner_and_tester(state: AgentState):
-    print("🧠 [Harness] Analyzing problem & writing tests...", flush=True)
+    _progress("🧠 [Harness] Analyzing problem & writing tests...")
     task = state["messages"][0].content
 
     prompt = f"""You are a SOTA software architect. 
@@ -145,7 +235,7 @@ def planner_and_tester(state: AgentState):
 
 
 def code_generator(state: AgentState):
-    print("💻 [Harness] Writing implementation code...", flush=True)
+    _progress("💻 [Harness] Writing implementation code...")
     task = state["messages"][0].content
     plan = state.get("plan", "")
     tests = state.get("tests", "")
@@ -176,7 +266,7 @@ def code_generator(state: AgentState):
 
 
 def executor_and_critic(state: AgentState):
-    print("⚙️ [Harness] Running Sandboxed Tests...", flush=True)
+    _progress("⚙️ [Harness] Running Sandboxed Tests...")
     code = state.get("code", "")
     tests = state.get("tests", "")
 
@@ -185,7 +275,7 @@ def executor_and_critic(state: AgentState):
     else:
         terminal_output = execute_code_locally(code, tests)
 
-    print(f"🖥️ [Terminal] {terminal_output[:100]}...\n", flush=True)
+    _progress(f"🖥️ [Terminal] {terminal_output[:100]}...")
 
     return {
         "terminal_output": terminal_output,
@@ -206,6 +296,42 @@ def should_loop(state: AgentState):
         return "end"
 
     return "rewrite"
+
+
+def run_coding_harness(user_text: str) -> dict:
+    """Full plan → code → test loop. Slow on CPU; stream progress via callback."""
+    _progress("🧠 [Harness] Starting coding harness…")
+    initial_state = {
+        "messages": [HumanMessage(content=user_text)],
+        "iterations": 0,
+        "plan": "",
+        "tests": "",
+        "code": "",
+        "terminal_output": "",
+    }
+    result = agent_app.invoke(initial_state)
+    thought_process = [m.content for m in result["messages"][1:]]
+    final_code = result.get("code", "No code generated.")
+    final_terminal = result.get("terminal_output", "")
+    final_response = (
+        f"### Final SOTA Solution:\n\n```python\n{final_code}\n```\n\n"
+        f"### Execution Results:\n```text\n{final_terminal}\n```"
+    )
+    _progress("✅ [Harness] Complete.")
+    return {
+        "mode": "harness",
+        "response": final_response,
+        "thought_process": thought_process,
+        "code": final_code,
+        "terminal_output": final_terminal,
+    }
+
+
+def run_user_message(user_text: str, history: Optional[list] = None, force_harness: bool = False) -> dict:
+    """Route casual chat vs coding harness."""
+    if force_harness or looks_like_coding_task(user_text):
+        return run_coding_harness(user_text)
+    return simple_chat(user_text, history=history)
 
 
 workflow = StateGraph(AgentState)

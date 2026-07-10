@@ -1,18 +1,25 @@
 import asyncio
 import json
 import os
+import queue
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
-from langchain_core.messages import HumanMessage
+from fastapi.responses import PlainTextResponse, StreamingResponse
 
-from agent import agent_app, get_model_meta, is_model_ready, load_model
+from agent import (
+    get_model_meta,
+    is_model_ready,
+    load_model,
+    run_user_message,
+    set_progress_callback,
+)
 from schemas import ChatRequest, ChatResponse, HeartbeatResponse, SessionStatus
 from session_control import watchdog
 
@@ -167,58 +174,189 @@ async def session_shutdown(
     return payload
 
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest):
-    # Heartbeat on real traffic too, so active chats never idle-kill.
+def _chat_work(user_text: str, history_msgs: list, force_harness: bool, progress_q: queue.Queue):
+    """Runs on the chat thread pool; pushes progress + final result onto progress_q."""
+
+    def on_progress(msg: str) -> None:
+        watchdog.heartbeat()
+        try:
+            progress_q.put_nowait({"type": "status", "message": msg})
+        except Exception:
+            pass
+
+    set_progress_callback(on_progress)
+    try:
+        result = run_user_message(
+            user_text, history=history_msgs, force_harness=force_harness
+        )
+        progress_q.put(
+            {
+                "type": "done",
+                "response": clean_output(result.get("response") or ""),
+                "thought_process": result.get("thought_process") or [],
+                "mode": result.get("mode") or "chat",
+            }
+        )
+    except Exception as e:
+        progress_q.put(
+            {
+                "type": "done",
+                "response": f"⚠️ Agent error: {e}",
+                "thought_process": [str(e)],
+                "mode": "error",
+            }
+        )
+    finally:
+        set_progress_callback(None)
+        progress_q.put(None)  # sentinel
+
+
+@app.post("/chat")
+async def chat_endpoint(request: ChatRequest, raw: Request):
+    """
+    Chat with NDJSON streaming by default so Cloudflare tunnels get first-byte
+    quickly and progress keepalives during multi-minute LLM work.
+
+    Lines:
+      {"type":"status","message":"..."}
+      {"type":"ping","t":...}
+      {"type":"done","response":"...","thought_process":[...],"mode":"chat|harness"}
+
+    Clients that only accept JSON get a single ChatResponse (no stream).
+    """
     watchdog.heartbeat()
 
     if not is_model_ready():
         try:
             await asyncio.get_running_loop().run_in_executor(_CHAT_POOL, load_model)
         except Exception as e:
-            return ChatResponse(
+            err = ChatResponse(
                 response=f"⚠️ Model is still loading or failed to load: {e}",
                 thought_process=[str(e)],
             )
+            accept = (raw.headers.get("accept") or "").lower()
+            if "application/json" in accept and "ndjson" not in accept:
+                return err
+            async def _err():
+                yield json.dumps({"type": "done", **err.model_dump()}) + "\n"
+            return StreamingResponse(_err(), media_type="application/x-ndjson")
 
     last_user_msg = [m for m in request.messages if m.role == "user"][-1]
-    lc_messages = [HumanMessage(content=last_user_msg.content)]
+    history = [{"role": m.role, "content": m.content} for m in request.messages[:-1]]
+    # Optional force: client can prefix message or we detect coding tasks server-side
+    force = False
+    user_text = last_user_msg.content or ""
+    if user_text.strip().lower().startswith("/code "):
+        force = True
+        user_text = user_text.strip()[6:].lstrip()
 
-    initial_state = {
-        "messages": lc_messages,
-        "iterations": 0,
-        "plan": "",
-        "tests": "",
-        "code": "",
-        "terminal_output": "",
-    }
-
-    def _run():
-        return agent_app.invoke(initial_state)
-
-    try:
-        result = await asyncio.get_running_loop().run_in_executor(_CHAT_POOL, _run)
-    except Exception as e:
-        return ChatResponse(
-            response=f"⚠️ Agent error: {e}",
-            thought_process=[str(e)],
-        )
-
-    # If tab closed during inference, die immediately after.
-    if watchdog.shutdown_requested:
-        watchdog.force_exit_soon(watchdog.shutdown_reason or "client_requested", 0.0)
-
-    thought_process = [m.content for m in result["messages"][1:]]
-    final_code = result.get("code", "No code generated.")
-    final_terminal = result.get("terminal_output", "")
-
-    final_response = (
-        f"### Final SOTA Solution:\n\n```python\n{final_code}\n```\n\n"
-        f"### Execution Results:\n```text\n{final_terminal}\n```"
+    accept = (raw.headers.get("accept") or "").lower()
+    want_json_only = (
+        "application/json" in accept
+        and "ndjson" not in accept
+        and "x-ndjson" not in accept
+        and "text/event-stream" not in accept
     )
 
-    return ChatResponse(
-        response=clean_output(final_response), thought_process=thought_process
+    progress_q: queue.Queue = queue.Queue()
+    loop = asyncio.get_running_loop()
+    fut = loop.run_in_executor(
+        _CHAT_POOL,
+        _chat_work,
+        user_text,
+        history,
+        force,
+        progress_q,
+    )
+
+    if want_json_only:
+        # Blocking JSON path (local tooling / old clients)
+        while True:
+            item = await loop.run_in_executor(None, progress_q.get)
+            if item is None:
+                break
+            if item.get("type") == "done":
+                if watchdog.shutdown_requested:
+                    watchdog.force_exit_soon(
+                        watchdog.shutdown_reason or "client_requested", 0.0
+                    )
+                return ChatResponse(
+                    response=item.get("response") or "",
+                    thought_process=item.get("thought_process"),
+                )
+        try:
+            await fut
+        except Exception as e:
+            return ChatResponse(
+                response=f"⚠️ Agent error: {e}", thought_process=[str(e)]
+            )
+        return ChatResponse(response="⚠️ Empty agent result.", thought_process=[])
+
+    def _q_get(timeout: float = 2.0):
+        try:
+            return progress_q.get(timeout=timeout)
+        except queue.Empty:
+            return "__timeout__"
+
+    async def ndjson_stream():
+        # Immediate first byte — avoids Cloudflare TTFB / client "connection error"
+        yield (
+            json.dumps(
+                {
+                    "type": "status",
+                    "message": "Working… (casual chat is fast; coding uses the multi-step harness)",
+                }
+            )
+            + "\n"
+        )
+        last_ping = time.monotonic()
+        done_payload = None
+        while True:
+            item = await loop.run_in_executor(None, _q_get, 2.0)
+
+            if item is None:
+                break
+            if item == "__timeout__":
+                # Keepalive so trycloudflare / browsers don't drop the proxy
+                now = time.monotonic()
+                if now - last_ping >= 2.0:
+                    last_ping = now
+                    watchdog.heartbeat()
+                    yield json.dumps({"type": "ping", "t": int(time.time())}) + "\n"
+                continue
+
+            if item.get("type") == "done":
+                done_payload = item
+                continue
+
+            yield json.dumps(item) + "\n"
+            last_ping = time.monotonic()
+
+        if done_payload is None:
+            done_payload = {
+                "type": "done",
+                "response": "⚠️ Empty agent result.",
+                "thought_process": [],
+                "mode": "error",
+            }
+        yield json.dumps(done_payload) + "\n"
+
+        if watchdog.shutdown_requested:
+            watchdog.force_exit_soon(
+                watchdog.shutdown_reason or "client_requested", 0.0
+            )
+        try:
+            await fut
+        except Exception:
+            pass
+
+    return StreamingResponse(
+        ndjson_stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

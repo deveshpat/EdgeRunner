@@ -636,10 +636,38 @@ export default function EdgeRunnerUI() {
     setInput("");
     setIsLoading(true);
 
+    // Placeholder assistant bubble — updated as NDJSON status/ping/done arrive
+    setMessages((prev) => [
+      ...prev,
+      {
+        role: "assistant",
+        content: "_Working…_",
+        thoughts: [],
+        ts: Date.now(),
+      },
+    ]);
+
+    const base = backendUrl.replace(/\/$/, "");
+    const updateLastAssistant = (patch: Partial<Message>) => {
+      setMessages((prev) => {
+        const next = [...prev];
+        for (let i = next.length - 1; i >= 0; i--) {
+          if (next[i].role === "assistant") {
+            next[i] = { ...next[i], ...patch };
+            break;
+          }
+        }
+        return next;
+      });
+    };
+
     try {
-      const response = await fetch(`${backendUrl.replace(/\/$/, "")}/chat`, {
+      const response = await fetch(`${base}/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/x-ndjson, application/json",
+        },
         body: JSON.stringify({
           messages: [...messages, userMsg].map((m) => ({
             role: m.role,
@@ -649,28 +677,101 @@ export default function EdgeRunnerUI() {
         referrerPolicy: "no-referrer",
       });
 
-      if (!response.ok) throw new Error("Backend connection failed");
+      if (!response.ok) throw new Error(`Backend returned ${response.status}`);
 
-      const data = await response.json();
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: data.response,
-          thoughts: data.thought_process,
-          ts: Date.now(),
-        },
-      ]);
-    } catch {
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content:
-            "⚠️ Connection error. Is the backend still running? If you used Kaggle, the session may have timed out — open settings and relaunch.",
-          ts: Date.now(),
-        },
-      ]);
+      const ctype = (response.headers.get("content-type") || "").toLowerCase();
+      let data: { response?: string; thought_process?: string[] };
+
+      if (ctype.includes("ndjson") || ctype.includes("stream")) {
+        // NDJSON: status / ping / done — keeps Cloudflare + browser alive
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error("No response body");
+        const decoder = new TextDecoder();
+        let buf = "";
+        const thoughts: string[] = [];
+        let final: { response?: string; thought_process?: string[] } | null =
+          null;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split("\n");
+          buf = lines.pop() ?? "";
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            let evt: {
+              type?: string;
+              message?: string;
+              response?: string;
+              thought_process?: string[];
+            };
+            try {
+              evt = JSON.parse(trimmed);
+            } catch {
+              continue;
+            }
+            if (evt.type === "status" && evt.message) {
+              thoughts.push(evt.message);
+              updateLastAssistant({
+                content: `_${evt.message}_`,
+                thoughts: [...thoughts],
+              });
+            } else if (evt.type === "ping") {
+              // tunnel keepalive — optional soft pulse
+              updateLastAssistant({
+                content: thoughts.length
+                  ? `_${thoughts[thoughts.length - 1]}_ · still working…`
+                  : "_Still working…_",
+                thoughts: [...thoughts],
+              });
+            } else if (evt.type === "done") {
+              final = {
+                response: evt.response,
+                thought_process: evt.thought_process ?? thoughts,
+              };
+            }
+          }
+        }
+        if (!final?.response) {
+          throw new Error("Stream ended without a reply");
+        }
+        data = final;
+      } else {
+        data = (await response.json()) as {
+          response?: string;
+          thought_process?: string[];
+        };
+      }
+
+      updateLastAssistant({
+        content: data.response || "_(empty reply)_",
+        thoughts: data.thought_process,
+        ts: Date.now(),
+      });
+    } catch (err) {
+      // Distinguish dead tunnel vs long-running cancel
+      let stillUp = false;
+      try {
+        const h = await fetch(`${base}/health`, {
+          signal: AbortSignal.timeout(5000),
+          cache: "no-store",
+          referrerPolicy: "no-referrer",
+        });
+        stillUp = h.ok;
+      } catch {
+        stillUp = false;
+      }
+
+      const detail =
+        err instanceof Error && err.message ? ` (${err.message})` : "";
+      updateLastAssistant({
+        content: stillUp
+          ? `⚠️ Reply interrupted${detail}. The Kaggle backend is still online — the tunnel or browser dropped a long request. Try a short message (e.g. **hi**), or prefix coding tasks with \`/code\`. If this keeps happening, open settings and relaunch.`
+          : "⚠️ Connection error. Is the backend still running? If you used Kaggle, the session may have timed out — open settings and relaunch.",
+        ts: Date.now(),
+      });
     } finally {
       setIsLoading(false);
     }
