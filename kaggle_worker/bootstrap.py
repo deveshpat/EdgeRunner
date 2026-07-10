@@ -190,15 +190,19 @@ def _llama_wheel_score(name: str, py_tag: str, want_gpu: bool) -> int | None:
         return None  # don't install CUDA wheel on CPU session
     else:
         base = 0
-    # Prefer exact CPython tag, then generic py3-none linux
+    # Prefer manylinux_2_28 (Kaggle-compatible) over plain linux (often Ubuntu 24.04 / GLIBC 2.38)
+    if "manylinux_2_28" in n or "manylinux2014" in n or "manylinux_2_17" in n:
+        base += 0
+    elif "manylinux" in n:
+        base += 2
+    elif "py3-none" in n and "linux" in n:
+        base += 40  # often built on host glibc — prefer lower
+    else:
+        base += 20
     if py_tag in n:
         base += 0
-    elif "py3-none" in n and "linux" in n:
-        base += 5  # CI currently publishes this shape for any CPython
-    elif "manylinux" in n and "linux" in n:
-        base += 10
     else:
-        base += 50
+        base += 5
     if "x86_64" in n or "amd64" in n:
         base += 0
     else:
