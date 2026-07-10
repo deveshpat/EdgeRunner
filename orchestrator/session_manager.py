@@ -149,7 +149,8 @@ class SessionManager:
         session_timeout_seconds: Optional[int] = None,
     ) -> Session:
         session_id = uuid.uuid4().hex
-        slug = f"edgerunner-{session_id[:8]}"
+        # Stable notebook name — re-run same kernel instead of creating new ones
+        slug = "edgerunner"
         kernel_ref = f"{creds.username}/{slug}"
 
         session = Session(

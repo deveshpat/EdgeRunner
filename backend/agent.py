@@ -1,5 +1,6 @@
 import re
 import subprocess
+import threading
 from typing import Annotated, Optional, Sequence, TypedDict
 
 import operator
@@ -8,7 +9,8 @@ from langgraph.graph import END, StateGraph
 
 # Lazy-loaded LLM so FastAPI can boot and report /health before the model is ready.
 _local_llm = None
-_model_meta: dict = {}
+_model_meta: dict = {"ready": False, "loading": False}
+_load_lock = threading.Lock()
 
 
 def is_model_ready() -> bool:
@@ -16,36 +18,68 @@ def is_model_ready() -> bool:
 
 
 def get_model_meta() -> dict:
-    return dict(_model_meta)
+    meta = dict(_model_meta)
+    try:
+        from model_manager import get_load_status
+
+        st = get_load_status()
+        meta.setdefault("loading", st.get("loading", False))
+        if st.get("phase"):
+            meta["phase"] = st["phase"]
+        if st.get("detail"):
+            meta["detail"] = st["detail"]
+    except Exception:
+        pass
+    meta["ready"] = _local_llm is not None
+    return meta
 
 
 def load_model() -> dict:
-    """Download / load the GGUF model. Safe to call multiple times."""
+    """Download / load the GGUF model. Safe to call multiple times (thread-safe)."""
     global _local_llm, _model_meta
     if _local_llm is not None:
         return _model_meta
 
-    from langchain_community.chat_models import ChatLlamaCpp
-    from model_manager import get_or_download_model
+    with _load_lock:
+        if _local_llm is not None:
+            return _model_meta
 
-    model_config = get_or_download_model()
-    print("\nLoading model into memory...", flush=True)
-    _local_llm = ChatLlamaCpp(
-        model_path=model_config["path"],
-        temperature=0.2,
-        n_ctx=model_config["n_ctx"],
-        max_tokens=1500,
-        n_gpu_layers=-1,
-        verbose=False,
-    )
-    _model_meta = {
-        "name": model_config.get("name", "local"),
-        "path": model_config["path"],
-        "n_ctx": model_config["n_ctx"],
-        "ready": True,
-    }
-    print("✅ SOTA Engine Loaded!", flush=True)
-    return _model_meta
+        from langchain_community.chat_models import ChatLlamaCpp
+        from model_manager import get_or_download_model, _set_status
+
+        _model_meta = {"ready": False, "loading": True, "phase": "download"}
+        try:
+            model_config = get_or_download_model()
+            print("\nLoading model into memory...", flush=True)
+            _set_status("load", f"Loading {model_config.get('name', '')} into RAM…")
+            _local_llm = ChatLlamaCpp(
+                model_path=model_config["path"],
+                temperature=0.2,
+                n_ctx=model_config["n_ctx"],
+                max_tokens=1500,
+                n_gpu_layers=-1,
+                verbose=False,
+            )
+            _model_meta = {
+                "name": model_config.get("name", "local"),
+                "path": model_config["path"],
+                "n_ctx": model_config["n_ctx"],
+                "ready": True,
+                "loading": False,
+                "phase": "ready",
+            }
+            _set_status("ready", _model_meta["name"], loading=False)
+            print("✅ SOTA Engine Loaded!", flush=True)
+        except Exception as e:
+            _model_meta = {
+                "ready": False,
+                "loading": False,
+                "phase": "error",
+                "error": str(e),
+            }
+            _set_status("error", str(e), loading=False)
+            raise
+        return _model_meta
 
 
 def _llm():

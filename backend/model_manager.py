@@ -1,16 +1,42 @@
 import os
+import shutil
 import sys
 import re
 import subprocess
+from pathlib import Path
 
 import psutil
 from huggingface_hub import HfApi, hf_hub_download
 
-MODEL_DIR = os.environ.get("EDGERUNNER_MODEL_DIR", "./models")
+# Prefer persistent Kaggle working dir; overridden by env.
+_DEFAULT_MODEL_DIR = os.environ.get(
+    "EDGERUNNER_MODEL_DIR",
+    "/kaggle/working/edgerunner/models"
+    if Path("/kaggle/working").exists()
+    else "./models",
+)
+MODEL_DIR = _DEFAULT_MODEL_DIR
 api = HfApi()
 
 # Non-interactive by default on Kaggle / when EDGERUNNER_AUTO=1
-AUTO_SELECT = os.environ.get("EDGERUNNER_AUTO", "1").strip() not in ("0", "false", "False")
+AUTO_SELECT = os.environ.get("EDGERUNNER_AUTO", "1").strip() not in (
+    "0",
+    "false",
+    "False",
+)
+
+# Module-level load progress for /health
+_load_status: dict = {"loading": False, "phase": "idle", "detail": ""}
+
+
+def get_load_status() -> dict:
+    return dict(_load_status)
+
+
+def _set_status(phase: str, detail: str = "", loading: bool = True) -> None:
+    _load_status["loading"] = loading
+    _load_status["phase"] = phase
+    _load_status["detail"] = detail
 
 
 def _macos_metal_gpu():
@@ -28,7 +54,10 @@ def _macos_metal_gpu():
                 m = re.search(r"page size of (\d+)", line)
                 if m:
                     page_size = int(m.group(1))
-            elif any(x in line for x in ["Pages free:", "Pages inactive:", "Pages speculative:"]):
+            elif any(
+                x in line
+                for x in ["Pages free:", "Pages inactive:", "Pages speculative:"]
+            ):
                 free_pages += int(line.split(":")[1].strip().rstrip("."))
         free_mb = (free_pages * page_size) // (1024 * 1024)
         return {
@@ -80,10 +109,97 @@ def get_system_hardware():
     }
 
 
+def hydrate_model_cache_from_inputs() -> None:
+    """Copy GGUF + HF cache from previous kernel output mounted under /kaggle/input.
+
+    When we re-push the same notebook with kernel_sources=[username/edgerunner],
+    Kaggle mounts the prior /kaggle/working tree under /kaggle/input/<slug>/.
+    """
+    input_root = Path("/kaggle/input")
+    if not input_root.exists():
+        return
+
+    dest_models = Path(MODEL_DIR)
+    dest_models.mkdir(parents=True, exist_ok=True)
+    dest_hf = Path(
+        os.environ.get(
+            "HF_HOME",
+            "/kaggle/working/hf_cache"
+            if Path("/kaggle/working").exists()
+            else str(Path.home() / ".cache" / "huggingface"),
+        )
+    )
+
+    copied = 0
+    # Any prior .gguf
+    for gguf in input_root.rglob("*.gguf"):
+        try:
+            target = dest_models / gguf.name
+            if target.exists() and target.stat().st_size > 0:
+                continue
+            print(f"  ♻️ Restoring cached model {gguf.name} from {gguf}", flush=True)
+            shutil.copy2(gguf, target)
+            copied += 1
+        except Exception as e:
+            print(f"  cache restore skip {gguf}: {e}", flush=True)
+
+    # HF hub cache trees
+    for cache_name in ("hub", "huggingface", "hf_cache"):
+        for src in input_root.rglob(cache_name):
+            if not src.is_dir():
+                continue
+            # Prefer directories that look like HF hub cache
+            if not any(src.rglob("*.gguf")) and "models--" not in str(src):
+                # still copy hub metadata if models-- present deeper
+                if not any(p.name.startswith("models--") for p in src.rglob("*") if p.is_dir()):
+                    continue
+            try:
+                dest_hf.mkdir(parents=True, exist_ok=True)
+                # Merge into HF_HOME/hub when possible
+                target = dest_hf / "hub" if src.name != "hub" else dest_hf / "hub"
+                if src.name == "hub":
+                    target = dest_hf / "hub"
+                elif src.name == "hf_cache":
+                    target = dest_hf
+                else:
+                    target = dest_hf / src.name
+                if not target.exists():
+                    print(f"  ♻️ Restoring HF cache from {src}", flush=True)
+                    shutil.copytree(src, target, dirs_exist_ok=True)
+                    copied += 1
+            except Exception as e:
+                print(f"  HF cache restore skip: {e}", flush=True)
+
+    if copied:
+        print(f"✅ Restored {copied} cache item(s) from prior Kaggle output", flush=True)
+    else:
+        print("  (no prior model cache found under /kaggle/input)", flush=True)
+
+
+def find_existing_gguf(filename: str) -> str | None:
+    """Locate a GGUF by name in model dir, working, or input mounts."""
+    candidates = [
+        Path(MODEL_DIR) / filename,
+        Path("/kaggle/working/edgerunner/models") / filename,
+        Path("/kaggle/working/models") / filename,
+    ]
+    for c in candidates:
+        if c.is_file() and c.stat().st_size > 0:
+            return str(c)
+    input_root = Path("/kaggle/input")
+    if input_root.exists():
+        for p in input_root.rglob(filename):
+            if p.is_file() and p.stat().st_size > 0:
+                return str(p)
+    return None
+
+
 def fetch_trending_models(hw_total_gb, limit=8):
     print("\n🌐 Fetching live trending GGUF models from Hugging Face...", flush=True)
     try:
-        trending_repos = api.list_models(filter="gguf", sort="trendingScore", limit=limit)
+        trending_repos = api.list_models(
+            filter="gguf", sort="trendingScore", limit=limit
+        )
     except Exception as e:
         print(f"⚠️ HF list_models failed: {e}", flush=True)
         return []
@@ -101,7 +217,8 @@ def fetch_trending_models(hw_total_gb, limit=8):
             )
             if not target_file:
                 target_file = next(
-                    (f for f in gguf_files if "Q4" in f.rfilename.upper()), gguf_files[0]
+                    (f for f in gguf_files if "Q4" in f.rfilename.upper()),
+                    gguf_files[0],
                 )
 
             file_size_gb = (target_file.size or 0) / (1024**3)
@@ -122,7 +239,7 @@ def fetch_trending_models(hw_total_gb, limit=8):
                 }
             )
         except Exception:
-            pass
+            continue
     return candidate_models
 
 
@@ -134,26 +251,26 @@ def scan_hardware_and_score():
     )
     dynamic_models = fetch_trending_models(hw_total_gb=hw["total_gb"])
     scored_models = []
-
     for model in dynamic_models:
         if model["required_ram_gb"] > hw["total_gb"]:
             fit_score, fit_status = 0, "❌ INCOMP"
         else:
             headroom = hw["total_gb"] - model["required_ram_gb"]
-            fit_score, fit_status = (50, "⚠️ TIGHT") if headroom < 1.0 else (100, "✅ FIT")
-
+            fit_score, fit_status = (
+                (50, "⚠️ TIGHT") if headroom < 1.0 else (100, "✅ FIT")
+            )
         model["total_score"] = (
-            0 if fit_score == 0 else (model["capability_score"] * 0.7) + (fit_score * 0.3)
+            0
+            if fit_score == 0
+            else (model["capability_score"] * 0.7) + (fit_score * 0.3)
         )
         model["fit_status"] = fit_status
         scored_models.append(model)
-
     scored_models.sort(key=lambda x: x["total_score"], reverse=True)
     return scored_models
 
 
 def _fallback_model():
-    # Small default that fits CPU Kaggle sessions
     return {
         "repo_id": os.environ.get(
             "EDGERUNNER_FALLBACK_REPO", "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
@@ -170,12 +287,26 @@ def _fallback_model():
 
 
 def get_or_download_model():
+    _set_status("hydrate", "Restoring cache from prior Kaggle output…")
+    hydrate_model_cache_from_inputs()
+
     os.makedirs(MODEL_DIR, exist_ok=True)
+    # Point HF downloads at persistent working cache
+    if Path("/kaggle/working").exists():
+        hf_home = Path("/kaggle/working/hf_cache")
+        hf_home.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("HF_HOME", str(hf_home))
+        os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(hf_home / "hub"))
+
+    _set_status("select", "Selecting model…")
     scored_models = scan_hardware_and_score()
 
     print("🏆 EDGERUNNER COOKBOOK (Live Trending Models)", flush=True)
     print("-" * 80, flush=True)
-    print(f"{'#':<3} | {'Model Name':<40} | {'RAM Needed':<12} | {'Status'}", flush=True)
+    print(
+        f"{'#':<3} | {'Model Name':<40} | {'RAM Needed':<12} | {'Status'}",
+        flush=True,
+    )
     print("-" * 80, flush=True)
     for i, m in enumerate(scored_models):
         display_name = m["name"][:37] + ".." if len(m["name"]) > 40 else m["name"]
@@ -194,7 +325,6 @@ def get_or_download_model():
         best_model = _fallback_model()
         scored_models = [best_model]
 
-    # Optional explicit override via env
     forced_repo = os.environ.get("EDGERUNNER_MODEL_REPO")
     forced_file = os.environ.get("EDGERUNNER_MODEL_FILE")
     if forced_repo and forced_file:
@@ -225,21 +355,40 @@ def get_or_download_model():
             else best_model
         )
 
-    model_path = os.path.join(MODEL_DIR, selected_model["filename"])
+    filename = selected_model["filename"]
+    # Prefer basename only in MODEL_DIR
+    base_name = Path(filename).name
+    model_path = find_existing_gguf(base_name)
 
-    if not os.path.exists(model_path):
-        print(f"\n⬇️ Downloading {selected_model['name']} from HuggingFace...", flush=True)
+    if model_path:
+        print(f"\n✅ Found cached model at {model_path}\n", flush=True)
+        # Ensure a copy lives under MODEL_DIR for next-run output packaging
+        dest = Path(MODEL_DIR) / base_name
+        if Path(model_path).resolve() != dest.resolve():
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                if not dest.exists():
+                    shutil.copy2(model_path, dest)
+                    model_path = str(dest)
+            except Exception:
+                pass
+    else:
+        model_path = str(Path(MODEL_DIR) / base_name)
+        _set_status("download", f"Downloading {selected_model['name']}…")
+        print(
+            f"\n⬇️ Downloading {selected_model['name']} from HuggingFace...",
+            flush=True,
+        )
         hf_hub_download(
             repo_id=selected_model["repo_id"],
             filename=selected_model["filename"],
             local_dir=MODEL_DIR,
         )
         print("✅ Download complete!\n", flush=True)
-    else:
-        print(f"\n✅ Found cached model locally at {model_path}\n", flush=True)
 
+    _set_status("downloaded", selected_model.get("name", ""), loading=True)
     return {
-        "path": model_path,
+        "path": model_path if os.path.exists(model_path) else str(Path(MODEL_DIR) / base_name),
         "n_ctx": selected_model.get("safe_ctx", 2048),
         "name": selected_model.get("name", "unknown"),
     }

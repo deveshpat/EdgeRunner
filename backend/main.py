@@ -79,10 +79,13 @@ async def root():
 
 @app.get("/health")
 async def health_check():
+    meta = get_model_meta()
+    ready = is_model_ready()
     return {
         "status": "online",
-        "model_ready": is_model_ready(),
-        "model": get_model_meta() if is_model_ready() else {"ready": False},
+        "model_ready": ready,
+        # Always include model meta so UI can show loading phase / name
+        "model": meta if meta else {"ready": False, "loading": not ready},
         "session_id": SESSION_ID,
         "accelerator": ACCELERATOR,
         "session": watchdog.status(),

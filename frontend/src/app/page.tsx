@@ -197,7 +197,7 @@ export default function EdgeRunnerUI() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Health
+  // Health — poll faster until model is ready (avoid stuck "Booting model")
   useEffect(() => {
     if (!backendUrl) {
       setIsOnline(null);
@@ -209,25 +209,40 @@ export default function EdgeRunnerUI() {
       try {
         const res = await fetch(`${backendUrl.replace(/\/$/, "")}/health`, {
           signal: AbortSignal.timeout(8000),
+          cache: "no-store",
           referrerPolicy: "no-referrer",
         });
         if (cancelled) return;
         setIsOnline(res.ok);
         if (res.ok) {
-          const data = await res.json();
-          setModelReady(!!data.model_ready);
+          const data = (await res.json()) as {
+            model_ready?: boolean;
+            model?: { ready?: boolean; name?: string; loading?: boolean };
+          };
+          const ready = !!(data.model_ready || data.model?.ready);
+          setModelReady(ready);
+          if (ready) {
+            setProgressMsg(null);
+          } else if (data.model?.loading || data.model?.name) {
+            setProgressMsg(
+              data.model?.name
+                ? `Loading model ${data.model.name}…`
+                : "Downloading / loading model…"
+            );
+          }
         }
       } catch {
         if (!cancelled) setIsOnline(false);
       }
     };
     check();
-    const interval = setInterval(check, 10000);
+    // 2s while booting, 10s once ready (interval recreated when modelReady flips)
+    const interval = setInterval(check, modelReady ? 10000 : 2000);
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [backendUrl]);
+  }, [backendUrl, modelReady]);
 
   // Heartbeat — GET avoids CORS preflight through tunnels
   useEffect(() => {
@@ -514,20 +529,33 @@ export default function EdgeRunnerUI() {
       });
       setPhase("kaggle");
       setShowSettings(false);
-      setProgressMsg("Waiting for model to finish loading…");
+      setProgressMsg("Backend online — waiting for model…");
+      setIsOnline(true);
+      setModelReady(false);
       savePrefs({
         lastBackendUrl: result.publicUrl,
         accelerator: result.accelerator,
       });
 
       void waitForBackendHealth(result.publicUrl, {
-        timeoutMs: 300_000,
+        timeoutMs: 600_000,
         signal: ac.signal,
-      }).then((h) => {
-        setModelReady(h.model_ready);
-        setIsOnline(true);
-        setProgressMsg(null);
-      });
+      })
+        .then((h) => {
+          if (h.online) setIsOnline(true);
+          // Only promote to ready — never force false over a later health poll
+          if (h.model_ready) {
+            setModelReady(true);
+            setProgressMsg(null);
+          } else if (h.online) {
+            setProgressMsg(
+              "Backend is up; model still loading (check status badge)…"
+            );
+          }
+        })
+        .catch(() => {
+          /* aborted or network — health poll continues */
+        });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg !== "aborted" && msg !== "Launch aborted") {
@@ -1181,9 +1209,20 @@ export default function EdgeRunnerUI() {
           <div className="flex items-center gap-2 px-3 py-1.5 bg-neutral-950 rounded-full border border-neutral-800">
             {isOnline ? (
               <>
-                <CheckCircle2 size={14} className="text-emerald-500" />
-                <span className="text-emerald-500/80">
-                  {modelReady ? "Engine Online" : "Booting model…"}
+                <CheckCircle2
+                  size={14}
+                  className={
+                    modelReady ? "text-emerald-500" : "text-amber-400"
+                  }
+                />
+                <span
+                  className={
+                    modelReady ? "text-emerald-500/80" : "text-amber-400/90"
+                  }
+                >
+                  {modelReady
+                    ? "Engine Online"
+                    : "API online · loading model…"}
                 </span>
               </>
             ) : (

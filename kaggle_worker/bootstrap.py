@@ -696,6 +696,15 @@ def start_tunnel(cloudflared: Path) -> tuple[subprocess.Popen, str]:
 
 def start_api(public_url: str) -> subprocess.Popen:
     hb_file = WORK / ".heartbeat"
+    models_dir = WORK / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    hf_home = Path("/kaggle/working/hf_cache")
+    try:
+        hf_home.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        hf_home = WORK / "hf_cache"
+        hf_home.mkdir(parents=True, exist_ok=True)
+
     env = os.environ.copy()
     env.update(
         {
@@ -708,6 +717,10 @@ def start_api(public_url: str) -> subprocess.Popen:
             "KP_STARTUP_GRACE_SECONDS": str(STARTUP_GRACE),
             "KP_WORK_DIR": str(WORK),
             "KP_HEARTBEAT_FILE": str(hb_file),
+            # Persist GGUFs under /kaggle/working so next run can remount them
+            "EDGERUNNER_MODEL_DIR": str(models_dir),
+            "HF_HOME": str(hf_home),
+            "HUGGINGFACE_HUB_CACHE": str(hf_home / "hub"),
             "PORT": str(PORT),
             "PYTHONUNBUFFERED": "1",
         }

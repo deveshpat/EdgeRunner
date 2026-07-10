@@ -9,6 +9,7 @@
 
 import type { Accelerator } from "./types";
 import {
+  STABLE_KERNEL_TITLE,
   kernelSlug,
   loadKernelBundle,
   newSessionId,
@@ -121,6 +122,8 @@ export async function saveKernel(
     source: string;
     enableGpu: boolean;
     sessionTimeoutSeconds: number;
+    /** Attach previous run output (same notebook) so models/cache persist. */
+    kernelDataSources?: string[];
   },
   signal?: AbortSignal
 ): Promise<{ ref?: string; url?: string; error?: string; kernelId?: number }> {
@@ -136,7 +139,8 @@ export async function saveKernel(
     enableInternet: true,
     sessionTimeoutSeconds: opts.sessionTimeoutSeconds,
     datasetDataSources: [] as string[],
-    kernelDataSources: [] as string[],
+    // Self-source: mounts prior version's /kaggle/working under /kaggle/input/
+    kernelDataSources: opts.kernelDataSources ?? [],
     competitionDataSources: [] as string[],
     modelDataSources: [] as string[],
     categoryIds: [] as string[],
@@ -348,8 +352,9 @@ export async function launchKaggleSession(
 
   const tryOnce = async (accelerator: Accelerator): Promise<LaunchResult> => {
     const sessionId = newSessionId();
+    // Always the same notebook on the user's Kaggle account (no spam kernels).
     const slug = kernelSlug(sessionId);
-    const kernelRef = `${auth.username}/${slug}`;
+    const kernelRef = `${auth.username.trim()}/${slug}`;
 
     onProgress?.({
       state: "packing",
@@ -374,23 +379,51 @@ export async function launchKaggleSession(
       sessionId,
       kernelRef,
       accelerator,
-      message: `Pushing ${accelerator.toUpperCase()} kernel to Kaggle…`,
+      message: `Updating notebook ${kernelRef} (${accelerator.toUpperCase()})…`,
     });
 
-    const push = await saveKernel(
-      auth,
-      {
-        slug: kernelRef,
-        title: `EdgeRunner ${sessionId.slice(0, 8)}`,
-        source,
-        enableGpu: accelerator === "gpu",
-        sessionTimeoutSeconds: maxLifetime,
-      },
-      signal
-    );
-
-    if (push.error) {
-      throw new Error(String(push.error));
+    // Prefer reusing prior version output as a data source (model cache).
+    // First-ever create may reject self-source — retry without it.
+    let push: Awaited<ReturnType<typeof saveKernel>>;
+    try {
+      push = await saveKernel(
+        auth,
+        {
+          slug: kernelRef,
+          title: STABLE_KERNEL_TITLE,
+          source,
+          enableGpu: accelerator === "gpu",
+          sessionTimeoutSeconds: maxLifetime,
+          kernelDataSources: [kernelRef],
+        },
+        signal
+      );
+      if (push.error) throw new Error(String(push.error));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const maybeSourceIssue =
+        /kernel.*source|data source|invalid|not found|404|403/i.test(msg);
+      if (!maybeSourceIssue) throw e;
+      onProgress?.({
+        state: "pushing",
+        sessionId,
+        kernelRef,
+        accelerator,
+        message: "First run or source unavailable — pushing without cache mount…",
+      });
+      push = await saveKernel(
+        auth,
+        {
+          slug: kernelRef,
+          title: STABLE_KERNEL_TITLE,
+          source,
+          enableGpu: accelerator === "gpu",
+          sessionTimeoutSeconds: maxLifetime,
+          kernelDataSources: [],
+        },
+        signal
+      );
+      if (push.error) throw new Error(String(push.error));
     }
 
     onProgress?.({
@@ -549,24 +582,36 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 export async function waitForBackendHealth(
   backendUrl: string,
   opts?: { timeoutMs?: number; signal?: AbortSignal }
-): Promise<{ model_ready: boolean }> {
-  const timeoutMs = opts?.timeoutMs ?? 180_000;
+): Promise<{ online: boolean; model_ready: boolean; model?: unknown }> {
+  const timeoutMs = opts?.timeoutMs ?? 300_000;
   const deadline = Date.now() + timeoutMs;
   const base = backendUrl.replace(/\/$/, "");
+  let sawOnline = false;
+  let lastModel: unknown;
   while (Date.now() < deadline) {
     if (opts?.signal?.aborted) throw new Error("aborted");
     try {
       const res = await fetch(`${base}/health`, {
         signal: AbortSignal.timeout(8000),
+        cache: "no-store",
+        referrerPolicy: "no-referrer",
       });
       if (res.ok) {
-        const data = (await res.json()) as { model_ready?: boolean };
-        return { model_ready: !!data.model_ready };
+        sawOnline = true;
+        const data = (await res.json()) as {
+          model_ready?: boolean;
+          model?: unknown;
+        };
+        lastModel = data.model;
+        // Only resolve when the model is actually loaded — not on first 200.
+        if (data.model_ready) {
+          return { online: true, model_ready: true, model: data.model };
+        }
       }
     } catch {
-      /* still booting */
+      /* tunnel still warming or model loading */
     }
-    await sleep(3000, opts?.signal);
+    await sleep(2000, opts?.signal);
   }
-  return { model_ready: false };
+  return { online: sawOnline, model_ready: false, model: lastModel };
 }

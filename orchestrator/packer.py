@@ -101,12 +101,10 @@ def write_kernel_bundle(
     Returns path to out_dir.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    slug = kernel_slug or f"edgerunner-{session_id[:8]}"
-    # Kaggle slug rules: lowercase, hyphens
+    # One stable notebook per user (re-pushed each launch) — avoids notebook spam.
+    slug = kernel_slug or "edgerunner"
     slug = slug.lower().replace("_", "-")
-    title = f"EdgeRunner {session_id[:8]}"
-    if len(title) < 5:
-        title = "EdgeRunner Session"
+    title = "EdgeRunner"
 
     enable_gpu = accelerator.lower() in ("gpu", "nvidia", "t4", "p100", "true", "1")
 
@@ -119,8 +117,9 @@ def write_kernel_bundle(
     )
     (out_dir / "worker.py").write_text(worker_src, encoding="utf-8")
 
+    kernel_id = f"{username}/{slug}"
     metadata = {
-        "id": f"{username}/{slug}",
+        "id": kernel_id,
         "title": title,
         "code_file": "worker.py",
         "language": "python",
@@ -131,7 +130,8 @@ def write_kernel_bundle(
         "enable_internet": True,
         "dataset_sources": [],
         "competition_sources": [],
-        "kernel_sources": [],
+        # Prior run's /kaggle/working is mounted under /kaggle/input/ — model cache
+        "kernel_sources": [kernel_id],
         "model_sources": [],
         "keywords": [],
     }

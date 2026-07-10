@@ -83,6 +83,12 @@ export function newSessionId(): string {
   ).join("");
 }
 
-export function kernelSlug(sessionId: string): string {
-  return `edgerunner-${sessionId.slice(0, 8).toLowerCase()}`;
+/** Stable Kaggle notebook slug — one notebook per user, not a new one each launch. */
+export const STABLE_KERNEL_SLUG = "edgerunner";
+
+export function kernelSlug(_sessionId?: string): string {
+  return STABLE_KERNEL_SLUG;
 }
+
+export const STABLE_KERNEL_TITLE = "EdgeRunner";
+
