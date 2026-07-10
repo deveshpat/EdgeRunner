@@ -1,63 +1,32 @@
-
-# Python caches
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
-
-# Pytest / coverage
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-.cache/
-
-# Virtualenvs
+*.egg-info/
 .venv/
 venv/
-env/
-ENV/
-
-# Local secrets
 .env
-.env.*
-!.env.example
-
-# Local scripts / temporary patch helpers
-git_apply.sh
-*.patch
-*.diff
-
-# Archives / manual transfer bundles
-*.zip
-*.tar
-*.tar.gz
-*.tgz
-
-# Jupyter / notebook runtime noise
-.ipynb_checkpoints/
-
-# Runtime signals: keep only the directory marker
-signals/*.json
-!signals/.gitkeep
-
-# Training/runtime artifacts
+.mypy_cache/
+.pytest_cache/
+*.gguf
 models/
-checkpoints/
-data/
-outputs/
-runs/
-logs/
-wandb/
-mlruns/
-*.safetensors
-*.pt
-*.pth
-*.ckpt
+.kagglepilot/
+.edgerunner/
 
-# OS/editor noise
+# Node / Next
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+next-env.d.ts
+
+# OS / IDE
 .DS_Store
-Thumbs.db
-.vscode/settings.json
+.idea/
+.vscode/
+*.swp
 
-# Ignore shell scripts that are used for local development and testing, but not intended to be part of the main codebase
-*.sh
+# Secrets — never commit
+kaggle.json
+access_token
+*.pem

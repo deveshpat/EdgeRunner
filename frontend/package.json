@@ -1,5 +1,5 @@
 {
-  "name": "frontend",
+  "name": "edgerunner-frontend",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -9,12 +9,8 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@huggingface/transformers": "^4.2.0",
-    "@langchain/core": "^1.2.2",
-    "@langchain/langgraph": "^1.4.7",
     "lucide-react": "^1.23.0",
     "next": "16.2.10",
-    "pyodide": "^314.0.2",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "react-markdown": "^10.1.0"

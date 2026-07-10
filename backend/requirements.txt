@@ -1,5 +1,5 @@
 fastapi
-uvicorn
+uvicorn[standard]
 pydantic
 langchain
 langchain-community
@@ -7,3 +7,4 @@ langgraph
 llama-cpp-python
 huggingface-hub
 psutil
+httpx
