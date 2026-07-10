@@ -23,24 +23,19 @@ Live UI: [https://deveshpat.github.io/EdgeRunner/](https://deveshpat.github.io/E
 - Tokens are **never** stored in plaintext `localStorage` / `sessionStorage`  
 - See [SECURITY.md](SECURITY.md)
 
-### Google login (multi-device Kaggle token)
+### Sign in with Google
 
-Sign in with **Google** so the same encrypted vault (Kaggle username + API token + prefs) follows you across browsers/devices.
+Users only see a **Sign in with Google** button → full Google login page → back into EdgeRunner.  
+Vault encryption and credential sync run automatically in the background (no passphrase screens for normal use).
 
-1. Create a **Google Cloud OAuth 2.0 Web Client ID**  
-   - [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials)  
-   - Application type: **Web application**  
-   - **Authorized JavaScript origins:**  
-     - `https://deveshpat.github.io`  
-     - `http://localhost:3000` (local dev)  
-   - Enable the **Google Drive API** on the project (App Data scope only)
-2. Put the client ID in one of:  
-   - `frontend/public/config.json` → `"googleClientId": "….apps.googleusercontent.com"`  
-   - or paste it once in the UI (stored in `localStorage` on that browser)  
-   - or build with `NEXT_PUBLIC_GOOGLE_CLIENT_ID=...`
-3. On the site: **Continue with Google** → save Kaggle token once → **Sync now** on other devices after Google sign-in  
+**Site owner (one-time):** create a Google Cloud **OAuth Web Client ID**, enable Drive API, set:
 
-Sync uses the private **Drive App Data** folder (only this app + your Google account can read it). Payload is AES-256-GCM encrypted client-side before upload. There is still **no EdgeRunner server** holding your keys.
+| Field | Value |
+|-------|--------|
+| Authorized JavaScript origins | `https://deveshpat.github.io`, `http://localhost:3000` |
+| Authorized redirect URIs | `https://deveshpat.github.io/EdgeRunner/`, `http://localhost:3000/EdgeRunner/` |
+
+Put the client ID in `frontend/public/config.json` as `googleClientId` (or `NEXT_PUBLIC_GOOGLE_CLIENT_ID` at build time). End users never touch that.
 
 ### Fast Kaggle install (prebuilt wheels)
 

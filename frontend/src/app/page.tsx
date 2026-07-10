@@ -14,17 +14,18 @@ import {
   X,
 } from "lucide-react";
 import {
+  consumeOAuthRedirect,
   getGoogleUser,
   initGoogleAuth,
   isGoogleConfigured,
   isGoogleSignedIn,
   onGoogleAuthChange,
-  signInWithGoogle,
+  signInWithGoogleRedirect,
   signOutGoogle,
   type GoogleUser,
 } from "@/lib/google-auth";
 import { syncAfterGoogleLogin } from "@/lib/cloud-sync";
-import { setGoogleClientIdOverride, loadConfig } from "@/lib/config";
+import { loadConfig } from "@/lib/config";
 import ReactMarkdown from "react-markdown";
 import {
   launchKaggleSession,
@@ -62,7 +63,7 @@ import type {
 
 const CHAT_KEY = "current";
 
-type VaultGate = "loading" | "ready" | "need_passphrase" | "create";
+type VaultGate = "loading" | "ready" | "signin" | "need_passphrase" | "create";
 
 function sysLine(content: string): Message {
   return { role: "system", content, ts: Date.now() };
@@ -132,36 +133,91 @@ export default function EdgeRunnerUI() {
     backendUrlRef.current = backendUrl;
   }, [backendUrl]);
 
-  // ── Vault bootstrap ─────────────────────────────────────────────────────
+  // ── Boot: Google redirect return → silent vault → ready ─────────────────
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
+        const { configured } = await initGoogleAuth();
+        if (cancelled) return;
+        setGoogleConfigured(configured);
+        try {
+          const cfg = await loadConfig();
+          setClientIdDraft(cfg.googleClientId || "");
+        } catch {
+          /* ignore */
+        }
+
+        // 1) Finish Google redirect if we just came back from accounts.google.com
+        const oauth = await consumeOAuthRedirect();
+        if (cancelled) return;
+        if (oauth.error) {
+          setVaultError(oauth.error);
+          setVaultGate("signin");
+          return;
+        }
+        if (oauth.user) {
+          setGoogleUser(oauth.user);
+          // Silent device vault — user never sees passphrase setup
+          const exists = await vaultExists();
+          if (!exists) await createVault({ mode: "device" });
+          else {
+            await tryAutoUnlock();
+            if (!isUnlocked()) {
+              try {
+                await unlockDeviceVault();
+              } catch {
+                await createVault({ mode: "device" });
+              }
+            }
+          }
+          await migrateLegacyIfNeeded();
+          if (!cancelled) {
+            setVaultGate("ready");
+            // Sync Kaggle creds in background after paint
+            setTimeout(() => {
+              void runGoogleSync().catch(() => {});
+            }, 0);
+          }
+          return;
+        }
+
+        // 2) Already signed in this session + vault unlocks
+        setGoogleUser(getGoogleUser());
+        if (isGoogleSignedIn() || getGoogleUser()) {
+          const exists = await vaultExists();
+          if (!exists) await createVault({ mode: "device" });
+          const ok = await tryAutoUnlock();
+          if (ok || isUnlocked()) {
+            await migrateLegacyIfNeeded();
+            if (!cancelled) setVaultGate("ready");
+            return;
+          }
+        }
+
+        // 3) Local device vault only (returning visitor, no Google yet)
         const exists = await vaultExists();
-        if (!exists) {
-          if (!cancelled) setVaultGate("create");
-          return;
-        }
-        const meta = await readMeta();
-        if (meta?.mode === "passphrase") {
-          if (!cancelled) {
-            setLockedVaultMode("passphrase");
-            setVaultGate("need_passphrase");
+        if (exists) {
+          const meta = await readMeta();
+          if (meta?.mode === "passphrase") {
+            if (!cancelled) {
+              setLockedVaultMode("passphrase");
+              setVaultGate("need_passphrase");
+            }
+            return;
           }
-          return;
-        }
-        const ok = await tryAutoUnlock();
-        if (!ok) {
-          if (!cancelled) {
-            setLockedVaultMode(meta?.mode || "device");
-            setVaultGate("need_passphrase");
+          const ok = await tryAutoUnlock();
+          if (ok) {
+            await migrateLegacyIfNeeded();
+            if (!cancelled) setVaultGate("ready");
+            return;
           }
-          return;
         }
-        await migrateLegacyIfNeeded();
-        if (!cancelled) setVaultGate("ready");
+
+        // 4) Default front door: Sign in with Google
+        if (!cancelled) setVaultGate("signin");
       } catch {
-        if (!cancelled) setVaultGate("create");
+        if (!cancelled) setVaultGate("signin");
       }
     })();
     return () => {
@@ -169,22 +225,7 @@ export default function EdgeRunnerUI() {
     };
   }, []);
 
-  // Google auth bootstrap
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const cfg = await loadConfig();
-        if (!cancelled) setClientIdDraft(cfg.googleClientId || "");
-        const { configured } = await initGoogleAuth();
-        if (!cancelled) {
-          setGoogleConfigured(configured);
-          setGoogleUser(getGoogleUser());
-        }
-      } catch {
-        if (!cancelled) setGoogleConfigured(false);
-      }
-    })();
     return onGoogleAuthChange(() => {
       setGoogleUser(getGoogleUser());
     });
@@ -238,34 +279,14 @@ export default function EdgeRunnerUI() {
     setVaultError(null);
     setGoogleMsg(null);
     try {
-      if (clientIdDraft.trim() && !(await isGoogleConfigured())) {
-        setGoogleClientIdOverride(clientIdDraft.trim());
-      }
-      const { user } = await signInWithGoogle();
-      setGoogleUser(user);
-      setGoogleConfigured(true);
-      // Always land in ready vault after Google
-      const exists = await vaultExists();
-      if (!exists) await createVault({ mode: "device" });
-      else {
-        await tryAutoUnlock();
-        if (!isUnlocked()) {
-          try {
-            await unlockDeviceVault();
-          } catch {
-            await createVault({ mode: "device" });
-          }
-        }
-      }
-      await migrateLegacyIfNeeded();
-      setVaultGate("ready");
-      await runGoogleSync();
+      // Full-page redirect to Google — does not return
+      await signInWithGoogleRedirect();
     } catch (e) {
       setVaultError(e instanceof Error ? e.message : String(e));
-    } finally {
       setGoogleBusy(false);
     }
   };
+
 
   // After vault ready: restore prefs + try silent reconnect (no setup nag)
   useEffect(() => {
@@ -1054,166 +1075,117 @@ export default function EdgeRunnerUI() {
     );
   }
 
-  if (vaultGate === "create" || vaultGate === "need_passphrase") {
+  if (vaultGate === "signin" || vaultGate === "create") {
     return (
       <div className="er-shell min-h-screen flex flex-col text-sm">
         <div className="er-hazard" />
         <header className="er-header flex items-center gap-3 px-5 py-4">
           <span className="er-logo">EDGERUNNER</span>
-          <span className="er-logo-sub">// chrome vault</span>
+          <span className="er-logo-sub">// night city</span>
         </header>
-        <main className="flex-1 flex items-start justify-center p-6">
-          <div className="w-full max-w-md space-y-4 er-panel er-panel-hot er-clip p-5">
-            <div className="space-y-2 border-b border-[var(--border)] pb-4">
-              <p className="text-[var(--cyan)] text-xs tracking-wider uppercase">
-                multi-device netlink
-              </p>
-              <p className="text-xs text-[var(--muted)]">
-                Sign in with Google to sync Kaggle API chrome across devices
-                (private Drive App Data · AES-GCM).
-              </p>
-              {!googleConfigured && (
-                <label className="block text-[10px] text-[var(--muted)]">
-                  Google OAuth Client ID
-                  <input
-                    value={clientIdDraft}
-                    onChange={(e) => setClientIdDraft(e.target.value)}
-                    placeholder="….apps.googleusercontent.com"
-                    className="er-input mt-1 w-full px-2 py-1.5 text-xs"
-                  />
-                </label>
+        <main className="flex-1 flex items-center justify-center p-6">
+          <div className="w-full max-w-sm space-y-5 er-panel er-panel-hot er-clip p-6 text-center">
+            <div className="er-hero-tag mx-auto">SECURE SESSION</div>
+            <h1 className="er-logo" style={{ fontSize: "1rem", letterSpacing: "0.2em" }}>
+              EDGERUNNER
+            </h1>
+            <p className="text-xs text-[var(--muted)] leading-relaxed">
+              Sign in with Google to use EdgeRunner. Your vault, encryption, and
+              Kaggle chrome stay protected automatically — no setup screens.
+            </p>
+            <button
+              type="button"
+              disabled={googleBusy}
+              onClick={() => void handleGoogleSignIn()}
+              className="er-btn-cyan w-full py-3 flex items-center justify-center gap-3 text-sm"
+            >
+              {googleBusy ? (
+                <Loader2 size={18} className="animate-spin" />
+              ) : (
+                <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden>
+                  <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3 0 5.8 1.1 7.9 3l5.7-5.7C34.2 6.1 29.4 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.3-.4-3.5z"/>
+                  <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 16 19 12 24 12c3 0 5.8 1.1 7.9 3l5.7-5.7C34.2 6.1 29.4 4 24 4 16.3 4 9.6 8.3 6.3 14.7z"/>
+                  <path fill="#4CAF50" d="M24 44c5.2 0 10-2 13.6-5.2l-6.3-5.2C29.3 35.3 26.8 36 24 36c-5.3 0-9.7-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/>
+                  <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.3 4.1-4.2 5.5l.1.1 6.3 5.2C39.2 37 44 33 44 24c0-1.3-.1-2.3-.4-3.5z"/>
+                </svg>
               )}
-              <button
-                type="button"
-                disabled={googleBusy}
-                onClick={() => void handleGoogleSignIn()}
-                className="er-btn-cyan w-full py-2.5 flex items-center justify-center gap-2"
-              >
-                {googleBusy ? (
-                  <Loader2 size={14} className="animate-spin" />
-                ) : (
-                  <span className="text-base">G</span>
-                )}
-                {googleBusy ? "linking…" : "continue with google"}
-              </button>
-              {googleMsg && (
-                <p className="text-[10px] text-[var(--accent)]">{googleMsg}</p>
-              )}
-            </div>
-            {vaultGate === "create" ? (
-              <>
-                <p className="text-[var(--fg)]">
-                  <span className="er-prompt-char">›</span> or local-only vault
-                </p>
-                <p className="text-xs text-[var(--muted)]">
-                  Device-only AES-256-GCM (no sync). Use Google above for multi-device.
-                </p>
-                <div className="space-y-2">
-                  {(
-                    [
-                      ["device", "device key (auto-unlock)"],
-                      ["passphrase", "passphrase lock"],
-                    ] as const
-                  ).map(([mode, label]) => (
-                    <button
-                      key={mode}
-                      type="button"
-                      onClick={() => setVaultModeChoice(mode)}
-                      className={`w-full text-left px-3 py-2.5 text-xs er-btn ${
-                        vaultModeChoice === mode
-                          ? "border-[var(--accent)] text-[var(--accent)] shadow-[0_0_12px_var(--accent-glow)]"
-                          : ""
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-                {vaultModeChoice === "passphrase" && (
-                  <div className="space-y-2">
-                    <input
-                      type={showPass ? "text" : "password"}
-                      value={passphrase}
-                      onChange={(e) => setPassphrase(e.target.value)}
-                      placeholder="passphrase"
-                      className="er-input w-full px-3 py-2 text-sm"
-                    />
-                    <input
-                      type={showPass ? "text" : "password"}
-                      value={passphrase2}
-                      onChange={(e) => setPassphrase2(e.target.value)}
-                      placeholder="confirm"
-                      className="er-input w-full px-3 py-2 text-sm"
-                    />
-                    <button
-                      type="button"
-                      className="text-xs text-[var(--muted)]"
-                      onClick={() => setShowPass((v) => !v)}
-                    >
-                      {showPass ? <EyeOff size={12} className="inline" /> : <Eye size={12} className="inline" />}{" "}
-                      toggle
-                    </button>
-                  </div>
-                )}
-                <button
-                  type="button"
-                  onClick={finishVaultCreate}
-                  className="er-btn-primary w-full py-2.5"
-                >
-                  create vault
-                </button>
-              </>
-            ) : (
-              <>
-                <p className="text-[var(--fg)] flex items-center gap-2">
-                  <Lock size={14} className="text-[var(--warn)]" /> unlock vault
-                </p>
-                {lockedVaultMode === "passphrase" && (
-                  <input
-                    type={showPass ? "text" : "password"}
-                    value={passphrase}
-                    onChange={(e) => setPassphrase(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") void finishVaultUnlock();
-                    }}
-                    placeholder="passphrase"
-                    className="er-input w-full px-3 py-2 text-sm"
-                    autoFocus
-                  />
-                )}
-                <button
-                  type="button"
-                  onClick={finishVaultUnlock}
-                  className="er-btn-primary w-full py-2.5"
-                >
-                  unlock
-                </button>
-                <button
-                  type="button"
-                  disabled={googleBusy}
-                  onClick={() => void handleGoogleSignIn()}
-                  className="er-btn-cyan w-full py-2"
-                >
-                  {googleBusy ? "linking…" : "unlock via google sync"}
-                </button>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    if (confirm("Wipe local vault?")) {
-                      await wipeVault();
-                      setVaultGate("create");
-                    }
-                  }}
-                  className="w-full text-xs text-[var(--muted)] hover:text-[var(--danger)]"
-                >
-                  wipe vault
-                </button>
-              </>
-            )}
+              {googleBusy ? "Redirecting to Google…" : "Sign in with Google"}
+            </button>
+            <p className="text-[10px] text-[var(--dim)]">
+              You’ll leave this page for Google’s login, then come right back.
+            </p>
             {vaultError && (
-              <p className="text-xs text-[var(--danger)] border border-red-900/40 rounded p-2">
+              <p className="text-xs text-[var(--danger)] border border-[var(--danger)]/40 p-2 text-left">
                 {vaultError}
               </p>
+            )}
+            {!googleConfigured && (
+              <p className="text-[10px] text-[var(--warn)] text-left leading-relaxed">
+                Site owner: add your Google OAuth Web Client ID to{" "}
+                <code className="text-[var(--cyan)]">public/config.json</code> and
+                set redirect URI to this site’s URL. End users never see that.
+              </p>
+            )}
+            <button
+              type="button"
+              className="text-[10px] text-[var(--dim)] hover:text-[var(--muted)] underline"
+              onClick={async () => {
+                // Escape hatch: local-only without Google
+                const exists = await vaultExists();
+                if (!exists) await createVault({ mode: "device" });
+                else await tryAutoUnlock();
+                setVaultGate("ready");
+              }}
+            >
+              continue without Google (this device only)
+            </button>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  if (vaultGate === "need_passphrase") {
+    return (
+      <div className="er-shell min-h-screen flex flex-col text-sm">
+        <div className="er-hazard" />
+        <header className="er-header flex items-center gap-3 px-5 py-4">
+          <span className="er-logo">EDGERUNNER</span>
+          <span className="er-logo-sub">// unlock</span>
+        </header>
+        <main className="flex-1 flex items-center justify-center p-6">
+          <div className="w-full max-w-sm space-y-4 er-panel p-5">
+            <p className="text-[var(--fg)] flex items-center gap-2">
+              <Lock size={14} className="text-[var(--warn)]" /> vault locked
+            </p>
+            <input
+              type={showPass ? "text" : "password"}
+              value={passphrase}
+              onChange={(e) => setPassphrase(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void finishVaultUnlock();
+              }}
+              placeholder="passphrase"
+              className="er-input w-full px-3 py-2 text-sm"
+              autoFocus
+            />
+            <button
+              type="button"
+              onClick={finishVaultUnlock}
+              className="er-btn-primary w-full py-2.5"
+            >
+              unlock
+            </button>
+            <button
+              type="button"
+              disabled={googleBusy}
+              onClick={() => void handleGoogleSignIn()}
+              className="er-btn-cyan w-full py-2"
+            >
+              Sign in with Google instead
+            </button>
+            {vaultError && (
+              <p className="text-xs text-[var(--danger)]">{vaultError}</p>
             )}
           </div>
         </main>
@@ -1480,16 +1452,16 @@ export default function EdgeRunnerUI() {
               </button>
             </div>
 
-            {/* Google account / multi-device */}
+            {/* Google account */}
             <div className="space-y-2 border border-[var(--border)] p-3">
               <div className="text-[var(--warn)] tracking-wider text-[10px]">
-                GOOGLE · MULTI-DEVICE
+                ACCOUNT
               </div>
               {googleUser ? (
                 <div className="space-y-2">
                   <p className="text-[var(--cyan)] truncate">{googleUser.email}</p>
                   <p className="text-[10px] text-[var(--muted)]">
-                    Kaggle API syncs via private Drive App Data when you save credentials.
+                    Signed in. Credentials sync across your devices automatically when you save them.
                   </p>
                   <div className="flex gap-2">
                     <button
@@ -1515,6 +1487,7 @@ export default function EdgeRunnerUI() {
                         signOutGoogle();
                         setGoogleUser(null);
                         setGoogleMsg(null);
+                        setVaultGate("signin");
                       }}
                       className="er-btn flex-1 py-1.5"
                     >
@@ -1526,31 +1499,14 @@ export default function EdgeRunnerUI() {
                   )}
                 </div>
               ) : (
-                <div className="space-y-2">
-                  <p className="text-[10px] text-[var(--muted)]">
-                    Sign in once — paste Kaggle token once — every device with this Google
-                    account gets the same chrome.
-                  </p>
-                  {!googleConfigured && (
-                    <label className="block text-[10px] text-[var(--muted)]">
-                      OAuth Client ID
-                      <input
-                        value={clientIdDraft}
-                        onChange={(e) => setClientIdDraft(e.target.value)}
-                        placeholder="….apps.googleusercontent.com"
-                        className="er-input mt-1 w-full px-2 py-1.5"
-                      />
-                    </label>
-                  )}
-                  <button
-                    type="button"
-                    disabled={googleBusy}
-                    onClick={() => void handleGoogleSignIn()}
-                    className="er-btn-cyan w-full py-2"
-                  >
-                    {googleBusy ? "linking…" : "continue with google"}
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  disabled={googleBusy}
+                  onClick={() => void handleGoogleSignIn()}
+                  className="er-btn-cyan w-full py-2"
+                >
+                  Sign in with Google
+                </button>
               )}
             </div>
 

@@ -1,17 +1,22 @@
 /**
- * Google Identity Services (token client) + user profile.
- * Used for cross-device vault sync via Drive App Data.
+ * Google Sign-In via full-page OAuth redirect (the normal Google login page).
+ *
+ * Vault encryption / Drive sync stay automatic in the background — the user
+ * only clicks "Sign in with Google".
  */
 
 import { loadConfig } from "./config";
 
-const GIS_SRC = "https://accounts.google.com/gsi/client";
 const SCOPES = [
   "openid",
   "email",
   "profile",
   "https://www.googleapis.com/auth/drive.appdata",
 ].join(" ");
+
+const TOKEN_KEY = "edgerunner_google_token";
+const USER_KEY = "edgerunner_google_user";
+const STATE_KEY = "edgerunner_oauth_state";
 
 export type GoogleUser = {
   sub: string;
@@ -20,37 +25,9 @@ export type GoogleUser = {
   picture?: string;
 };
 
-type TokenClient = {
-  requestAccessToken: (overrides?: { prompt?: string }) => void;
-};
-
-type GoogleAccounts = {
-  oauth2: {
-    initTokenClient: (cfg: {
-      client_id: string;
-      scope: string;
-      callback: (resp: {
-        access_token?: string;
-        error?: string;
-        expires_in?: number;
-      }) => void;
-      error_callback?: (err: { type?: string; message?: string }) => void;
-    }) => TokenClient;
-    revoke: (token: string, done: () => void) => void;
-  };
-};
-
-declare global {
-  interface Window {
-    google?: { accounts: GoogleAccounts };
-  }
-}
-
-let tokenClient: TokenClient | null = null;
 let accessToken: string | null = null;
 let tokenExpiresAt = 0;
 let currentUser: GoogleUser | null = null;
-let gisLoaded = false;
 
 const listeners = new Set<() => void>();
 
@@ -69,47 +46,47 @@ function emit() {
   });
 }
 
-function loadScript(): Promise<void> {
-  if (gisLoaded && window.google?.accounts?.oauth2) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    if (document.querySelector(`script[src="${GIS_SRC}"]`)) {
-      const wait = () => {
-        if (window.google?.accounts?.oauth2) {
-          gisLoaded = true;
-          resolve();
-        } else setTimeout(wait, 50);
-      };
-      wait();
-      return;
+function redirectUri(): string {
+  // Must match Authorized redirect URIs in Google Cloud Console exactly
+  const base = (process.env.NEXT_PUBLIC_BASE_PATH || "").replace(/\/$/, "");
+  return `${window.location.origin}${base}/`;
+}
+
+function persistSession(token: string, expiresIn: number, user: GoogleUser) {
+  accessToken = token;
+  tokenExpiresAt = Date.now() + Math.max(60, expiresIn) * 1000;
+  currentUser = user;
+  try {
+    sessionStorage.setItem(
+      TOKEN_KEY,
+      JSON.stringify({ token, exp: tokenExpiresAt })
+    );
+    localStorage.setItem(USER_KEY, JSON.stringify(user));
+  } catch {
+    /* ignore */
+  }
+  emit();
+}
+
+function restoreFromStorage(): void {
+  try {
+    const raw = sessionStorage.getItem(TOKEN_KEY);
+    if (raw) {
+      const j = JSON.parse(raw) as { token?: string; exp?: number };
+      if (j.token && j.exp && Date.now() < j.exp - 30_000) {
+        accessToken = j.token;
+        tokenExpiresAt = j.exp;
+      }
     }
-    const s = document.createElement("script");
-    s.src = GIS_SRC;
-    s.async = true;
-    s.onload = () => {
-      gisLoaded = true;
-      resolve();
-    };
-    s.onerror = () => reject(new Error("Failed to load Google Identity Services"));
-    document.head.appendChild(s);
-  });
-}
-
-export async function isGoogleConfigured(): Promise<boolean> {
-  const cfg = await loadConfig();
-  return !!cfg.googleClientId && cfg.googleClientId.includes(".apps.googleusercontent.com");
-}
-
-export function getGoogleUser(): GoogleUser | null {
-  return currentUser;
-}
-
-export function isGoogleSignedIn(): boolean {
-  return !!(accessToken && currentUser && Date.now() < tokenExpiresAt - 30_000);
-}
-
-export async function getAccessToken(): Promise<string | null> {
-  if (accessToken && Date.now() < tokenExpiresAt - 30_000) return accessToken;
-  return null;
+  } catch {
+    /* ignore */
+  }
+  try {
+    const u = localStorage.getItem(USER_KEY);
+    if (u) currentUser = JSON.parse(u) as GoogleUser;
+  } catch {
+    /* ignore */
+  }
 }
 
 async function fetchUserInfo(token: string): Promise<GoogleUser> {
@@ -132,103 +109,163 @@ async function fetchUserInfo(token: string): Promise<GoogleUser> {
   };
 }
 
-export async function initGoogleAuth(): Promise<{ configured: boolean }> {
-  const cfg = await loadConfig();
-  if (!cfg.googleClientId) return { configured: false };
-  await loadScript();
-  if (!window.google?.accounts?.oauth2) {
-    throw new Error("Google Identity Services unavailable");
+/**
+ * Parse #access_token=… from Google OAuth implicit redirect and clean the URL.
+ */
+export async function consumeOAuthRedirect(): Promise<{
+  handled: boolean;
+  user?: GoogleUser;
+  error?: string;
+}> {
+  if (typeof window === "undefined") return { handled: false };
+
+  const hash = window.location.hash.replace(/^#/, "");
+  if (!hash.includes("access_token") && !hash.includes("error")) {
+    restoreFromStorage();
+    return { handled: false };
   }
-  tokenClient = window.google.accounts.oauth2.initTokenClient({
-    client_id: cfg.googleClientId,
-    scope: SCOPES,
-    callback: () => {
-      /* set per-request */
-    },
-  });
-  // Restore session hint from localStorage (token itself is not persisted for security)
+
+  const params = new URLSearchParams(hash);
+  // Clean hash immediately so refresh doesn't re-process
+  const clean =
+    window.location.pathname + window.location.search;
+  window.history.replaceState({}, document.title, clean);
+
+  if (params.get("error")) {
+    return {
+      handled: true,
+      error: params.get("error_description") || params.get("error") || "denied",
+    };
+  }
+
+  const token = params.get("access_token");
+  const expiresIn = Number(params.get("expires_in") || "3600");
+  const state = params.get("state");
+  if (!token) return { handled: true, error: "No access token from Google" };
+
   try {
-    const raw = localStorage.getItem("edgerunner_google_user");
-    if (raw) {
-      // user profile only — still need to request token on demand
-      currentUser = JSON.parse(raw) as GoogleUser;
+    const expected = sessionStorage.getItem(STATE_KEY);
+    if (expected && state && expected !== state) {
+      return { handled: true, error: "OAuth state mismatch — try again" };
     }
+    sessionStorage.removeItem(STATE_KEY);
   } catch {
     /* ignore */
   }
-  return { configured: true };
+
+  try {
+    const user = await fetchUserInfo(token);
+    persistSession(token, expiresIn, user);
+    return { handled: true, user };
+  } catch (e) {
+    return {
+      handled: true,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
+
+export async function isGoogleConfigured(): Promise<boolean> {
+  const cfg = await loadConfig();
+  return (
+    !!cfg.googleClientId &&
+    cfg.googleClientId.includes(".apps.googleusercontent.com")
+  );
+}
+
+export function getGoogleUser(): GoogleUser | null {
+  return currentUser;
+}
+
+export function isGoogleSignedIn(): boolean {
+  restoreFromStorage();
+  return !!(
+    accessToken &&
+    currentUser &&
+    Date.now() < tokenExpiresAt - 30_000
+  );
+}
+
+export async function getAccessToken(): Promise<string | null> {
+  restoreFromStorage();
+  if (accessToken && Date.now() < tokenExpiresAt - 30_000) return accessToken;
+  return null;
+}
+
+export async function initGoogleAuth(): Promise<{ configured: boolean }> {
+  const cfg = await loadConfig();
+  restoreFromStorage();
+  // If we have a token, refresh profile lightly
+  if (accessToken && !currentUser) {
+    try {
+      currentUser = await fetchUserInfo(accessToken);
+      try {
+        localStorage.setItem(USER_KEY, JSON.stringify(currentUser));
+      } catch {
+        /* ignore */
+      }
+    } catch {
+      accessToken = null;
+    }
+  }
+  return { configured: !!cfg.googleClientId };
 }
 
 /**
- * Interactive sign-in (popup/consent). Resolves with access token + profile.
+ * Full-page redirect to Google's sign-in page (what people expect).
+ * Does not return — browser leaves the app.
  */
-export function signInWithGoogle(opts?: {
-  forceConsent?: boolean;
-}): Promise<{ user: GoogleUser; accessToken: string }> {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const cfg = await loadConfig();
-      if (!cfg.googleClientId) {
-        reject(
-          new Error(
-            "Google Client ID not configured. Add it in Settings or public/config.json"
-          )
-        );
-        return;
-      }
-      await loadScript();
-      if (!window.google?.accounts?.oauth2) {
-        reject(new Error("Google Identity Services unavailable"));
-        return;
-      }
+export async function signInWithGoogleRedirect(): Promise<void> {
+  const cfg = await loadConfig();
+  if (!cfg.googleClientId) {
+    throw new Error(
+      "Google sign-in is not set up yet. The site owner must add a Google Client ID."
+    );
+  }
+  const state = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  try {
+    sessionStorage.setItem(STATE_KEY, state);
+  } catch {
+    /* ignore */
+  }
 
-      tokenClient = window.google.accounts.oauth2.initTokenClient({
-        client_id: cfg.googleClientId,
-        scope: SCOPES,
-        callback: async (resp) => {
-          if (resp.error || !resp.access_token) {
-            reject(new Error(resp.error || "Google sign-in cancelled"));
-            return;
-          }
-          try {
-            accessToken = resp.access_token;
-            tokenExpiresAt =
-              Date.now() + (Number(resp.expires_in) || 3600) * 1000;
-            currentUser = await fetchUserInfo(accessToken);
-            try {
-              localStorage.setItem(
-                "edgerunner_google_user",
-                JSON.stringify(currentUser)
-              );
-            } catch {
-              /* ignore */
-            }
-            emit();
-            resolve({ user: currentUser, accessToken });
-          } catch (e) {
-            reject(e instanceof Error ? e : new Error(String(e)));
-          }
-        },
-        error_callback: (err) => {
-          reject(new Error(err.message || err.type || "Google auth error"));
-        },
-      });
+  const params = new URLSearchParams({
+    client_id: cfg.googleClientId,
+    redirect_uri: redirectUri(),
+    response_type: "token",
+    scope: SCOPES,
+    include_granted_scopes: "true",
+    state,
+    prompt: "select_account",
+  });
 
-      tokenClient.requestAccessToken({
-        prompt: opts?.forceConsent ? "consent" : "",
-      });
-    } catch (e) {
-      reject(e instanceof Error ? e : new Error(String(e)));
-    }
+  window.location.assign(
+    `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`
+  );
+}
+
+/** @deprecated use signInWithGoogleRedirect — kept for call sites that await */
+export async function signInWithGoogle(): Promise<{
+  user: GoogleUser;
+  accessToken: string;
+}> {
+  // If already signed in, return session
+  restoreFromStorage();
+  if (accessToken && currentUser && Date.now() < tokenExpiresAt - 30_000) {
+    return { user: currentUser, accessToken };
+  }
+  await signInWithGoogleRedirect();
+  // page navigates away
+  return new Promise(() => {
+    /* never resolves — redirect */
   });
 }
 
-/** Silent re-auth if possible; falls back to interactive. */
 export async function ensureGoogleToken(): Promise<string> {
   const existing = await getAccessToken();
   if (existing) return existing;
-  const { accessToken: t } = await signInWithGoogle();
-  return t;
+  await signInWithGoogleRedirect();
+  throw new Error("Redirecting to Google…");
 }
 
 export function signOutGoogle(): void {
@@ -237,17 +274,17 @@ export function signOutGoogle(): void {
   tokenExpiresAt = 0;
   currentUser = null;
   try {
-    localStorage.removeItem("edgerunner_google_user");
+    sessionStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
   } catch {
     /* ignore */
   }
-  if (token && window.google?.accounts?.oauth2) {
-    try {
-      window.google.accounts.oauth2.revoke(token, () => emit());
-    } catch {
-      emit();
-    }
-  } else {
-    emit();
+  if (token) {
+    // Best-effort revoke
+    fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(token)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    }).catch(() => {});
   }
+  emit();
 }
