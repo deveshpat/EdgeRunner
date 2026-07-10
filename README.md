@@ -64,8 +64,10 @@ On the setup screen, use **Local URL** → `http://127.0.0.1:8000`.
 ## Kaggle credentials
 
 1. [kaggle.com/settings](https://www.kaggle.com/settings) → API → create token  
-2. On the Pages UI: username + token → **GPU** or **CPU** → **Launch**  
-3. First boot installs pip deps + model (several minutes). Status shows log tail until `EDGERUNNER_URL=…` appears.
+2. On the Pages UI: Kaggle **username** + token → **GPU** or **CPU** → **Launch**  
+3. Always reuses one notebook: `username/edgerunner` (not a new kernel every time).  
+4. Prior run output is remounted so GGUF/HF cache can skip re-download.  
+5. Status: **API online · loading model…** then **Engine Online** when `model_ready` is true.
 
 ### Session lifecycle (GPU safety)
 
