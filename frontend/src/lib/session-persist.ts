@@ -1,37 +1,31 @@
 /**
- * Keep the active Kaggle/local backend alive across page refresh.
- *
- * sessionStorage survives refresh in the same tab and is cleared when the tab
- * is closed — so we can reconnect automatically on refresh without re-launch.
+ * Active backend session bookmark — shared across tabs (localStorage) and
+ * mirrored to sessionStorage for same-tab refresh. Cross-device via prefs
+ * lastBackendUrl + Google vault sync of prefs.
  */
 
-const KEY = "edgerunner_live_session_v1";
+import { loadPrefs, savePrefs } from "./vault";
+
+const KEY = "edgerunner_live_session_v2";
+const KEY_LEGACY = "edgerunner_live_session_v1";
+const BC_NAME = "edgerunner-session";
 
 export type LiveSession = {
   backendUrl: string;
   phase: "kaggle" | "local";
   kernelRef?: string;
   accelerator?: import("./types").Accelerator;
+  machineShape?: string;
   savedAt: number;
 };
 
-export function saveLiveSession(s: LiveSession): void {
+function parseLive(raw: string | null): LiveSession | null {
+  if (!raw) return null;
   try {
-    sessionStorage.setItem(KEY, JSON.stringify(s));
-  } catch {
-    /* ignore */
-  }
-}
-
-export function loadLiveSession(): LiveSession | null {
-  try {
-    const raw = sessionStorage.getItem(KEY);
-    if (!raw) return null;
     const j = JSON.parse(raw) as LiveSession;
     if (!j?.backendUrl) return null;
-    // Discard absurdly old (e.g. > 6h) — max lifetime is usually 1h
+    // Max lifetime is usually ≤1h; keep bookmark up to 6h for reconnect attempts
     if (j.savedAt && Date.now() - j.savedAt > 6 * 3600_000) {
-      clearLiveSession();
       return null;
     }
     return j;
@@ -40,12 +34,128 @@ export function loadLiveSession(): LiveSession | null {
   }
 }
 
-export function clearLiveSession(): void {
+function writeBoth(s: LiveSession | null): void {
   try {
-    sessionStorage.removeItem(KEY);
+    if (s) {
+      const raw = JSON.stringify(s);
+      localStorage.setItem(KEY, raw);
+      sessionStorage.setItem(KEY, raw);
+    } else {
+      localStorage.removeItem(KEY);
+      sessionStorage.removeItem(KEY);
+      sessionStorage.removeItem(KEY_LEGACY);
+    }
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
+
+function broadcast(s: LiveSession | null): void {
+  try {
+    const bc = new BroadcastChannel(BC_NAME);
+    bc.postMessage({ type: "live", session: s });
+    bc.close();
+  } catch {
+    /* BroadcastChannel unsupported */
+  }
+}
+
+export function saveLiveSession(s: LiveSession): void {
+  const next = { ...s, savedAt: s.savedAt || Date.now() };
+  writeBoth(next);
+  // Prefs = cross-tab + cloud-synced (Google) path for other devices
+  try {
+    savePrefs({
+      lastBackendUrl: next.backendUrl,
+      mode: next.phase,
+      accelerator: next.accelerator,
+      lastKernelRef: next.kernelRef,
+    } as import("./vault").StoredPrefs & { lastKernelRef?: string });
   } catch {
     /* ignore */
   }
+  broadcast(next);
+}
+
+export function loadLiveSession(): LiveSession | null {
+  // Prefer localStorage (shared tabs) → sessionStorage → prefs
+  try {
+    const fromLs = parseLive(localStorage.getItem(KEY));
+    if (fromLs) return fromLs;
+  } catch {
+    /* ignore */
+  }
+  try {
+    const fromSs =
+      parseLive(sessionStorage.getItem(KEY)) ||
+      parseLive(sessionStorage.getItem(KEY_LEGACY));
+    if (fromSs) {
+      // Promote to localStorage for other tabs
+      writeBoth(fromSs);
+      return fromSs;
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    const prefs = loadPrefs() as import("./vault").StoredPrefs & {
+      lastKernelRef?: string;
+    };
+    if (prefs.lastBackendUrl) {
+      return {
+        backendUrl: prefs.lastBackendUrl,
+        phase: prefs.mode === "local" ? "local" : "kaggle",
+        kernelRef: prefs.lastKernelRef,
+        accelerator: prefs.accelerator,
+        savedAt: Date.now() - 60_000, // unknown age — still try probe
+      };
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+export function clearLiveSession(): void {
+  writeBoth(null);
+  try {
+    savePrefs({ lastBackendUrl: undefined, lastKernelRef: undefined } as import("./vault").StoredPrefs & {
+      lastKernelRef?: string;
+    });
+  } catch {
+    /* ignore */
+  }
+  broadcast(null);
+}
+
+/** Subscribe to live-session updates from other tabs. */
+export function onLiveSessionChange(
+  cb: (s: LiveSession | null) => void
+): () => void {
+  let bc: BroadcastChannel | null = null;
+  try {
+    bc = new BroadcastChannel(BC_NAME);
+    bc.onmessage = (ev) => {
+      const data = ev.data as { type?: string; session?: LiveSession | null };
+      if (data?.type === "live") cb(data.session ?? null);
+    };
+  } catch {
+    /* ignore */
+  }
+  const onStorage = (e: StorageEvent) => {
+    if (e.key === KEY) {
+      cb(parseLive(e.newValue));
+    }
+  };
+  window.addEventListener("storage", onStorage);
+  return () => {
+    window.removeEventListener("storage", onStorage);
+    try {
+      bc?.close();
+    } catch {
+      /* ignore */
+    }
+  };
 }
 
 /** Fire-and-forget heartbeat so idle watchdog doesn't kill during reconnect. */

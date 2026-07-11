@@ -35,12 +35,14 @@ import { loadConfig } from "@/lib/config";
 import {
   clearLiveSession,
   loadLiveSession,
+  onLiveSessionChange,
   pokeHeartbeat,
   probeBackend,
   saveLiveSession,
 } from "@/lib/session-persist";
 import ReactMarkdown from "react-markdown";
 import {
+  attachRunningKaggleSession,
   launchKaggleSession,
   waitForBackendHealth,
   type LaunchProgress,
@@ -382,7 +384,7 @@ export default function EdgeRunnerUI() {
         chatIdRef.current = rec.id;
       }
 
-      // Prefer same-tab sessionStorage (survives refresh), then prefs
+      // Shared live session (localStorage + prefs) — works across tabs
       const live = loadLiveSession();
       const last = (
         live?.backendUrl ||
@@ -390,49 +392,90 @@ export default function EdgeRunnerUI() {
         ""
       ).replace(/\/$/, "");
 
-      if (last) {
+      const attachUrl = async (
+        url: string,
+        meta?: { phase?: "kaggle" | "local"; kernelRef?: string; accelerator?: Accelerator }
+      ) => {
         setProgressMsg("reconnecting to session…");
-        // Cancel any soft-detach / keep idle watchdog happy immediately
-        pokeHeartbeat(last);
-        const probe = await probeBackend(last, { retries: 6, timeoutMs: 8000 });
-        if (probe.ok && !cancelled) {
-          const isTunnel =
-            /trycloudflare\.com|loca\.lt|localtunnel\.me|bore\.pub/i.test(last);
-          const phase: "kaggle" | "local" =
-            live?.phase || (isTunnel ? "kaggle" : "local");
-          setBackendUrl(last);
-          setIsOnline(true);
-          setModelReady(probe.model_ready);
-          setModelName(probe.modelName);
-          setPhase(phase);
-          setProgressMsg(
-            probe.model_ready ? null : "backend up; model still loading…"
+        pokeHeartbeat(url);
+        const probe = await probeBackend(url, { retries: 4, timeoutMs: 7000 });
+        if (!probe.ok || cancelled) return false;
+        const isTunnel =
+          /trycloudflare\.com|loca\.lt|localtunnel\.me|bore\.pub/i.test(url);
+        const phase: "kaggle" | "local" =
+          meta?.phase || live?.phase || (isTunnel ? "kaggle" : "local");
+        setBackendUrl(url);
+        setIsOnline(true);
+        setModelReady(probe.model_ready);
+        setModelName(probe.modelName);
+        setPhase(phase);
+        setProgressMsg(
+          probe.model_ready ? null : "backend up; model still loading…"
+        );
+        saveLiveSession({
+          backendUrl: url,
+          phase,
+          kernelRef: meta?.kernelRef || live?.kernelRef,
+          accelerator:
+            meta?.accelerator || live?.accelerator || prefs.accelerator,
+          savedAt: Date.now(),
+        });
+        setMessages((m) => {
+          const line = sysLine(
+            `session restored · ${url.replace(/^https?:\/\//, "")}`
           );
-          saveLiveSession({
-            backendUrl: last,
-            phase,
-            kernelRef: live?.kernelRef,
-            accelerator: live?.accelerator || prefs.accelerator,
-            savedAt: Date.now(),
-          });
-          savePrefs({ lastBackendUrl: last });
-          setMessages((m) => {
-            const line = sysLine(
-              `session restored · ${last.replace(/^https?:\/\//, "")}`
-            );
-            if (!m.length) return [line];
-            // Don't spam if already noted
-            if (m.some((x) => x.content?.includes("session restored"))) return m;
-            return [...m, line];
-          });
-          // Land in terminal when a live backend reconnects
-          setAppStage("terminal");
-          if (!cancelled) setRestoring(false);
-          return;
+          if (!m.length) return [line];
+          if (m.some((x) => x.content?.includes("session restored"))) return m;
+          return [...m, line];
+        });
+        setAppStage("terminal");
+        return true;
+      };
+
+      if (last && (await attachUrl(last))) {
+        if (!cancelled) setRestoring(false);
+        return;
+      }
+
+      // URL dead — ask Kaggle if the stable notebook is still RUNNING
+      const uname = (secret?.username || prefs.username || "").trim();
+      const token = secret?.apiToken || apiToken;
+      const key = secret?.apiKey || apiKey;
+      if (uname && (token || key) && !cancelled) {
+        setProgressMsg("checking Kaggle for active worker…");
+        try {
+          const attached = await attachRunningKaggleSession(
+            {
+              username: uname,
+              apiToken: token || undefined,
+              apiKey: key || undefined,
+            },
+            {
+              hintUrl: last || undefined,
+              onProgress: (msg) => setProgressMsg(msg),
+            }
+          );
+          if (attached && !cancelled) {
+            await attachUrl(attached.publicUrl, {
+              phase: "kaggle",
+              kernelRef: attached.kernelRef,
+              accelerator: attached.accelerator,
+            });
+            setMessages((m) => [
+              ...m,
+              sysLine(
+                `attached running kaggle · ${attached.publicUrl.replace(/^https?:\/\//, "")}`
+              ),
+            ]);
+            if (!cancelled) setRestoring(false);
+            return;
+          }
+        } catch {
+          /* no active kernel */
         }
       }
 
-      // Session dead (tab was closed long enough for idle kill, or first visit)
+      // Nothing live
       clearLiveSession();
       const hasCreds = !!(secret?.apiToken || secret?.apiKey || prefs.username);
       if (!cancelled) {
@@ -443,7 +486,7 @@ export default function EdgeRunnerUI() {
               ? m
               : [
                   sysLine(
-                    "no live session · launch kaggle once (refresh will reconnect automatically)"
+                    "no live session · launch kaggle once — other tabs/devices will reuse it"
                   ),
                 ]
           );
@@ -543,7 +586,7 @@ export default function EdgeRunnerUI() {
     };
   }, [backendUrl, modelReady]);
 
-  // Heartbeat + keep session bookmark fresh for refresh-reconnect
+  // Heartbeat + keep session bookmark fresh (shared localStorage for all tabs)
   useEffect(() => {
     if (!backendUrl || isOnline === false) return;
     const beat = () => {
@@ -552,17 +595,49 @@ export default function EdgeRunnerUI() {
       pokeHeartbeat(base);
       const isTunnel =
         /trycloudflare\.com|loca\.lt|localtunnel\.me|bore\.pub/i.test(base);
+      const prev = loadLiveSession();
       saveLiveSession({
         backendUrl: base,
         phase: isTunnel ? "kaggle" : "local",
+        kernelRef: prev?.kernelRef || sessionRef.current?.kernel_ref,
+        accelerator:
+          sessionRef.current?.accelerator || prev?.accelerator || accelerator,
         savedAt: Date.now(),
       });
     };
     beat();
-    // 12s — well under default 90s idle
+    // 12s — well under default 90s idle; any open tab keeps the worker alive
     const interval = setInterval(beat, 12000);
     return () => clearInterval(interval);
-  }, [backendUrl, isOnline]);
+  }, [backendUrl, isOnline, accelerator]);
+
+  // Other tabs: pick up URL when they launch / attach
+  useEffect(() => {
+    return onLiveSessionChange((s) => {
+      if (!s?.backendUrl) return;
+      if (backendUrlRef.current === s.backendUrl.replace(/\/$/, "")) return;
+      if (intentionalStopRef.current) return;
+      void (async () => {
+        const url = s.backendUrl.replace(/\/$/, "");
+        const probe = await probeBackend(url, { retries: 2, timeoutMs: 5000 });
+        if (!probe.ok) return;
+        setBackendUrl(url);
+        setIsOnline(true);
+        setModelReady(probe.model_ready);
+        setModelName(probe.modelName);
+        setPhase(s.phase);
+        setAppStage("terminal");
+        setMessages((m) => {
+          const line = sysLine(
+            `synced from other tab · ${url.replace(/^https?:\/\//, "")}`
+          );
+          if (m.some((x) => x.content?.includes("synced from other tab")))
+            return m;
+          return [...m, line];
+        });
+      })();
+    });
+  }, []);
 
   // Refresh must NOT kill Kaggle. Only tab close stops heartbeats → idle kill.
   // On pagehide we only refresh sessionStorage bookmark (no /session/detach).
@@ -745,7 +820,10 @@ export default function EdgeRunnerUI() {
         setHasStoredCreds(true);
       }
 
-      setMessages((m) => [...m, sysLine("launching kaggle worker…")]);
+      setMessages((m) => [
+        ...m,
+        sysLine("connecting — reuse running worker if present…"),
+      ]);
 
       const result = await launchKaggleSession({
         auth: {
@@ -778,28 +856,28 @@ export default function EdgeRunnerUI() {
       });
       setPhase("kaggle");
       setShowSettings(false);
-      setProgressMsg("backend online — loading model…");
+      setProgressMsg(
+        result.reused
+          ? "reused session — checking model…"
+          : "backend online — loading model…"
+      );
       setIsOnline(true);
       setModelReady(false);
       setMessages((m) => [
         ...m,
         sysLine(
-          `online · ${result.accelerator}${
+          `${result.reused ? "reused" : "online"} · ${result.accelerator}${
             result.machineShape ? ` (${result.machineShape})` : ""
           } · ${result.publicUrl.replace(/^https?:\/\//, "")}`
         ),
       ]);
-      savePrefs({
-        lastBackendUrl: result.publicUrl,
-        accelerator: result.accelerator,
-        mode: "kaggle",
-      });
-      // Survives page refresh in this tab — no need to click Launch again
+      // Shared across tabs + cloud prefs (same backend URL)
       saveLiveSession({
         backendUrl: result.publicUrl,
         phase: "kaggle",
         kernelRef: result.kernelRef,
         accelerator: result.accelerator,
+        machineShape: result.machineShape,
         savedAt: Date.now(),
       });
       pokeHeartbeat(result.publicUrl);

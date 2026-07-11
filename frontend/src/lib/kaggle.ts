@@ -15,12 +15,14 @@ import {
   kaggleMachineShapesToTry,
 } from "./types";
 import {
+  STABLE_KERNEL_SLUG,
   STABLE_KERNEL_TITLE,
   kernelSlug,
   loadKernelBundle,
   newSessionId,
   renderWorkerSource,
 } from "./packer";
+import { probeBackend } from "./session-persist";
 
 const API = "https://api.kaggle.com/v1";
 
@@ -70,6 +72,8 @@ export type LaunchResult = {
   machineShape?: string;
   publicUrl: string;
   logsTail: string;
+  /** True when we attached to an already-running Kaggle worker (no re-push). */
+  reused?: boolean;
 };
 
 function authHeaders(auth: KaggleAuth): HeadersInit {
@@ -180,13 +184,140 @@ export async function kernelStatus(
   username: string,
   slug: string,
   signal?: AbortSignal
-): Promise<{ status?: string; failureMessage?: string }> {
+): Promise<{ status?: string | number; failureMessage?: string }> {
   return kagglePost(
     "/kernels.KernelsApiService/GetKernelSessionStatus",
     auth,
     { userName: username, kernelSlug: slug },
     signal
   );
+}
+
+/** Normalize Kaggle worker status (string or enum int) → uppercase name. */
+export function normalizeKernelStatus(
+  status: string | number | undefined | null
+): string {
+  if (status === null || status === undefined) return "";
+  if (typeof status === "number") {
+    // KernelWorkerStatus: QUEUED=0 RUNNING=1 COMPLETE=2 ERROR?=…
+    const map = ["QUEUED", "RUNNING", "COMPLETE", "ERROR", "CANCEL_REQUESTED", "CANCELLED"];
+    return map[status] || String(status);
+  }
+  return String(status).toUpperCase();
+}
+
+export function isKernelSessionActive(
+  status: string | number | undefined | null
+): boolean {
+  const s = normalizeKernelStatus(status);
+  return (
+    s.includes("RUNNING") ||
+    s.includes("QUEUED") ||
+    s.includes("STARTING") ||
+    s.includes("CANCEL_REQUESTED") // still up until cancelled
+  );
+}
+
+/**
+ * If the stable EdgeRunner notebook is already RUNNING on Kaggle, scrape the
+ * tunnel URL from logs and probe /health. Returns null if nothing usable.
+ */
+export async function attachRunningKaggleSession(
+  auth: KaggleAuth,
+  opts?: {
+    signal?: AbortSignal;
+    onProgress?: (msg: string) => void;
+    /** Prefer this URL first (from localStorage / other tab). */
+    hintUrl?: string;
+    maxWaitMs?: number;
+  }
+): Promise<LaunchResult | null> {
+  const username = auth.username.trim();
+  if (!username) return null;
+  const slug = STABLE_KERNEL_SLUG;
+  const kernelRef = `${username}/${slug}`;
+  const signal = opts?.signal;
+  const maxWaitMs = opts?.maxWaitMs ?? 45_000;
+
+  // 1) Fast path: probe known URL from another tab / prefs
+  if (opts?.hintUrl) {
+    opts.onProgress?.("Probing known backend URL…");
+    const probe = await probeBackend(opts.hintUrl, {
+      retries: 2,
+      timeoutMs: 6000,
+    });
+    if (probe.ok) {
+      return {
+        sessionId: newSessionId(),
+        kernelRef,
+        accelerator: "gpu",
+        publicUrl: opts.hintUrl.replace(/\/$/, ""),
+        logsTail: "",
+        reused: true,
+      };
+    }
+  }
+
+  // 2) Ask Kaggle if the stable kernel is mid-run
+  opts?.onProgress?.("Checking Kaggle for an active EdgeRunner session…");
+  let statusRaw: string | number | undefined;
+  try {
+    const st = await kernelStatus(auth, username, slug, signal);
+    statusRaw = st.status;
+  } catch {
+    return null;
+  }
+  const status = normalizeKernelStatus(statusRaw);
+  if (!isKernelSessionActive(statusRaw)) {
+    opts?.onProgress?.(
+      status ? `Kaggle kernel status: ${status} (not running)` : "No active Kaggle session"
+    );
+    return null;
+  }
+
+  opts?.onProgress?.(
+    `Kernel ${status} — recovering tunnel URL from logs…`
+  );
+
+  const deadline = Date.now() + maxWaitMs;
+  let logsTail = "";
+  while (Date.now() < deadline) {
+    if (signal?.aborted) throw new Error("Launch aborted");
+    try {
+      // Re-check status — COMPLETE means we lost it
+      const st = await kernelStatus(auth, username, slug, signal);
+      if (!isKernelSessionActive(st.status)) {
+        return null;
+      }
+      const chunk = await kernelLogs(auth, username, slug, {
+        maxMs: 8_000,
+        signal,
+      });
+      if (chunk) {
+        logsTail = (logsTail + "\n" + chunk).slice(-12_000);
+        const url = extractTunnelUrl(logsTail) || extractTunnelUrl(chunk);
+        if (url) {
+          opts?.onProgress?.(`Found tunnel — probing ${url.replace(/^https?:\/\//, "")}…`);
+          const probe = await probeBackend(url, { retries: 4, timeoutMs: 8000 });
+          if (probe.ok) {
+            const fromLogs = acceleratorFromLogs(logsTail);
+            return {
+              sessionId: newSessionId(),
+              kernelRef,
+              accelerator: fromLogs || "gpu",
+              publicUrl: url.replace(/\/$/, ""),
+              logsTail,
+              reused: true,
+            };
+          }
+        }
+      }
+    } catch {
+      /* keep polling */
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  return null;
 }
 
 /** Fetch logs (live SSE while running, or persisted JSON blob when done). */
@@ -350,7 +481,8 @@ function isGpuQuotaError(message: string): boolean {
 }
 
 /**
- * Push packed worker to Kaggle, poll until tunnel URL appears.
+ * Prefer an already-running EdgeRunner kernel (same notebook for the user).
+ * Only push+run a new session if none is healthy.
  * On GPU failure (quota), optionally retries with CPU.
  */
 export async function launchKaggleSession(
@@ -370,6 +502,107 @@ export async function launchKaggleSession(
   if (!auth.username?.trim()) throw new Error("Kaggle username is required");
   if (!auth.apiToken && !auth.apiKey) {
     throw new Error("Kaggle API token or key is required");
+  }
+
+  // ── Reuse existing worker (multi-tab / multi-device / re-click Launch) ──
+  const sessionIdEarly = newSessionId();
+  const kernelRefEarly = `${auth.username.trim()}/${kernelSlug(sessionIdEarly)}`;
+  onProgress?.({
+    state: "packing",
+    sessionId: sessionIdEarly,
+    kernelRef: kernelRefEarly,
+    accelerator: requested,
+    message: "Looking for an already-running EdgeRunner session…",
+  });
+
+  try {
+    // Dynamic to avoid any circular init with session-persist helpers
+    const sp = await import("./session-persist");
+    const hint = sp.loadLiveSession()?.backendUrl;
+    const attached = await attachRunningKaggleSession(auth, {
+      signal,
+      hintUrl: hint,
+      maxWaitMs: 60_000,
+      onProgress: (message) =>
+        onProgress?.({
+          state: "provisioning",
+          sessionId: sessionIdEarly,
+          kernelRef: kernelRefEarly,
+          accelerator: requested,
+          message,
+        }),
+    });
+    if (attached) {
+      onProgress?.({
+        state: "online",
+        sessionId: attached.sessionId,
+        kernelRef: attached.kernelRef,
+        accelerator: attached.accelerator,
+        publicUrl: attached.publicUrl,
+        message: "Reused existing Kaggle session (no new launch)",
+      });
+      return attached;
+    }
+
+    // If still RUNNING but tunnel not recovered, do NOT SaveKernel (would restart).
+    // Give one more wait window instead.
+    try {
+      const st = await kernelStatus(
+        auth,
+        auth.username.trim(),
+        STABLE_KERNEL_SLUG,
+        signal
+      );
+      if (isKernelSessionActive(st.status)) {
+        onProgress?.({
+          state: "provisioning",
+          sessionId: sessionIdEarly,
+          kernelRef: kernelRefEarly,
+          accelerator: requested,
+          message:
+            "Kernel still running — waiting longer for tunnel (not re-launching)…",
+        });
+        const retry = await attachRunningKaggleSession(auth, {
+          signal,
+          hintUrl: hint,
+          maxWaitMs: 90_000,
+          onProgress: (message) =>
+            onProgress?.({
+              state: "provisioning",
+              sessionId: sessionIdEarly,
+              kernelRef: kernelRefEarly,
+              accelerator: requested,
+              message,
+            }),
+        });
+        if (retry) {
+          onProgress?.({
+            state: "online",
+            sessionId: retry.sessionId,
+            kernelRef: retry.kernelRef,
+            accelerator: retry.accelerator,
+            publicUrl: retry.publicUrl,
+            message: "Reused existing Kaggle session",
+          });
+          return retry;
+        }
+        throw new Error(
+          "EdgeRunner kernel is RUNNING on Kaggle but the tunnel URL could not be recovered from logs. " +
+            "Open the notebook on kaggle.com or wait and try Launch again — we will not start a second session."
+        );
+      }
+    } catch (e) {
+      if (e instanceof Error && e.message.includes("will not start a second")) {
+        throw e;
+      }
+      /* proceed to launch */
+    }
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    if (e instanceof Error && e.message.includes("will not start a second")) {
+      throw e;
+    }
+    // Fall through to full launch
   }
 
   const tryOnce = async (accelerator: Accelerator): Promise<LaunchResult> => {

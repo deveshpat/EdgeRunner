@@ -116,6 +116,7 @@ export type StoredPrefs = {
   idleTimeout?: number;
   maxLifetime?: number;
   lastBackendUrl?: string;
+  lastKernelRef?: string;
   rememberCredentials?: boolean;
   vaultMode?: "device" | "passphrase";
   /** OpenCode-inspired UI prefs */

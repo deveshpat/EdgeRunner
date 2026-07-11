@@ -401,7 +401,10 @@ export type StoredPrefs = {
   accelerator?: import("./types").Accelerator;
   idleTimeout?: number;
   maxLifetime?: number;
+  /** Last known public tunnel / local backend URL (shared across tabs + cloud) */
   lastBackendUrl?: string;
+  /** Stable kernel ref e.g. user/edgerunner */
+  lastKernelRef?: string;
   rememberCredentials?: boolean;
   vaultMode?: VaultMode;
   /** OpenCode-inspired UI (see ui-prefs.ts) */
