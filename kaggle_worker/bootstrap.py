@@ -191,7 +191,7 @@ _PURE_PKGS = [
     "pydantic",
     "langchain",
     "langchain-community",
-    "langgraph",
+
     "huggingface-hub",
     "psutil",
     "httpx",
@@ -294,7 +294,7 @@ def _verify_llama_import(env: dict | None = None) -> tuple[bool, str]:
 
 def _deps_already_ok() -> bool:
     """Skip reinstall when prior install still imports."""
-    for mod in ("fastapi", "uvicorn", "langchain", "langgraph", "numpy", "llama_cpp"):
+    for mod in ("fastapi", "uvicorn", "langchain", "numpy", "llama_cpp"):
         ok, detail = (
             _verify_import(mod) if mod != "llama_cpp" else _verify_llama_import()
         )
