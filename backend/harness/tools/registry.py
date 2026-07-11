@@ -514,7 +514,7 @@ class ToolRegistry:
         content = args.get("content")
         if content is None:
             content = args.get("input") or ""
-        content = str(content)
+        content = sanitize_file_content(str(content))
         existed = path.is_file()
         path.write_text(
             content if content.endswith("\n") else content + "\n", encoding="utf-8"
@@ -545,7 +545,8 @@ class ToolRegistry:
             old = ""
         if new is None:
             new = ""
-        old, new = str(old), str(new)
+        # Don't strip fences from oldString (must match file bytes exactly)
+        old, new = str(old), sanitize_file_content(str(new))
         if old == new:
             return ToolResult(False, "oldString and newString are identical", title="edit")
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -947,7 +948,74 @@ def _normalize_args(args: dict) -> dict:
             out[b] = out[a]
         if b in out and a not in out:
             out[a] = out[b]
+    # Common GGUF slip: paste markdown fences into write content
+    if "content" in out and isinstance(out["content"], str):
+        out["content"] = sanitize_file_content(out["content"])
     return out
+
+
+def sanitize_file_content(content: str) -> str:
+    """
+    Strip accidental markdown code fences GGUF models wrap around file bodies.
+    Research note (Aider / OpenCode): models often put ```lang ... ``` inside write.
+    """
+    if not content:
+        return content
+    s = content.replace("\r\n", "\n")
+    # Whole-string fenced block
+    m = re.match(r"^\s*```(?:\w+)?\s*\n([\s\S]*?)\n```\s*$", s)
+    if m:
+        return m.group(1)
+    # Leading fence only
+    m2 = re.match(r"^\s*```(?:\w+)?\s*\n([\s\S]*)$", s)
+    if m2 and s.rstrip().endswith("```"):
+        body = m2.group(1)
+        if body.rstrip().endswith("```"):
+            body = body.rstrip()[:-3].rstrip()
+        return body
+    return s
+
+
+def _parse_tool_args_blob(raw: str) -> dict:
+    """Parse tool body JSON, with GGUF-friendly recovery for write path/content."""
+    raw = (raw or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {"input": parsed}
+    except json.JSONDecodeError:
+        pass
+    # Recover {"path": "...", "content": "..."} when content has raw newlines
+    pm = re.search(
+        r'"path"\s*:\s*"([^"]+)"\s*,\s*"content"\s*:\s*"([\s\S]*)"\s*\}\s*$',
+        raw,
+    )
+    if pm:
+        content = pm.group(2)
+        try:
+            content = json.loads(f'"{content}"')  # unescape if valid
+        except json.JSONDecodeError:
+            content = (
+                content.replace("\\n", "\n")
+                .replace("\\t", "\t")
+                .replace('\\"', '"')
+                .replace("\\\\", "\\")
+            )
+        return {"path": pm.group(1), "content": content}
+    brace = re.search(r"\{.*\}", raw, re.DOTALL)
+    if brace:
+        try:
+            parsed = json.loads(brace.group(0))
+            return parsed if isinstance(parsed, dict) else {"input": raw}
+        except json.JSONDecodeError:
+            pass
+    args: dict = {}
+    for line in raw.splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            args[k.strip().strip('"')] = v.strip().strip('"')
+    return args if args else {"input": raw}
 
 
 # --- parsing tool calls from model text (GGUF-friendly) ---
@@ -970,45 +1038,18 @@ def parse_tool_calls(text: str) -> list[tuple[str, dict]]:
     out: list[tuple[str, dict]] = []
     for m in _TOOL_XML.finditer(text or ""):
         name = m.group(1).strip()
-        raw = m.group(2).strip()
-        args: dict = {}
-        if raw:
-            try:
-                parsed = json.loads(raw)
-                args = parsed if isinstance(parsed, dict) else {"input": parsed}
-            except json.JSONDecodeError:
-                # try bare JSON object recovery
-                brace = re.search(r"\{.*\}", raw, re.DOTALL)
-                if brace:
-                    try:
-                        parsed = json.loads(brace.group(0))
-                        args = parsed if isinstance(parsed, dict) else {"input": raw}
-                    except json.JSONDecodeError:
-                        pass
-                if not args:
-                    for line in raw.splitlines():
-                        if ":" in line:
-                            k, v = line.split(":", 1)
-                            args[k.strip().strip('"')] = v.strip().strip('"')
-                if not args:
-                    args = {"input": raw}
+        args = _parse_tool_args_blob(m.group(2))
         out.append((name, args))
     if out:
         return out
     for m in _TOOL_CALL_FENCE.finditer(text or ""):
         name = m.group(1).strip()
-        try:
-            args = json.loads(m.group(2))
-        except json.JSONDecodeError:
-            args = {}
-        out.append((name, args if isinstance(args, dict) else {}))
+        args = _parse_tool_args_blob(m.group(2))
+        out.append((name, args))
     if out:
         return out
     for m in _TOOL_INVOKE.finditer(text or ""):
         name = m.group(1).strip()
-        try:
-            args = json.loads(m.group(2))
-        except json.JSONDecodeError:
-            args = {}
-        out.append((name, args if isinstance(args, dict) else {}))
+        args = _parse_tool_args_blob(m.group(2))
+        out.append((name, args))
     return out

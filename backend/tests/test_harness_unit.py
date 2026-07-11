@@ -115,6 +115,26 @@ def test_websearch_registered():
         assert not r.ok
 
 
+def test_sanitize_fenced_write_content():
+    from harness.tools.registry import sanitize_file_content, ToolRegistry
+
+    raw = "```python\ndef f():\n    return 1\n```"
+    clean = sanitize_file_content(raw)
+    assert clean.startswith("def f")
+    assert "```" not in clean
+
+    with tempfile.TemporaryDirectory() as d:
+        reg = ToolRegistry(cwd=Path(d))
+        r = reg.call(
+            "write",
+            {"path": "solution.py", "content": raw},
+        )
+        assert r.ok
+        body = (reg.cwd / "solution.py").read_text()
+        assert "def f" in body
+        assert "```" not in body
+
+
 def test_pure_coding_and_auto_verify():
     from harness.agent_loop import (
         _is_pure_coding_exercise,
