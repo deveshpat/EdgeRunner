@@ -11,6 +11,8 @@ class Message(BaseModel):
 class ChatRequest(BaseModel):
     messages: List[Message]
     session_id: Optional[str] = "default"
+    # OpenCode-style agent hint from UI (build | plan); routing may still override
+    agent: Optional[str] = None
 
 
 class ChatResponse(BaseModel):

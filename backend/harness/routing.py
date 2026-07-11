@@ -5,8 +5,6 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
-from langchain_core.messages import HumanMessage
-
 from harness.prompts import system_chat
 
 _progress_cb = None
@@ -182,6 +180,7 @@ def should_use_harness(
 
 
 def simple_chat(user_text: str, history: Optional[list] = None) -> dict:
+    from langchain_core.messages import HumanMessage
     from harness.llm_bridge import get_llm
 
     _progress("💬 [Chat] Generating reply…")

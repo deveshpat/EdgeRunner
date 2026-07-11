@@ -72,6 +72,12 @@ export type StoredPrefs = {
   lastBackendUrl?: string;
   rememberCredentials?: boolean;
   vaultMode?: "device" | "passphrase";
+  /** OpenCode-inspired UI prefs */
+  uiView?: "cli" | "chat";
+  agentMode?: "build" | "plan";
+  showThinking?: boolean;
+  showToolDetails?: boolean;
+  showTimestamps?: boolean;
 };
 
 export type ModelOption = {

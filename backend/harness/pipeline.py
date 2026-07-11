@@ -1,15 +1,19 @@
 """
 Coding harness pipeline.
 
-Loop (literature-aligned):
+Primary path (default): OpenCode-style tool loop
+  build|plan agent · bash/read/write/edit/grep/glob/apply_patch/todo · max steps
+
+Legacy path (EDGERUNNER_HARNESS=langgraph):
   plan+tests → implement → execute (sandbox ACI) → reflect on fail → implement …
   Optional tool calls between steps via MCP / builtin ToolHub.
 """
 
 from __future__ import annotations
 
-from typing import Annotated, Optional, Sequence, TypedDict
+import os
 import operator
+from typing import Annotated, Optional, Sequence, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.graph import END, StateGraph
@@ -27,6 +31,13 @@ _progress_cb = None
 def set_harness_progress(cb) -> None:
     global _progress_cb
     _progress_cb = cb
+    # Keep OpenCode loop progress in sync
+    try:
+        from harness.agent_loop import set_loop_progress
+
+        set_loop_progress(cb)
+    except Exception:
+        pass
 
 
 def _progress(msg: str) -> None:
@@ -239,9 +250,56 @@ def _app_graph():
     return _app
 
 
-def run_coding_harness(user_text: str) -> dict:
-    """Full plan → implement → sandbox → reflect loop."""
-    _progress("🧠 [Harness] Starting enhanced coding harness…")
+def run_coding_harness(
+    user_text: str,
+    *,
+    agent: Optional[str] = None,
+) -> dict:
+    """
+    Coding harness entry — best-of combination (see docs/HARNESS.md).
+
+    EDGERUNNER_HARNESS:
+      best | auto | phased  → phase-gated tools (best for GGUF)  [default]
+      opencode | tools      → free-form OpenCode tool loop
+      langgraph | legacy    → plan→test→reflect graph
+    """
+    mode = (os.environ.get("EDGERUNNER_HARNESS") or "best").strip().lower()
+
+    from harness.commands import resolve_slash
+
+    resolved = resolve_slash(user_text, default_agent=agent or "build")
+    plan_mode = resolved.agent == "plan" or (agent or "").lower() == "plan"
+    task = resolved.task
+
+    # Plan-only always uses OpenCode plan agent (readonly)
+    if plan_mode and mode not in ("langgraph", "legacy", "pipeline", "graph"):
+        from harness.agent_loop import run_opencode_style_agent, set_loop_progress
+
+        set_loop_progress(_progress_cb)
+        _progress("🧠 [Harness] Plan agent (readonly)…")
+        return run_opencode_style_agent(task, plan_mode=True)
+
+    if mode in ("langgraph", "legacy", "pipeline", "graph"):
+        return _run_langgraph_harness(task)
+
+    if mode in ("opencode", "tools", "open"):
+        from harness.agent_loop import run_opencode_style_agent, set_loop_progress
+
+        set_loop_progress(_progress_cb)
+        _progress("🧠 [Harness] OpenCode-style Build agent…")
+        return run_opencode_style_agent(task, plan_mode=False)
+
+    # Default: phased (statewright + Aider + SWE-agent + OpenCode tools)
+    from harness.phased_loop import run_phased_agent, set_phased_progress
+
+    set_phased_progress(_progress_cb)
+    _progress("🧠 [Harness] Best-of phased agent (PLAN→CODE→VERIFY→REFLECT)…")
+    return run_phased_agent(task)
+
+
+def _run_langgraph_harness(user_text: str) -> dict:
+    """Legacy plan → implement → sandbox → reflect loop."""
+    _progress("🧠 [Harness] Starting langgraph coding harness…")
     lang = detect_language(user_text)
     initial: AgentState = {
         "messages": [HumanMessage(content=user_text)],

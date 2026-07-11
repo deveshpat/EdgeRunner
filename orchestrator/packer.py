@@ -10,15 +10,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BACKEND_DIR = REPO_ROOT / "backend"
 BOOTSTRAP_PATH = REPO_ROOT / "kaggle_worker" / "bootstrap.py"
 
-# Files to embed relative to backend/
-BACKEND_FILES = [
-    "main.py",
-    "agent.py",
-    "model_manager.py",
-    "schemas.py",
-    "session_control.py",
-    "requirements.txt",
-]
+# Directories / suffixes to skip when packing
+_SKIP_DIRS = {"__pycache__", ".venv", "venv", ".pytest_cache", ".mypy_cache", "node_modules"}
+_SKIP_SUFFIXES = {".pyc", ".pyo", ".so", ".dylib"}
 
 
 def _read(path: Path) -> str:
@@ -26,18 +20,33 @@ def _read(path: Path) -> str:
 
 
 def collect_backend_files() -> dict[str, str]:
-    """Return path -> base64(utf-8 bytes) so embedding survives Kaggle's pipeline.
+    """Return path -> base64(utf-8 bytes) for the full backend tree (incl. harness/).
 
     Plain JSON unicode (esp. emoji / non-BMP) becomes lone surrogates inside a
     Python source literal and then fails with UnicodeEncodeError on write_text.
     """
+    if not BACKEND_DIR.is_dir():
+        raise FileNotFoundError(f"Missing backend dir: {BACKEND_DIR}")
+
     files: dict[str, str] = {}
-    for name in BACKEND_FILES:
-        src = BACKEND_DIR / name
-        if not src.exists():
-            raise FileNotFoundError(f"Missing backend file: {src}")
-        raw = src.read_bytes()
-        files[f"backend/{name}"] = base64.b64encode(raw).decode("ascii")
+    for path in sorted(BACKEND_DIR.rglob("*")):
+        if not path.is_file():
+            continue
+        rel_parts = path.relative_to(BACKEND_DIR).parts
+        if any(p in _SKIP_DIRS for p in rel_parts):
+            continue
+        if path.suffix in _SKIP_SUFFIXES:
+            continue
+        # Skip local secrets / caches
+        if path.name in (".env", "mcp_config.json"):
+            continue
+        rel_key = f"backend/{path.relative_to(BACKEND_DIR).as_posix()}"
+        files[rel_key] = base64.b64encode(path.read_bytes()).decode("ascii")
+
+    # Ensure critical entrypoints exist
+    for required in ("backend/main.py", "backend/agent.py"):
+        if required not in files:
+            raise FileNotFoundError(f"Missing required packed file: {required}")
     return files
 
 
@@ -82,7 +91,6 @@ def render_worker(
         needle, f"FILES: dict[str, str] = {files_literal}", 1
     )
     return bootstrap
-
 
 
 def write_kernel_bundle(

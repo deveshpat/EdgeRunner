@@ -404,6 +404,12 @@ export type StoredPrefs = {
   lastBackendUrl?: string;
   rememberCredentials?: boolean;
   vaultMode?: VaultMode;
+  /** OpenCode-inspired UI (see ui-prefs.ts) */
+  uiView?: "cli" | "chat";
+  agentMode?: "build" | "plan";
+  showThinking?: boolean;
+  showToolDetails?: boolean;
+  showTimestamps?: boolean;
 };
 
 export function loadPrefs(): StoredPrefs {

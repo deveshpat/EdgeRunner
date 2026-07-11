@@ -43,39 +43,67 @@ Compiling `llama-cpp-python` every launch is the main delay. The worker installs
 **prebuilt Linux wheels** from the GitHub release tag [`wheels-v1`](https://github.com/deveshpat/EdgeRunner/releases/tag/wheels-v1)
 (see [wheels/README.md](wheels/README.md)). CI builds CPU wheels; GPU wheels are built once on Kaggle.
 
-## Coding harness (SOTA-inspired)
+## Coding harness (best-of synthesis)
 
-Casual chat (`hi`) uses a single short LLM turn. Coding tasks (or `/code …`) run the **multi-step harness**:
+Casual chat (`hi`) uses a short LLM turn. Coding tasks (or `/code …`) run the **combined harness**.
+
+Full research write-up: **[docs/HARNESS.md](docs/HARNESS.md)**.
+
+Default loop (`EDGERUNNER_HARNESS=best`):
 
 ```
-plan + tests → implement → sandbox execute → reflect on failure → re-implement (≤3 iters)
+PLAN (readonly + tests) → CODE (write/edit) → VERIFY (bash/run_python) → REFLECT → …
 ```
 
-Design draws on:
+| Component | Best source | EdgeRunner use |
+|-----------|-------------|----------------|
+| Tool names + settle loop + max steps | **OpenCode** | `bash/read/write/edit/grep/glob/todowrite/apply_patch` |
+| ACI observations | **SWE-agent** | `status/exit_code/stdout/stderr` capped |
+| Exact edits + tests-first | **Aider** | `edit` / `apply_patch` SEARCH-REPLACE; smoke tests |
+| Plan vs Build agents | **OpenCode / Claude Code** | `/plan` readonly · `/build` full tools |
+| Phase-gated tools (weak models) | **statewright** | Shrink tool space per phase for GGUF |
+| Code as action | **CodeAct** | `run_python` + bash |
+| Project memory prompts | **Claude Code** | `/init` AGENTS.md-style |
+| Optional servers | **MCP** | `mcp_config.json` |
+| Sandbox isolation | **OpenHands** spirit | Ephemeral workspace (Kaggle-safe) |
 
-| Idea | Source | How EdgeRunner uses it |
-|------|--------|-------------------------|
-| Tests-first / tight edit loop | Aider, SWE-bench agents | Plan emits asserts before implementation |
-| Agent–computer interface (ACI) | SWE-agent | Structured sandbox observations (`status/stdout/stderr`) |
-| Reflect then act | ReAct | Dedicated critic node before rewrite |
-| Code + shell as actions | CodeAct / OpenHands | Workspace files + multi-language runners |
-| Standardized tools | MCP | Builtin tools always; optional external MCP servers |
+### Modes
 
-### Builtin tools (no Node required)
+| `EDGERUNNER_HARNESS` | Behavior |
+|----------------------|----------|
+| `best` / `phased` (default) | Phase-gated PLAN→CODE→VERIFY→REFLECT |
+| `opencode` | Free-form OpenCode tool loop |
+| `langgraph` | Legacy plan→test→reflect graph |
 
-`shell_exec`, `read_file`, `write_file`, `list_dir`, `python_exec`, `node_exec`, `which`
+### OpenCode-compatible tools
 
-The model may emit:
+`bash`, `read`, `write`, `edit`, `grep`, `glob`, `apply_patch`, `todowrite`, `webfetch`, `run_python`, `list_dir`, `done`
 
 ```xml
-<tool name="which">{"name": "python"}</tool>
+<tool name="write">
+{"path": "solution.py", "content": "def reverse_string(s):\\n    return s[::-1]\\n"}
+</tool>
 ```
+
+### UI (CLI + slash commands)
+
+Default **CLI view** (terminal transcript). Toggle with `/cli` · `/chat` · settings.
+
+| Command | Action |
+|---------|--------|
+| `/help` | List commands |
+| `/new` `/clear` | New session |
+| `/plan` `/build` `/code` | Agent mode + optional task |
+| `/init` `/review` | Claude/OpenCode-style prompts |
+| `/models` `/settings` | Open pickers |
+| `/export` `/undo` `/thinking` | Session utilities |
+
+Tab (empty composer) toggles **build ↔ plan** (OpenCode-style).
 
 ### Optional MCP servers
 
 Copy [`backend/mcp_config.example.json`](backend/mcp_config.example.json) → `backend/mcp_config.json`
-(or set `EDGERUNNER_MCP_CONFIG`). Example: filesystem + git via `npx @modelcontextprotocol/server-*`.
-On Kaggle, prefer **builtin** tools if Node/`npx` is unavailable.
+(or set `EDGERUNNER_MCP_CONFIG`). On Kaggle, prefer **builtin** tools if Node/`npx` is unavailable.
 
 ### Languages
 

@@ -67,6 +67,19 @@ import type {
   SessionInfo,
   SessionState,
 } from "@/lib/types";
+import {
+  expandTemplate,
+  filterCommands,
+  helpText,
+  parseSlash,
+  type AgentMode,
+} from "@/lib/commands";
+import {
+  loadUiPrefs,
+  saveUiPrefs,
+  type UiPrefs,
+  type UiView,
+} from "@/lib/ui-prefs";
 
 const CHAT_KEY = "current";
 
@@ -74,6 +87,16 @@ type VaultGate = "loading" | "ready" | "signin" | "need_passphrase" | "create";
 
 function sysLine(content: string): Message {
   return { role: "system", content, ts: Date.now() };
+}
+
+function exportMarkdown(msgs: Message[]): string {
+  const lines = ["# EdgeRunner session\n"];
+  for (const m of msgs) {
+    if (m.role === "system") lines.push(`> ${m.content}\n`);
+    else if (m.role === "user") lines.push(`## User\n\n${m.content}\n`);
+    else lines.push(`## Assistant\n\n${m.content}\n`);
+  }
+  return lines.join("\n");
 }
 
 export default function EdgeRunnerUI() {
@@ -126,6 +149,12 @@ export default function EdgeRunnerUI() {
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [progressMsg, setProgressMsg] = useState<string | null>(null);
 
+  // OpenCode-inspired UI prefs (CLI view, agent mode, thinking/details)
+  const [uiPrefs, setUiPrefs] = useState<UiPrefs>(() => loadUiPrefs());
+  const [cmdSuggest, setCmdSuggest] = useState<string[]>([]);
+  const undoStackRef = useRef<Message[][]>([]);
+  const redoStackRef = useRef<Message[][]>([]);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const sessionRef = useRef<SessionInfo | null>(null);
@@ -133,6 +162,10 @@ export default function EdgeRunnerUI() {
   const abortRef = useRef<AbortController | null>(null);
   const chatIdRef = useRef(CHAT_KEY);
   const intentionalStopRef = useRef(false);
+
+  const patchUi = useCallback((patch: Partial<UiPrefs>) => {
+    setUiPrefs(saveUiPrefs(patch));
+  }, []);
 
   useEffect(() => {
     sessionRef.current = session;
@@ -807,12 +840,155 @@ export default function EdgeRunnerUI() {
   };
 
   const clearChat = () => {
-    setMessages([sysLine("chat cleared")]);
+    undoStackRef.current.push(messages);
+    redoStackRef.current = [];
+    setMessages([sysLine("session cleared · /help for commands")]);
     void saveChat({
       id: chatIdRef.current,
       messages: [],
       updated_at: Date.now(),
     });
+  };
+
+  /** OpenCode-style slash commands handled locally (or rewritten before send). */
+  const handleLocalCommand = (name: string, args: string): boolean => {
+    switch (name) {
+      case "help":
+        setMessages((m) => [...m, sysLine(helpText())]);
+        return true;
+      case "new":
+      case "clear":
+        clearChat();
+        return true;
+      case "compact":
+      case "summarize": {
+        const keep = messages.slice(-6);
+        const dropped = Math.max(0, messages.length - keep.length);
+        setMessages([
+          sysLine(`compacted · dropped ${dropped} older turns (kept last ${keep.length})`),
+          ...keep,
+        ]);
+        return true;
+      }
+      case "models":
+      case "model":
+        void openModelPicker();
+        return true;
+      case "settings":
+      case "config":
+      case "connect":
+        setShowSettings(true);
+        return true;
+      case "sessions":
+      case "resume":
+      case "continue":
+        setMessages((m) => [
+          ...m,
+          sysLine(
+            [
+              `session · phase=${phase}`,
+              backendUrl ? `url=${backendUrl}` : "url=(none)",
+              modelReady ? `model=${modelName || "ready"}` : "model=loading/offline",
+              `agent=${uiPrefs.agentMode}`,
+              `view=${uiPrefs.uiView}`,
+              session?.accelerator ? `accel=${session.accelerator}` : "",
+            ]
+              .filter(Boolean)
+              .join(" · ")
+          ),
+        ]);
+        return true;
+      case "export": {
+        const md = exportMarkdown(messages);
+        const blob = new Blob([md], { type: "text/markdown" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `edgerunner-${Date.now()}.md`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        setMessages((m) => [...m, sysLine("exported conversation as markdown")]);
+        return true;
+      }
+      case "undo": {
+        // remove last user+assistant pair
+        const next = [...messages];
+        let removed: Message[] = [];
+        // pop trailing assistant then user
+        while (next.length && next[next.length - 1].role === "system") {
+          removed.unshift(next.pop()!);
+        }
+        if (next.length && next[next.length - 1].role === "assistant") {
+          removed.unshift(next.pop()!);
+        }
+        if (next.length && next[next.length - 1].role === "user") {
+          removed.unshift(next.pop()!);
+        }
+        if (!removed.length) {
+          setMessages((m) => [...m, sysLine("nothing to undo")]);
+          return true;
+        }
+        undoStackRef.current.push(messages);
+        redoStackRef.current.push(removed);
+        setMessages([...next, sysLine("undo · last turn removed")]);
+        return true;
+      }
+      case "redo": {
+        const chunk = redoStackRef.current.pop();
+        if (!chunk?.length) {
+          setMessages((m) => [...m, sysLine("nothing to redo")]);
+          return true;
+        }
+        setMessages((m) => [
+          ...m.filter((x) => !(x.role === "system" && x.content.startsWith("undo"))),
+          ...chunk,
+          sysLine("redo · turn restored"),
+        ]);
+        return true;
+      }
+      case "thinking":
+        patchUi({ showThinking: !uiPrefs.showThinking });
+        setMessages((m) => [
+          ...m,
+          sysLine(`thinking traces ${!uiPrefs.showThinking ? "ON" : "OFF"}`),
+        ]);
+        return true;
+      case "details":
+        patchUi({ showToolDetails: !uiPrefs.showToolDetails });
+        setMessages((m) => [
+          ...m,
+          sysLine(`tool details ${!uiPrefs.showToolDetails ? "ON" : "OFF"}`),
+        ]);
+        return true;
+      case "cli":
+        patchUi({ uiView: "cli" });
+        setMessages((m) => [...m, sysLine("view → CLI (terminal)")]);
+        return true;
+      case "chat":
+        patchUi({ uiView: "chat" });
+        setMessages((m) => [...m, sysLine("view → chat (markdown)")]);
+        return true;
+      case "view": {
+        const next: UiView = uiPrefs.uiView === "cli" ? "chat" : "cli";
+        patchUi({ uiView: next });
+        setMessages((m) => [...m, sysLine(`view → ${next}`)]);
+        return true;
+      }
+      case "agent": {
+        const a = (args || "").trim().toLowerCase();
+        if (a === "plan" || a === "build") {
+          patchUi({ agentMode: a as AgentMode });
+          setMessages((m) => [...m, sysLine(`agent → ${a}`)]);
+        } else {
+          setMessages((m) => [
+            ...m,
+            sysLine(`agent=${uiPrefs.agentMode} · use /agent build | /agent plan`),
+          ]);
+        }
+        return true;
+      }
+      default:
+        return false;
+    }
   };
 
   const forgetCredentials = async () => {
@@ -912,10 +1088,57 @@ export default function EdgeRunnerUI() {
   const handleSend = async () => {
     if (!input.trim() || isLoading) return;
 
+    const rawInput = input.trim();
+    setCmdSuggest([]);
+
+    // Slash commands (OpenCode-inspired)
+    const parsed = parseSlash(rawInput);
+    if (parsed.kind === "command") {
+      const { command, args } = parsed;
+      // Local UI commands
+      if (command.kind === "local") {
+        setInput("");
+        setMessages((prev) => [
+          ...prev,
+          { role: "user", content: rawInput, ts: Date.now() },
+        ]);
+        handleLocalCommand(command.name, args);
+        return;
+      }
+      // Prompt / force harness — expand template and continue send
+      let outgoing = rawInput;
+      if (command.kind === "prompt" && command.template) {
+        outgoing = expandTemplate(command.template, args);
+      } else if (command.kind === "force_harness") {
+        // /code|/build|/plan [task]
+        if (command.agent) patchUi({ agentMode: command.agent });
+        if (!args) {
+          setInput("");
+          setMessages((prev) => [
+            ...prev,
+            { role: "user", content: rawInput, ts: Date.now() },
+            sysLine(
+              `agent → ${command.agent || "build"} · send a task next (or /${command.name} <task>)`
+            ),
+          ]);
+          return;
+        }
+        // Prefix so backend resolve_slash / routing treats as harness
+        outgoing =
+          command.name === "plan"
+            ? `plan only: ${args}`
+            : args;
+      }
+      // Fall through with rewritten input
+      setInput("");
+      await sendToBackend(outgoing, rawInput);
+      return;
+    }
+
     if (!backendUrl) {
       setMessages((prev) => [
         ...prev,
-        { role: "user", content: input, ts: Date.now() },
+        { role: "user", content: rawInput, ts: Date.now() },
         sysLine("no backend · open settings → Launch Kaggle or attach local"),
       ]);
       setInput("");
@@ -923,13 +1146,32 @@ export default function EdgeRunnerUI() {
       return;
     }
 
+    setInput("");
+    await sendToBackend(rawInput, rawInput);
+  };
+
+  const sendToBackend = async (content: string, displayContent?: string) => {
+    if (!backendUrl) {
+      setShowSettings(true);
+      return;
+    }
+
     const userMsg: Message = {
       role: "user",
-      content: input,
+      content: displayContent || content,
       ts: Date.now(),
     };
+    // If agent is plan, soft-prefix for backend
+    let wireContent = content;
+    if (
+      uiPrefs.agentMode === "plan" &&
+      !/^plan only:/i.test(content) &&
+      !content.startsWith("/")
+    ) {
+      wireContent = `plan only: ${content}`;
+    }
+
     setMessages((prev) => [...prev, userMsg]);
-    setInput("");
     setIsLoading(true);
 
     setMessages((prev) => [
@@ -957,6 +1199,18 @@ export default function EdgeRunnerUI() {
     };
 
     try {
+      const historyForApi = [...messages, { ...userMsg, content: wireContent }]
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => ({
+          role: m.role,
+          content: m.content,
+        }));
+      // last user message uses wireContent (may differ from display)
+      if (historyForApi.length) {
+        const last = historyForApi[historyForApi.length - 1];
+        if (last.role === "user") last.content = wireContent;
+      }
+
       const response = await fetch(`${base}/chat`, {
         method: "POST",
         headers: {
@@ -964,12 +1218,8 @@ export default function EdgeRunnerUI() {
           Accept: "application/x-ndjson, application/json",
         },
         body: JSON.stringify({
-          messages: [...messages, userMsg]
-            .filter((m) => m.role === "user" || m.role === "assistant")
-            .map((m) => ({
-              role: m.role,
-              content: m.content,
-            })),
+          messages: historyForApi,
+          agent: uiPrefs.agentMode,
         }),
         referrerPolicy: "no-referrer",
       });
@@ -1298,8 +1548,12 @@ export default function EdgeRunnerUI() {
         </div>
       )}
 
-      {/* Transcript */}
-      <main className="flex-1 overflow-y-auto px-3 sm:px-6 py-4 space-y-3">
+      {/* Transcript — CLI (OpenCode TUI-inspired) or chat */}
+      <main
+        className={`flex-1 overflow-y-auto px-3 sm:px-6 py-4 space-y-3 ${
+          uiPrefs.uiView === "cli" ? "font-mono text-[13px] leading-relaxed" : ""
+        }`}
+      >
         {messages.length === 0 && (
           <div className="text-[var(--muted)] text-xs space-y-2 pt-10 max-w-xl">
             <div className="er-hero-tag">CHOOMS · NETRUNNERS · ONLY</div>
@@ -1308,16 +1562,19 @@ export default function EdgeRunnerUI() {
               <span className="er-logo" style={{ letterSpacing: "0.15em", fontSize: "0.85rem" }}>
                 EDGERUNNER
               </span>{" "}
-              <span className="text-[var(--cyan)]">agent net</span>
+              <span className="text-[var(--cyan)]">best-of harness</span>
             </p>
             <p className="pl-3">
-              jack in · chat casually · prefix coding with{" "}
-              <code className="text-[var(--accent)]">/code</code>
+              CLI view · agent=<code className="text-[var(--warn)]">{uiPrefs.agentMode}</code> ·{" "}
+              <code className="text-[var(--accent)]">/help</code> ·{" "}
+              <code className="text-[var(--accent)]">/code</code> ·{" "}
+              <code className="text-[var(--accent)]">/plan</code>
             </p>
             <p className="pl-3 text-[var(--dim)]">
+              Harness mixes OpenCode tools, SWE-agent verify, Aider edits, phased GGUF loop.
               {configured
-                ? "chrome saved — settings only when you need a new run"
-                : "open settings to launch Kaggle or attach local chrome"}
+                ? " Chrome saved — /settings when you need a new run."
+                : " /settings to launch Kaggle or attach local."}
             </p>
           </div>
         )}
@@ -1325,9 +1582,14 @@ export default function EdgeRunnerUI() {
         {messages.map((m, i) => {
           if (m.role === "system") {
             return (
-              <div key={i} className="er-sys-line flex gap-2 items-start">
+              <div
+                key={i}
+                className={`er-sys-line flex gap-2 items-start ${
+                  uiPrefs.uiView === "cli" ? "text-[11px] opacity-90" : ""
+                }`}
+              >
                 <span className="er-sys-char">#</span>
-                <span>{m.content}</span>
+                <span className="whitespace-pre-wrap">{m.content}</span>
               </div>
             );
           }
@@ -1336,6 +1598,11 @@ export default function EdgeRunnerUI() {
               <div key={i} className="flex gap-2 items-start">
                 <span className="er-prompt-char shrink-0">›</span>
                 <div className="er-user-line whitespace-pre-wrap break-words flex-1">
+                  {uiPrefs.showTimestamps && m.ts ? (
+                    <span className="text-[10px] text-[var(--dim)] mr-2">
+                      {new Date(m.ts).toLocaleTimeString()}
+                    </span>
+                  ) : null}
                   {m.content}
                 </div>
               </div>
@@ -1343,21 +1610,34 @@ export default function EdgeRunnerUI() {
           }
           return (
             <div key={i} className="flex gap-2 items-start">
-              <span className="er-reply-char shrink-0">‹</span>
+              <span className="er-reply-char shrink-0">
+                {uiPrefs.uiView === "cli" ? "‹" : "‹"}
+              </span>
               <div className="flex-1 min-w-0">
-                {m.thoughts && m.thoughts.length > 0 && (
-                  <details className="mb-1 text-xs text-[var(--muted)]">
-                    <summary className="cursor-pointer hover:text-[var(--fg)]">
-                      trace ({m.thoughts.length})
-                    </summary>
-                    <pre className="mt-1 whitespace-pre-wrap text-[10px] text-[var(--dim)] border-l border-[var(--border)] pl-2">
-                      {m.thoughts.join("\n")}
-                    </pre>
-                  </details>
+                {uiPrefs.showThinking &&
+                  m.thoughts &&
+                  m.thoughts.length > 0 && (
+                    <details
+                      className="mb-1 text-xs text-[var(--muted)]"
+                      open={uiPrefs.showToolDetails && uiPrefs.uiView === "cli"}
+                    >
+                      <summary className="cursor-pointer hover:text-[var(--fg)]">
+                        trace ({m.thoughts.length})
+                      </summary>
+                      <pre className="mt-1 whitespace-pre-wrap text-[10px] text-[var(--dim)] border-l border-[var(--border)] pl-2">
+                        {m.thoughts.join("\n")}
+                      </pre>
+                    </details>
+                  )}
+                {uiPrefs.uiView === "cli" ? (
+                  <pre className="whitespace-pre-wrap break-words text-[var(--fg)] text-[12px] sm:text-[13px] font-mono">
+                    {m.content}
+                  </pre>
+                ) : (
+                  <div className="er-md text-[var(--fg)]">
+                    <ReactMarkdown>{m.content}</ReactMarkdown>
+                  </div>
                 )}
-                <div className="er-md text-[var(--fg)]">
-                  <ReactMarkdown>{m.content}</ReactMarkdown>
-                </div>
               </div>
             </div>
           );
@@ -1399,29 +1679,77 @@ export default function EdgeRunnerUI() {
             </button>
           </div>
         )}
-        <div className="flex gap-2 items-end max-w-4xl mx-auto">
-          <span className="er-prompt-char pb-2.5 shrink-0">›</span>
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                void handleSend();
+        <div className="relative flex gap-2 items-end max-w-4xl mx-auto">
+          <span className="er-prompt-char pb-2.5 shrink-0" title={`agent: ${uiPrefs.agentMode}`}>
+            {uiPrefs.agentMode === "plan" ? "?" : "›"}
+          </span>
+          <div className="flex-1 relative">
+            {cmdSuggest.length > 0 && (
+              <div className="absolute bottom-full left-0 right-0 mb-1 border border-[var(--border)] bg-[var(--bg-elevated)] text-[11px] max-h-40 overflow-y-auto z-20 shadow-lg">
+                {cmdSuggest.map((line) => (
+                  <button
+                    key={line}
+                    type="button"
+                    className="block w-full text-left px-2 py-1 hover:bg-[var(--bg-panel)] text-[var(--cyan)] font-mono"
+                    onClick={() => {
+                      const name = line.split(" ")[0];
+                      setInput(name + " ");
+                      setCmdSuggest([]);
+                      inputRef.current?.focus();
+                    }}
+                  >
+                    {line}
+                  </button>
+                ))}
+              </div>
+            )}
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={(e) => {
+                const v = e.target.value;
+                setInput(v);
+                if (v.startsWith("/") && !v.includes("\n")) {
+                  const q = v.slice(1).split(/\s/)[0] || "";
+                  setCmdSuggest(
+                    filterCommands(q).slice(0, 8).map(
+                      (c) => `/${c.name} — ${c.description}`
+                    )
+                  );
+                } else {
+                  setCmdSuggest([]);
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") setCmdSuggest([]);
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void handleSend();
+                }
+                // Tab toggles agent like OpenCode
+                if (e.key === "Tab" && !e.shiftKey && !input.trim()) {
+                  e.preventDefault();
+                  const next: AgentMode =
+                    uiPrefs.agentMode === "build" ? "plan" : "build";
+                  patchUi({ agentMode: next });
+                  setMessages((m) => [
+                    ...m,
+                    sysLine(`agent → ${next} (Tab)`),
+                  ]);
+                }
+              }}
+              rows={1}
+              placeholder={
+                backendUrl
+                  ? modelReady
+                    ? `/${uiPrefs.agentMode} · /help · type / for commands`
+                    : "backend up — model still loading…"
+                  : "launch a session first…"
               }
-            }}
-            rows={1}
-            placeholder={
-              backendUrl
-                ? modelReady
-                  ? "message · /code for harness · shift+enter newline"
-                  : "backend up — model still loading…"
-                : "launch a session first…"
-            }
-            disabled={isLoading || modelSwitching}
-            className="flex-1 bg-transparent border-0 outline-none resize-none text-sm text-[var(--fg)] placeholder:text-[var(--dim)] max-h-32 py-2 caret-[var(--warn)]"
-          />
+              disabled={isLoading || modelSwitching}
+              className="w-full bg-transparent border-0 outline-none resize-none text-sm text-[var(--fg)] placeholder:text-[var(--dim)] max-h-32 py-2 caret-[var(--warn)] font-mono"
+            />
+          </div>
           <button
             type="button"
             onClick={() => void handleSend()}
@@ -1439,14 +1767,42 @@ export default function EdgeRunnerUI() {
           <span>
             {phase !== "setup" ? phase : "—"}
             {session?.accelerator ? ` · ${session.accelerator}` : ""}
+            {` · ${uiPrefs.uiView}`}
+            {` · ${uiPrefs.agentMode}`}
           </span>
-          <button
-            type="button"
-            onClick={clearChat}
-            className="hover:text-[var(--muted)]"
-          >
-            clear
-          </button>
+          <span className="flex gap-3">
+            <button
+              type="button"
+              onClick={() =>
+                patchUi({
+                  uiView: uiPrefs.uiView === "cli" ? "chat" : "cli",
+                })
+              }
+              className="hover:text-[var(--cyan)]"
+              title="Toggle CLI / chat view"
+            >
+              view
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const next: AgentMode =
+                  uiPrefs.agentMode === "build" ? "plan" : "build";
+                patchUi({ agentMode: next });
+              }}
+              className="hover:text-[var(--warn)]"
+              title="Toggle build / plan agent"
+            >
+              agent
+            </button>
+            <button
+              type="button"
+              onClick={clearChat}
+              className="hover:text-[var(--muted)]"
+            >
+              /new
+            </button>
+          </span>
         </div>
       </footer>
 
@@ -1471,6 +1827,93 @@ export default function EdgeRunnerUI() {
               >
                 <X size={16} />
               </button>
+            </div>
+
+            {/* OpenCode-inspired agent + view */}
+            <div className="space-y-2 border border-[var(--cyan)]/40 p-3">
+              <div className="text-[var(--cyan)] tracking-wider text-[10px]">
+                HARNESS · OPENCODE-STYLE
+              </div>
+              <p className="text-[10px] text-[var(--muted)]">
+                Best-of loop: phased PLAN→CODE→VERIFY (GGUF) · OpenCode tools ·
+                SWE-agent verify · Aider edits. See docs/HARNESS.md
+              </p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => patchUi({ agentMode: "build" })}
+                  className={`flex-1 py-1.5 ${
+                    uiPrefs.agentMode === "build"
+                      ? "er-btn-primary"
+                      : "er-btn"
+                  }`}
+                >
+                  build
+                </button>
+                <button
+                  type="button"
+                  onClick={() => patchUi({ agentMode: "plan" })}
+                  className={`flex-1 py-1.5 ${
+                    uiPrefs.agentMode === "plan"
+                      ? "er-btn-cyan"
+                      : "er-btn"
+                  }`}
+                >
+                  plan
+                </button>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => patchUi({ uiView: "cli" })}
+                  className={`flex-1 py-1.5 ${
+                    uiPrefs.uiView === "cli" ? "er-btn-primary" : "er-btn"
+                  }`}
+                >
+                  CLI view
+                </button>
+                <button
+                  type="button"
+                  onClick={() => patchUi({ uiView: "chat" })}
+                  className={`flex-1 py-1.5 ${
+                    uiPrefs.uiView === "chat" ? "er-btn-primary" : "er-btn"
+                  }`}
+                >
+                  chat view
+                </button>
+              </div>
+              <label className="flex items-center gap-2 text-[var(--muted)]">
+                <input
+                  type="checkbox"
+                  checked={uiPrefs.showThinking}
+                  onChange={(e) => patchUi({ showThinking: e.target.checked })}
+                />
+                show thinking / traces
+              </label>
+              <label className="flex items-center gap-2 text-[var(--muted)]">
+                <input
+                  type="checkbox"
+                  checked={uiPrefs.showToolDetails}
+                  onChange={(e) =>
+                    patchUi({ showToolDetails: e.target.checked })
+                  }
+                />
+                expand tool details in CLI
+              </label>
+              <label className="flex items-center gap-2 text-[var(--muted)]">
+                <input
+                  type="checkbox"
+                  checked={uiPrefs.showTimestamps}
+                  onChange={(e) =>
+                    patchUi({ showTimestamps: e.target.checked })
+                  }
+                />
+                timestamps
+              </label>
+              <p className="text-[10px] text-[var(--dim)]">
+                Slash: /help /new /compact /models /plan /build /code /init
+                /review /export /undo /thinking /cli
+              </p>
             </div>
 
             {/* Google account */}
