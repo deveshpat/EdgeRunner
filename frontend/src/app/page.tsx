@@ -766,7 +766,11 @@ export default function EdgeRunnerUI() {
       setModelReady(false);
       setMessages((m) => [
         ...m,
-        sysLine(`online · ${result.publicUrl.replace(/^https?:\/\//, "")}`),
+        sysLine(
+          `online · ${result.accelerator}${
+            result.machineShape ? ` (${result.machineShape})` : ""
+          } · ${result.publicUrl.replace(/^https?:\/\//, "")}`
+        ),
       ]);
       savePrefs({
         lastBackendUrl: result.publicUrl,
@@ -2037,8 +2041,8 @@ export default function EdgeRunnerUI() {
                 <div className="grid grid-cols-2 gap-2">
                   {(
                     [
-                      { id: "t4x2" as const, label: "T4×2 (rec)" },
-                      { id: "t4" as const, label: "T4" },
+                      { id: "t4x2" as const, label: "T4 (rec)" },
+                      { id: "t4" as const, label: "T4 only" },
                       { id: "p100" as const, label: "P100" },
                       { id: "cpu" as const, label: "CPU" },
                     ] as const
@@ -2058,8 +2062,9 @@ export default function EdgeRunnerUI() {
                   ))}
                 </div>
                 <p className="text-[10px] text-[var(--muted)] leading-snug">
-                  T4×2 ≈ 2× VRAM vs P100 when Kaggle has capacity; falls back if
-                  shape unavailable.
+                  Kaggle&apos;s API officially supports NvidiaTeslaT4 and
+                  NvidiaTeslaP100. T4 (rec) tries dual-T4 names then single T4 —
+                  never silent P100. Pick P100 only if you want it.
                 </p>
                 <label className="flex items-center gap-2 text-[var(--muted)]">
                   <input

@@ -8,7 +8,12 @@
  */
 
 import type { Accelerator } from "./types";
-import { isGpuAccelerator, kaggleMachineShape } from "./types";
+import {
+  acceleratorFromLogs,
+  acceleratorFromMachineShape,
+  isGpuAccelerator,
+  kaggleMachineShapesToTry,
+} from "./types";
 import {
   STABLE_KERNEL_TITLE,
   kernelSlug,
@@ -61,6 +66,8 @@ export type LaunchResult = {
   sessionId: string;
   kernelRef: string;
   accelerator: Accelerator;
+  /** Shape string actually accepted by SaveKernel, if any */
+  machineShape?: string;
   publicUrl: string;
   logsTail: string;
 };
@@ -122,7 +129,11 @@ export async function saveKernel(
     title: string;
     source: string;
     enableGpu: boolean;
-    /** Kaggle machine_shape, e.g. NvidiaTeslaT4x2 (dual T4). */
+    /**
+     * Kaggle machineShape (wire camelCase). Official: NvidiaTeslaT4,
+     * NvidiaTeslaP100, Tpu1VmV38. When set, this is authoritative —
+     * bare enableGpu alone often defaults to P100.
+     */
     machineShape?: string;
     sessionTimeoutSeconds: number;
     /** Attach previous run output (same notebook) so models/cache persist. */
@@ -130,6 +141,11 @@ export async function saveKernel(
   },
   signal?: AbortSignal
 ): Promise<{ ref?: string; url?: string; error?: string; kernelId?: number }> {
+  const shape = (opts.machineShape || "").trim();
+  const isTpu = /^Tpu/i.test(shape);
+  // enableGpu/enableTpu are deprecated in favor of machineShape, but still set
+  // for older API paths. Never send enableGpu:true without a shape when caller
+  // wanted a specific GPU — that path is how P100 gets selected silently.
   const body: Record<string, unknown> = {
     slug: opts.slug,
     newTitle: opts.title,
@@ -137,8 +153,8 @@ export async function saveKernel(
     language: "python",
     kernelType: "script",
     isPrivate: true,
-    enableGpu: opts.enableGpu,
-    enableTpu: false,
+    enableGpu: Boolean(opts.enableGpu && !isTpu),
+    enableTpu: isTpu,
     enableInternet: true,
     sessionTimeoutSeconds: opts.sessionTimeoutSeconds,
     datasetDataSources: [] as string[],
@@ -148,9 +164,8 @@ export async function saveKernel(
     modelDataSources: [] as string[],
     categoryIds: [] as string[],
   };
-  // Prefer dual T4 when set — Kaggle docs: machine_shape on kernel metadata / SaveKernel
-  if (opts.enableGpu && opts.machineShape) {
-    body.machineShape = opts.machineShape;
+  if (shape) {
+    body.machineShape = shape;
   }
   return kagglePost(
     "/kernels.KernelsApiService/SaveKernel",
@@ -391,29 +406,22 @@ export async function launchKaggleSession(
 
     // Do NOT attach prior kernel output by default.
     // Mounting multi‑GB GGUF outputs makes Kaggle session start very slow.
-    // Models still land under /kaggle/working for this run; next run re-downloads
-    // a small default GGUF quickly (or set EDGERUNNER_KERNEL_CACHE=1 later).
-    // Prefer dual T4 (more VRAM/compute than default P100). If the shape is
-    // rejected, retry with plain enableGpu (Kaggle assigns whatever is free).
-    const shapesToTry: (string | undefined)[] = isGpuAccelerator(accelerator)
-      ? [
-          kaggleMachineShape(accelerator),
-          // Fallbacks if dual T4 name differs / unavailable
-          accelerator === "t4x2" || accelerator === "gpu"
-            ? "NvidiaTeslaT4"
-            : undefined,
-          undefined,
-        ]
-      : [undefined];
+    //
+    // GPU shape selection (critical):
+    // - Official machineShape values: NvidiaTeslaT4, NvidiaTeslaP100, Tpu1VmV38
+    // - Bare enableGpu:true WITHOUT machineShape → Kaggle often assigns P100
+    // - Never silently fall back to bare enableGpu when user asked for T4
+    const shapesToTry = isGpuAccelerator(accelerator)
+      ? kaggleMachineShapesToTry(accelerator)
+      : [];
 
     let push: { ref?: string; url?: string; error?: string; kernelId?: number } | null =
       null;
     let lastPushErr: Error | null = null;
+    let acceptedShape: string | undefined;
     const tried = new Set<string>();
-    for (const shape of shapesToTry) {
-      const key = shape || "__default__";
-      if (tried.has(key)) continue;
-      tried.add(key);
+
+    if (!isGpuAccelerator(accelerator)) {
       try {
         push = await saveKernel(
           auth,
@@ -421,54 +429,104 @@ export async function launchKaggleSession(
             slug: kernelRef,
             title: STABLE_KERNEL_TITLE,
             source,
-            enableGpu: isGpuAccelerator(accelerator),
-            machineShape: shape,
+            enableGpu: false,
             sessionTimeoutSeconds: maxLifetime,
             kernelDataSources: [],
           },
           signal
         );
-        if (push.error) {
-          lastPushErr = new Error(String(push.error));
-          // Invalid shape → try next; real quota errors fall through
-          const em = String(push.error).toLowerCase();
+        if (push.error) throw new Error(String(push.error));
+      } catch (e) {
+        throw e instanceof Error ? e : new Error(String(e));
+      }
+    } else {
+      for (const shape of shapesToTry) {
+        if (tried.has(shape)) continue;
+        tried.add(shape);
+        onProgress?.({
+          state: "pushing",
+          sessionId,
+          kernelRef,
+          accelerator,
+          message: `Requesting ${shape}…`,
+        });
+        try {
+          push = await saveKernel(
+            auth,
+            {
+              slug: kernelRef,
+              title: STABLE_KERNEL_TITLE,
+              source,
+              enableGpu: true,
+              machineShape: shape,
+              sessionTimeoutSeconds: maxLifetime,
+              kernelDataSources: [],
+            },
+            signal
+          );
+          if (push.error) {
+            lastPushErr = new Error(String(push.error));
+            const em = String(push.error).toLowerCase();
+            if (
+              em.includes("machine") ||
+              em.includes("shape") ||
+              em.includes("accelerator") ||
+              em.includes("invalid") ||
+              em.includes("unknown") ||
+              em.includes("not supported") ||
+              em.includes("not available")
+            ) {
+              continue;
+            }
+            throw lastPushErr;
+          }
+          acceptedShape = shape;
+          lastPushErr = null;
+          break;
+        } catch (e) {
+          lastPushErr = e instanceof Error ? e : new Error(String(e));
+          const em = lastPushErr.message.toLowerCase();
           if (
             em.includes("machine") ||
             em.includes("shape") ||
+            em.includes("invalid") ||
             em.includes("accelerator") ||
-            em.includes("invalid")
+            em.includes("unknown") ||
+            em.includes("not supported") ||
+            em.includes("not available")
           ) {
             continue;
           }
           throw lastPushErr;
         }
-        lastPushErr = null;
-        break;
-      } catch (e) {
-        lastPushErr = e instanceof Error ? e : new Error(String(e));
-        const em = lastPushErr.message.toLowerCase();
-        if (
-          isGpuAccelerator(accelerator) &&
-          (em.includes("machine") ||
-            em.includes("shape") ||
-            em.includes("invalid") ||
-            em.includes("accelerator"))
-        ) {
-          continue;
-        }
-        throw lastPushErr;
       }
     }
     if (!push || push.error) {
-      throw lastPushErr || new Error(String(push?.error || "Kernel push failed"));
+      throw (
+        lastPushErr ||
+        new Error(
+          String(
+            push?.error ||
+              (isGpuAccelerator(accelerator)
+                ? `Kernel push failed — could not reserve ${shapesToTry.join(" / ")}`
+                : "Kernel push failed")
+          )
+        )
+      );
     }
+
+    // Prefer shape-derived label; refine from logs later if possible
+    let effectiveAcc: Accelerator =
+      acceleratorFromMachineShape(acceptedShape) || accelerator;
 
     onProgress?.({
       state: "provisioning",
       sessionId,
       kernelRef,
-      accelerator,
-      message: "Kernel running — waiting for HTTPS tunnel…",
+      accelerator: effectiveAcc,
+      message: acceptedShape
+        ? `Kernel running on ${acceptedShape} — waiting for HTTPS tunnel…`
+        : "Kernel running — waiting for HTTPS tunnel…",
     });
 
     const deadline = Date.now() + 15 * 60_000; // 15 min cold start
@@ -485,7 +543,7 @@ export async function launchKaggleSession(
           state: "provisioning",
           sessionId,
           kernelRef,
-          accelerator,
+          accelerator: effectiveAcc,
           kernelStatus: lastStatus,
           logsTail,
         });
@@ -518,22 +576,28 @@ export async function launchKaggleSession(
         });
         if (chunk) {
           logsTail = (logsTail + "\n" + chunk).slice(-12_000);
+          // Refine GPU type from nvidia-smi / worker lines when available
+          const fromLogs = acceleratorFromLogs(logsTail);
+          if (fromLogs) effectiveAcc = fromLogs;
           const url = extractTunnelUrl(logsTail) || extractTunnelUrl(chunk);
           if (url) {
             onProgress?.({
               state: "online",
               sessionId,
               kernelRef,
-              accelerator,
+              accelerator: effectiveAcc,
               publicUrl: url,
               kernelStatus: lastStatus,
               logsTail,
-              message: "Tunnel ready",
+              message: acceptedShape
+                ? `Tunnel ready · ${acceptedShape}`
+                : "Tunnel ready",
             });
             return {
               sessionId,
               kernelRef,
-              accelerator,
+              accelerator: effectiveAcc,
+              machineShape: acceptedShape,
               publicUrl: url,
               logsTail,
             };
@@ -542,10 +606,12 @@ export async function launchKaggleSession(
             state: "provisioning",
             sessionId,
             kernelRef,
-            accelerator,
+            accelerator: effectiveAcc,
             kernelStatus: lastStatus,
             logsTail,
-            message: "Waiting for tunnel URL in logs…",
+            message: acceptedShape
+              ? `Waiting for tunnel (${acceptedShape})…`
+              : "Waiting for tunnel URL in logs…",
           });
         }
       } catch {

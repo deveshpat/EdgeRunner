@@ -1079,6 +1079,30 @@ def wait_healthy(timeout: float = 120.0) -> bool:
     return False
 
 
+def _log_gpu_info() -> None:
+    """Print GPU model early so the launcher can confirm T4 vs P100 from logs."""
+    try:
+        r = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.total",
+                "--format=csv,noheader",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        out = (r.stdout or r.stderr or "").strip()
+        if out:
+            log(f"  nvidia-smi  = {out.replace(chr(10), ' | ')}")
+        else:
+            log("  nvidia-smi  = (no output)")
+    except FileNotFoundError:
+        log("  nvidia-smi  = not found (CPU or no driver)")
+    except Exception as e:
+        log(f"  nvidia-smi  = error: {e}")
+
+
 def main() -> None:
     log("=" * 60)
     log("EdgeRunner Kaggle worker boot")
@@ -1086,6 +1110,7 @@ def main() -> None:
     log(f"  accelerator = {ACCELERATOR}")
     log(f"  idle_timeout= {IDLE_TIMEOUT}s")
     log(f"  max_lifetime= {MAX_LIFETIME}s")
+    _log_gpu_info()
     log("=" * 60)
 
     WORK.mkdir(parents=True, exist_ok=True)
