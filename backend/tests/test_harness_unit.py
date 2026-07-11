@@ -106,6 +106,15 @@ def test_aliases():
         assert "ok" in r.content
 
 
+def test_websearch_registered():
+    with tempfile.TemporaryDirectory() as d:
+        reg = ToolRegistry(cwd=Path(d))
+        assert "websearch" in reg.names(plan_mode=True)
+        # missing query fails fast (no network)
+        r = reg.call("websearch", {})
+        assert not r.ok
+
+
 def test_resolve_slash_plan():
     r = resolve_slash("/plan reverse a string")
     assert r.agent == "plan"

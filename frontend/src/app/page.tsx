@@ -342,6 +342,16 @@ export default function EdgeRunnerUI() {
     });
     // After cloud prefs/secret land, attach any running backend (other device)
     try {
+      if (backendUrlRef.current) {
+        const alive = await probeBackend(backendUrlRef.current, {
+          retries: 1,
+          timeoutMs: 4000,
+        });
+        if (alive.ok) {
+          setProgressMsg(null);
+          return result;
+        }
+      }
       setProgressMsg("discovering backend after Google sync…");
       const found = await discoverActiveBackend({
         onProgress: (msg) => setProgressMsg(msg),
@@ -411,7 +421,21 @@ export default function EdgeRunnerUI() {
         chatIdRef.current = rec.id;
       }
 
-      // Cross-device discovery:
+      // Cross-device discovery (skip if this tab already has a healthy backend)
+      if (backendUrlRef.current) {
+        const already = await probeBackend(backendUrlRef.current, {
+          retries: 1,
+          timeoutMs: 4000,
+        });
+        if (already.ok && !cancelled) {
+          setIsOnline(true);
+          setModelReady(already.model_ready);
+          if (already.modelName) setModelName(already.modelName);
+          setProgressMsg(null);
+          setRestoring(false);
+          return;
+        }
+      }
       //  1) Google-synced / local prefs URL
       //  2) Kaggle API with same API key (works without Google)
       setProgressMsg("discovering active backend…");
@@ -587,16 +611,23 @@ export default function EdgeRunnerUI() {
     return () => clearInterval(interval);
   }, [backendUrl, isOnline, accelerator]);
 
-  // Other tabs: pick up URL when they launch / attach
+  // Other tabs: pick up URL when they launch / attach (no spam if same URL)
   useEffect(() => {
     return onLiveSessionChange((s) => {
       if (!s?.backendUrl) return;
-      if (backendUrlRef.current === s.backendUrl.replace(/\/$/, "")) return;
+      const url = s.backendUrl.replace(/\/$/, "");
+      if (backendUrlRef.current === url) return;
       if (intentionalStopRef.current) return;
       void (async () => {
-        const url = s.backendUrl.replace(/\/$/, "");
         const probe = await probeBackend(url, { retries: 2, timeoutMs: 5000 });
         if (!probe.ok) return;
+        if (backendUrlRef.current) {
+          const cur = await probeBackend(backendUrlRef.current, {
+            retries: 1,
+            timeoutMs: 3000,
+          });
+          if (cur.ok) return;
+        }
         setBackendUrl(url);
         setIsOnline(true);
         setModelReady(probe.model_ready);
@@ -604,12 +635,11 @@ export default function EdgeRunnerUI() {
         setPhase(s.phase);
         setAppStage("terminal");
         setMessages((m) => {
-          const line = sysLine(
-            `synced from other tab · ${url.replace(/^https?:\/\//, "")}`
-          );
-          if (m.some((x) => x.content?.includes("synced from other tab")))
+          const host = url.replace(/^https?:\/\//, "");
+          const note = `synced from other tab · ${host}`;
+          if (m.some((x) => x.content?.includes("synced from other tab") || x.content?.includes(host)))
             return m;
-          return [...m, line];
+          return [...m, sysLine(note)];
         });
       })();
     });
@@ -1111,6 +1141,15 @@ export default function EdgeRunnerUI() {
 
   const switchToModel = async (opt: ModelOption) => {
     if (!backendUrl || modelSwitching) return;
+    if (isLoading) {
+      setMessages((m) => [
+        ...m,
+        sysLine(
+          "model switch blocked · wait for the current chat/agent turn to finish"
+        ),
+      ]);
+      return;
+    }
     if (!opt.fits) {
       const ok = confirm(
         `${opt.name} needs ~${opt.required_ram_gb} GB RAM and may not fit. Try anyway? (previous model will be unloaded + GC first)`
@@ -1124,8 +1163,11 @@ export default function EdgeRunnerUI() {
       ...m,
       sysLine(`model switch → ${opt.name} · unload + GC first`),
     ]);
+    const base = backendUrl.replace(/\/$/, "");
+    // Keep tunnel + idle watchdog alive during multi-minute download/load
+    const hb = window.setInterval(() => pokeHeartbeat(base), 8000);
     try {
-      const res = await fetch(`${backendUrl.replace(/\/$/, "")}/models/load`, {
+      const res = await fetch(`${base}/models/load`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1134,14 +1176,25 @@ export default function EdgeRunnerUI() {
           n_ctx: opt.safe_ctx,
         }),
         referrerPolicy: "no-referrer",
+        // GGUF download+load can take several minutes on Kaggle
+        signal: AbortSignal.timeout(15 * 60_000),
       });
-      const data = (await res.json()) as {
+      let data: {
         ok?: boolean;
         error?: string;
         model?: { name?: string; ready?: boolean };
       };
-      if (!data.ok) {
-        throw new Error(data.error || "load failed");
+      try {
+        data = (await res.json()) as typeof data;
+      } catch {
+        throw new Error(
+          res.ok
+            ? "invalid JSON from /models/load"
+            : `HTTP ${res.status} (empty body — tunnel may have dropped)`
+        );
+      }
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || `HTTP ${res.status}`);
       }
       setModelReady(!!data.model?.ready);
       setModelName(data.model?.name || opt.name);
@@ -1153,9 +1206,26 @@ export default function EdgeRunnerUI() {
       setShowModels(false);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      setProgressMsg(`switch failed: ${msg.slice(0, 100)}`);
-      setMessages((m) => [...m, sysLine(`model switch failed · ${msg}`)]);
+      const friendly =
+        /failed to fetch|networkerror|load failed|aborted|timeout/i.test(msg)
+          ? `${msg} — keep this tab open; if a coding turn was running, wait for it or retry switch`
+          : msg;
+      setProgressMsg(`switch failed: ${friendly.slice(0, 120)}`);
+      setMessages((m) => [...m, sysLine(`model switch failed · ${friendly}`)]);
+      // Re-probe: switch may have completed even if the response was lost
+      void probeBackend(base, { retries: 2, timeoutMs: 8000 }).then((p) => {
+        if (p.ok) {
+          setIsOnline(true);
+          if (p.model_ready) {
+            setModelReady(true);
+            if (p.modelName) setModelName(p.modelName);
+          }
+        } else {
+          setIsOnline(false);
+        }
+      });
     } finally {
+      window.clearInterval(hb);
       setModelSwitching(false);
     }
   };

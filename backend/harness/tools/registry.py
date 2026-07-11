@@ -103,6 +103,10 @@ _DESC = {
         "Fetch a URL and return text content (HTML stripped lightly). "
         "Use for docs or API examples when internet is available."
     ),
+    "websearch": (
+        "Web search (Python-only, no Node MCP). Returns title/url/snippet hits. "
+        "Use for research; then webfetch specific URLs for full pages."
+    ),
     "run_python": (
         "Execute a Python file or -c snippet in the workspace (fast path for tests)."
     ),
@@ -299,6 +303,28 @@ class ToolRegistry:
         )
         self.register(
             ToolDef(
+                "websearch",
+                _DESC["websearch"],
+                {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query",
+                        },
+                        "num_results": {
+                            "type": "integer",
+                            "description": "Max hits (default 5, max 10)",
+                        },
+                    },
+                    "required": ["query"],
+                },
+                self._websearch,
+                readonly=True,
+            )
+        )
+        self.register(
+            ToolDef(
                 "run_python",
                 _DESC["run_python"],
                 {
@@ -364,6 +390,9 @@ class ToolRegistry:
             ("todoread", "todowrite"),
             ("web_fetch", "webfetch"),
             ("fetch", "webfetch"),
+            ("web_search", "websearch"),
+            ("search", "websearch"),
+            ("ddg", "websearch"),
         ):
             self._aliases[old] = new
 
@@ -396,7 +425,7 @@ class ToolRegistry:
         if plan_mode:
             lines.append(
                 "PLAN MODE: only readonly tools are allowed "
-                "(read, grep, glob, list_dir, webfetch, todowrite, done)."
+                "(read, grep, glob, list_dir, webfetch, websearch, todowrite, done)."
             )
         return "\n".join(lines)
 
@@ -769,6 +798,82 @@ class ToolRegistry:
             return ToolResult(False, f"HTTP {e.code}: {e.reason}", title="webfetch")
         except Exception as e:
             return ToolResult(False, f"{type(e).__name__}: {e}", title="webfetch")
+
+    def _websearch(self, args: dict, ctx: ToolContext) -> ToolResult:
+        """Python-only search (DuckDuckGo HTML) — no Node/MCP process required."""
+        query = (args.get("query") or args.get("q") or args.get("input") or "").strip()
+        if not query:
+            return ToolResult(False, "query is required", title="websearch")
+        n = int(args.get("num_results") or args.get("limit") or 5)
+        n = max(1, min(n, 10))
+        try:
+            from urllib.parse import quote_plus, unquote
+
+            # DuckDuckGo HTML endpoint (no API key)
+            q = quote_plus(query)
+            url = f"https://html.duckduckgo.com/html/?q={q}"
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (compatible; EdgeRunner/1.0; +https://github.com/deveshpat/EdgeRunner)"
+                    ),
+                    "Accept": "text/html",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                html = resp.read(800_000).decode("utf-8", errors="replace")
+
+            # Parse result blocks: result__a + result__snippet
+            hits: list[str] = []
+            # Anchors with result__a class
+            for m in re.finditer(
+                r'class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+                html,
+                re.I | re.DOTALL,
+            ):
+                href = m.group(1)
+                title = re.sub(r"<[^>]+>", "", m.group(2))
+                title = re.sub(r"\s+", " ", title).strip()
+                # DDG redirect URLs: //duckduckgo.com/l/?uddg=<encoded>
+                if "uddg=" in href:
+                    um = re.search(r"uddg=([^&]+)", href)
+                    if um:
+                        href = unquote(um.group(1))
+                if href.startswith("//"):
+                    href = "https:" + href
+                # Find nearby snippet
+                snippet = ""
+                tail = html[m.end() : m.end() + 800]
+                sm = re.search(
+                    r'class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</(?:a|td|div)',
+                    tail,
+                    re.I | re.DOTALL,
+                )
+                if sm:
+                    snippet = re.sub(r"<[^>]+>", "", sm.group(1))
+                    snippet = re.sub(r"\s+", " ", snippet).strip()
+                if not title and not href:
+                    continue
+                hits.append(f"{len(hits) + 1}. {title}\n   {href}\n   {snippet}")
+                if len(hits) >= n:
+                    break
+
+            if not hits:
+                # Fallback: bare links in page
+                for m in re.finditer(
+                    r'href="(https?://(?!duckduckgo\.com)[^"]+)"[^>]*>([^<]{4,120})</a>',
+                    html,
+                    re.I,
+                ):
+                    hits.append(f"{len(hits) + 1}. {m.group(2).strip()}\n   {m.group(1)}")
+                    if len(hits) >= n:
+                        break
+
+            body = "\n\n".join(hits) if hits else "(no results — try a simpler query)"
+            return ToolResult(True, f"Query: {query}\n\n{body}", title="websearch")
+        except Exception as e:
+            return ToolResult(False, f"{type(e).__name__}: {e}", title="websearch")
 
     def _run_python(self, args: dict, ctx: ToolContext) -> ToolResult:
         timeout = float(args.get("timeout") or 30)

@@ -36,7 +36,10 @@ ACCELERATOR: str = os.environ.get("KP_ACCELERATOR", "cpu")
 SESSION_ID: str = os.environ.get("KP_SESSION_ID", "default")
 
 # Keep the event loop free: LLM invoke is sync/CPU-bound.
+# Separate pool for model switch so /models/load is not stuck behind a long chat
+# turn (that was causing browser "Failed to fetch" on Cloudflare tunnels).
 _CHAT_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="edgerunner-chat")
+_MODEL_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="edgerunner-model")
 
 
 def clean_output(text: str) -> str:
@@ -69,6 +72,7 @@ async def lifespan(app: FastAPI):
         print(f"KAGGLE_PILOT_URL={PUBLIC_URL}", flush=True)
     yield
     _CHAT_POOL.shutdown(wait=False, cancel_futures=True)
+    _MODEL_POOL.shutdown(wait=False, cancel_futures=True)
 
 
 app = FastAPI(title="EdgeRunner API", lifespan=lifespan)
@@ -245,18 +249,38 @@ async def models_list():
 
 @app.post("/models/load")
 async def models_load(body: ModelLoadRequest):
-    """Switch model: unload + GC previous, then load requested GGUF."""
+    """Switch model: unload + GC previous, then load requested GGUF.
+
+    Runs on a dedicated pool so a long coding-agent turn cannot block the switch
+    (and so the Cloudflare tunnel keeps seeing progress via heartbeats).
+    """
     watchdog.heartbeat()
     if not body.repo_id.strip() or not body.filename.strip():
         return {"ok": False, "error": "repo_id and filename required"}
 
     def _run():
-        if body.n_ctx:
-            os.environ["EDGERUNNER_N_CTX"] = str(int(body.n_ctx))
-        return switch_model(body.repo_id.strip(), body.filename.strip())
+        # Keep idle watchdog happy during multi-minute download/load
+        stop = threading.Event()
+
+        def _hb():
+            while not stop.wait(8.0):
+                try:
+                    watchdog.heartbeat()
+                except Exception:
+                    pass
+
+        t = threading.Thread(target=_hb, daemon=True, name="model-load-hb")
+        t.start()
+        try:
+            if body.n_ctx:
+                os.environ["EDGERUNNER_N_CTX"] = str(int(body.n_ctx))
+            return switch_model(body.repo_id.strip(), body.filename.strip())
+        finally:
+            stop.set()
 
     try:
-        meta = await asyncio.get_running_loop().run_in_executor(_CHAT_POOL, _run)
+        meta = await asyncio.get_running_loop().run_in_executor(_MODEL_POOL, _run)
+        watchdog.heartbeat()
         return {"ok": True, "model": meta}
     except Exception as e:
         return {
@@ -273,7 +297,7 @@ async def models_unload():
     def _run():
         return unload_model("api")
 
-    meta = await asyncio.get_running_loop().run_in_executor(_CHAT_POOL, _run)
+    meta = await asyncio.get_running_loop().run_in_executor(_MODEL_POOL, _run)
     return {"ok": True, "model": meta}
 
 

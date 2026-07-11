@@ -82,7 +82,7 @@ Tool format (required):
 
 PLAN_SYSTEM = """You are EdgeRunner in plan mode (readonly analysis).
 
-Use only: read, grep, glob, list_dir, webfetch, todowrite, done.
+Use only: read, grep, glob, list_dir, webfetch, websearch, todowrite, done.
 Do not write or edit code files. Produce a concrete plan, then call done.
 """
 
