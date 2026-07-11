@@ -115,6 +115,48 @@ def test_websearch_registered():
         assert not r.ok
 
 
+def test_pure_coding_and_auto_verify():
+    from harness.agent_loop import (
+        _is_pure_coding_exercise,
+        _ensure_tests_file,
+        _maybe_auto_verify,
+    )
+
+    assert _is_pure_coding_exercise("write a function to reverse a string")
+    assert not _is_pure_coding_exercise("x" * 3000 + " implement")
+
+    with tempfile.TemporaryDirectory() as d:
+        reg = ToolRegistry(cwd=Path(d))
+        _ensure_tests_file(reg, "write reverse_string")
+        assert (reg.cwd / "tests_auto.py").is_file()
+        # second call is no-op
+        _ensure_tests_file(reg, "write reverse_string")
+
+        # without solution → no auto verify
+        assert _maybe_auto_verify(
+            reg, wrote_this_step=True, already_ran_verify=False
+        ) == []
+
+        reg.call("write", {"path": "solution.py", "content": "def reverse_string(s):\n    return s[::-1]\n"})
+        auto = _maybe_auto_verify(
+            reg, wrote_this_step=True, already_ran_verify=False
+        )
+        assert auto and auto[0][0] == "run_python"
+        assert auto[0][1]["path"] == "tests_auto.py"
+
+        # skip if already verified this step
+        assert (
+            _maybe_auto_verify(
+                reg, wrote_this_step=True, already_ran_verify=True
+            )
+            == []
+        )
+
+        # run tests — should pass (validates auto-test quality for reverse)
+        r = reg.call("run_python", {"path": "tests_auto.py"})
+        assert r.ok, r.content
+
+
 def test_resolve_slash_plan():
     r = resolve_slash("/plan reverse a string")
     assert r.agent == "plan"

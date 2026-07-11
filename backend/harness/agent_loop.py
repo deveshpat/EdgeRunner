@@ -221,6 +221,56 @@ def _advance_phase(phase: str, tools: ToolRegistry, wrote_code: bool) -> str:
     return phase
 
 
+def _is_pure_coding_exercise(task: str) -> bool:
+    """Heuristic: short algorithmic / implement-function tasks benefit from auto-tests."""
+    t = (task or "").lower()
+    if len(t) > 2500:
+        return False
+    return bool(
+        re.search(
+            r"\b(implement|write|create|code|function|def |class |reverse|"
+            r"sort|leetcode|algorithm|return|assert)\b",
+            t,
+        )
+    )
+
+
+def _ensure_tests_file(tools: ToolRegistry, task: str) -> None:
+    """Aider-style: have a test file ready before/with implementation."""
+    for name in ("tests_auto.py", "test_solution.py", "tests.py"):
+        if (tools.cwd / name).is_file():
+            return
+    tools.call(
+        "write",
+        {"path": "tests_auto.py", "content": _auto_tests_for_solution(task)},
+    )
+
+
+def _maybe_auto_verify(
+    tools: ToolRegistry,
+    *,
+    wrote_this_step: bool,
+    already_ran_verify: bool,
+) -> list[tuple[str, dict]]:
+    """
+    Harness engineering: after a write/edit, always settle a verify turn if the
+    model forgot. Prevents claim-success-without-run (common GGUF failure mode).
+    """
+    if already_ran_verify or not wrote_this_step:
+        return []
+    if not _find_solution(tools):
+        return []
+    test_path = None
+    for name in ("tests_auto.py", "test_solution.py", "tests.py"):
+        if (tools.cwd / name).is_file():
+            test_path = name
+            break
+    if test_path:
+        return [("run_python", {"path": test_path})]
+    # No test file: at least import/run solution for syntax
+    return [("run_python", {"path": "solution.py"})]
+
+
 def run_coding_agent(
     task: str,
     *,
@@ -242,18 +292,32 @@ def run_coding_agent(
     final_text = ""
     finished = False
     last_reply = ""
-    phase = "PLAN" if not plan else "PLAN"
+    phase = "PLAN"
     wrote_code = False
+    # Stuck-loop detection (LangChain harness eng. / OpenCode step discipline)
+    last_fail_sig = ""
+    fail_streak = 0
+    empty_steps = 0
 
     _progress(
         f"⚙️ [Agent] {'plan' if plan else 'build'} · up to {steps} steps · ws={tools.cwd.name}"
     )
+
+    # Tests-first seed for pure coding (Aider): materialize smoke tests once
+    if not plan and _is_pure_coding_exercise(task):
+        _ensure_tests_file(tools, task)
+        thought.append("**Harness:** seeded tests_auto.py (tests-first)")
 
     messages_blob = (
         f"{system}\n\n{tool_block}\n\n"
         f"## User task\n{task}\n\n"
         "Begin with tools.\n"
     )
+    if not plan and (tools.cwd / "tests_auto.py").is_file():
+        messages_blob += (
+            "Note: tests_auto.py already exists in the workspace. "
+            "Implement solution.py then run_python tests_auto.py.\n"
+        )
 
     for step in range(1, steps + 1):
         tools.ctx.step = step
@@ -266,8 +330,17 @@ def run_coding_agent(
             thought.append(f"**Step {step} (max):** {final_text[:1500]}")
             break
 
+        stuck_nudge = ""
+        if fail_streak >= 2 and last_fail_sig:
+            stuck_nudge = (
+                f"\n## Stuck-loop guard\n"
+                f"The same verification failure repeated {fail_streak} times:\n"
+                f"{last_fail_sig[:600]}\n"
+                "Make a *minimal* edit (edit tool), then re-run tests. "
+                "Do not rewrite the whole file unless necessary.\n"
+            )
         phase_hdr = f"\n## Phase: {phase}\n{focus}\n" if not plan else "\n"
-        prompt = messages_blob + phase_hdr + "assistant:"
+        prompt = messages_blob + phase_hdr + stuck_nudge + "assistant:"
         reply = _llm_text(prompt, max_tokens=1400)
         last_reply = reply
         thought.append(f"**Step {step} ({phase}):**\n{reply[:2000]}")
@@ -280,25 +353,31 @@ def run_coding_agent(
             if code and step <= 4:
                 _progress("📝 materializing solution.py from code fence")
                 tools.call("write", {"path": "solution.py", "content": code})
-                tools.call(
-                    "write",
-                    {"path": "tests_auto.py", "content": _auto_tests_for_solution(task)},
-                )
+                _ensure_tests_file(tools, task)
                 wrote_code = True
                 calls = [("run_python", {"path": "tests_auto.py"})]
                 phase = "VERIFY"
             else:
-                messages_blob += (
-                    f"\nassistant:\n{reply}\n\n"
-                    "user:\nContinue with tools. Call done when verified.\n"
+                empty_steps += 1
+                nudge = (
+                    "Continue with tools. Call done when verified.\n"
+                    if empty_steps < 2
+                    else (
+                        "No tools detected. Emit a <tool name=\"write\"> or "
+                        "<tool name=\"run_python\"> block now.\n"
+                    )
                 )
+                messages_blob += f"\nassistant:\n{reply}\n\nuser:\n{nudge}"
                 if len(messages_blob) > 24000:
                     messages_blob = messages_blob[-20000:]
                 if not plan:
                     phase = _advance_phase(phase, tools, wrote_code)
                 continue
 
+        empty_steps = 0
         observations: list[str] = []
+        wrote_this_step = False
+        ran_verify = False
         for name, args in calls[:6]:
             resolved = tools.resolve_name(name)
             if plan and resolved not in tools.names(plan_mode=True):
@@ -318,6 +397,20 @@ def run_coding_agent(
                 path = str(args.get("path") or "")
                 if path and "test" not in path.lower():
                     wrote_code = True
+                    wrote_this_step = True
+            if resolved in ("run_python", "bash"):
+                ran_verify = True
+                if not result.ok:
+                    # Signature for stuck detection (stderr tail)
+                    sig = obs[-400:]
+                    if sig == last_fail_sig:
+                        fail_streak += 1
+                    else:
+                        last_fail_sig = sig
+                        fail_streak = 1
+                else:
+                    fail_streak = 0
+                    last_fail_sig = ""
             if resolved == "done" and result.ok:
                 if plan or tools.ctx.last_test_ok or step >= steps - 1:
                     finished = True
@@ -327,11 +420,42 @@ def run_coding_agent(
                     "### note\ndone deferred: run verification (tests) first, then done."
                 )
 
+        # Auto-verify if model wrote code but skipped tests (Aider / harness eng.)
+        if not finished and not plan:
+            extra = _maybe_auto_verify(
+                tools,
+                wrote_this_step=wrote_this_step,
+                already_ran_verify=ran_verify,
+            )
+            for name, args in extra:
+                _progress(f"🔧 {name} (auto-verify)")
+                result = tools.call(name, args)
+                obs = result.observation()
+                observations.append(f"### observation:{name} [auto-verify]\n{obs}")
+                thought.append(
+                    f"🔧 **{name}** (auto) → {'ok' if result.ok else 'error'}\n```\n{obs[:800]}\n```"
+                )
+                if not result.ok:
+                    sig = obs[-400:]
+                    if sig == last_fail_sig:
+                        fail_streak += 1
+                    else:
+                        last_fail_sig = sig
+                        fail_streak = 1
+                else:
+                    fail_streak = 0
+                    last_fail_sig = ""
+                phase = "VERIFY"
+
         messages_blob += f"\nassistant:\n{reply}\n\n"
         messages_blob += "user:\n" + "\n\n".join(observations) + "\n"
         if not finished and not plan:
             if tools.ctx.last_test_ok:
                 messages_blob += "Tests passed. Call done with a short summary.\n"
+            elif fail_streak >= 2:
+                messages_blob += (
+                    "Same failure twice — use edit with a small fix, then run_python.\n"
+                )
             else:
                 messages_blob += "Continue. Fix failures then re-verify.\n"
         if len(messages_blob) > 24000:

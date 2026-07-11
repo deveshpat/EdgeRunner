@@ -172,16 +172,16 @@ body {
 
 .er-hub-card {
   border: 1px solid var(--border);
-  background: var(--bg-panel);
-  border-radius: var(--radius);
+  background: #10141c;
+  border-radius: 12px;
   overflow: hidden;
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 20px 56px rgba(0, 0, 0, 0.55);
 }
 
 .er-hub-head {
-  padding: 1rem 1.15rem;
-  border-bottom: 1px solid var(--border-soft);
-  background: linear-gradient(180deg, var(--bg-elevated), var(--bg-panel));
+  padding: 1.05rem 1.2rem;
+  border-bottom: 1px solid var(--border);
+  background: #151a24;
 }
 
 .er-hub-action {
@@ -362,6 +362,14 @@ body {
   font-size: 0.875rem;
 }
 
+/* Keep transcript readable on ultra-wide screens */
+.er-scrollback > .er-line,
+.er-scrollback > .er-empty {
+  max-width: 52rem;
+  margin-left: auto;
+  margin-right: auto;
+}
+
 .er-line {
   display: flex;
   gap: 0.65rem;
@@ -465,8 +473,9 @@ body {
 .er-prompt-bar {
   flex-shrink: 0;
   border-top: 1px solid var(--border);
-  background: var(--bg-panel);
-  padding: 0.65rem 0.85rem 0.75rem;
+  background: #12161f;
+  padding: 0.7rem 0.9rem 0.85rem;
+  z-index: 5;
 }
 
 .er-prompt-row {

@@ -18,6 +18,9 @@ One automatic coding agent. Research and other harnesses are **design inputs**, 
 | ACI-style observations | SWE-agent | `status` / stdout / stderr in tool results |
 | Phase rhythm PLAN→CODE→VERIFY→REFLECT | statewright + practice | Guides weak models; tools still available |
 | Must verify before success | Aider + harness eng. | Green tests (or plan-mode) before finish |
+| Auto-verify after write | Aider / harness eng. | If model skips tests after edit, harness runs them |
+| Tests-first seed | Aider | Pure coding tasks get `tests_auto.py` up front |
+| Stuck-loop guard | LangChain harness eng. | Repeated same failure → minimal-edit nudge |
 | Code fence → files when tools omitted | EdgeRunner | Recover from non-tool generations |
 | Plan vs build | OpenCode / Claude Code | Readonly analysis vs full implement |
 | `/init`, `/review`, slash UX | OpenCode / Claude Code | Product commands, not alternate engines |
