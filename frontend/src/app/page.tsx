@@ -1482,6 +1482,8 @@ export default function EdgeRunnerUI() {
   if (!bootDone || vaultGate === "loading" || (vaultGate === "ready" && restoring)) {
     return (
       <div className="er-shell min-h-screen flex flex-col items-center justify-center gap-5 p-6">
+        <div className="er-shell-bg" aria-hidden />
+        <div className="er-shell-content flex flex-col items-center justify-center gap-5 flex-1 w-full">
         <LogoBox pulse tag="initializing" />
         <div className="flex items-center gap-2 text-[var(--muted)] text-xs">
           <Loader2 className="animate-spin" size={14} />
@@ -1494,6 +1496,7 @@ export default function EdgeRunnerUI() {
           </span>
           <span className="er-cursor" />
         </div>
+        </div>
       </div>
     );
   }
@@ -1501,6 +1504,8 @@ export default function EdgeRunnerUI() {
   if (vaultGate === "signin" || vaultGate === "create") {
     return (
       <div className="er-shell min-h-screen flex flex-col text-sm">
+        <div className="er-shell-bg" aria-hidden />
+        <div className="er-shell-content flex flex-col flex-1 min-h-0">
         <div className="er-hazard" />
         <header className="er-term-bar">
           <div className="er-term-dots" aria-hidden>
@@ -1510,7 +1515,7 @@ export default function EdgeRunnerUI() {
         </header>
         <main className="flex-1 flex flex-col items-center justify-center p-6 gap-6">
           <LogoBox subtitle="sign in to continue" />
-          <div className="w-full max-w-sm space-y-5 er-panel er-panel-hot p-6 text-center">
+          <div className="w-full max-w-sm space-y-5 er-section p-6 text-center">
             <div className="er-hero-tag mx-auto">SECURE SESSION</div>
             <h1 className="er-logo" style={{ fontSize: "0.85rem" }}>
               SIGN IN
@@ -1567,6 +1572,7 @@ export default function EdgeRunnerUI() {
             </button>
           </div>
         </main>
+        </div>
       </div>
     );
   }
@@ -1629,6 +1635,8 @@ export default function EdgeRunnerUI() {
     const hasChat = messages.some((m) => m.role === "user" || m.role === "assistant");
     return (
       <div className="er-shell min-h-screen flex flex-col">
+        <div className="er-shell-bg" aria-hidden />
+        <div className="er-shell-content flex flex-col flex-1 min-h-0">
         <div className="er-hazard shrink-0" />
         <header className="er-term-bar">
           <div className="er-term-dots" aria-hidden>
@@ -1740,6 +1748,7 @@ export default function EdgeRunnerUI() {
             }
           />
         </main>
+        </div>
       </div>
     );
   }
@@ -1747,6 +1756,8 @@ export default function EdgeRunnerUI() {
   // ── Main CLI shell ─────────────────────────────────────────────────────
   return (
     <div className="er-shell er-term text-sm">
+      <div className="er-shell-bg" aria-hidden />
+      <div className="er-shell-content er-term">
       <div className="er-hazard shrink-0" />
       {/* Terminal chrome */}
       <header className="er-term-bar">
@@ -2056,378 +2067,397 @@ export default function EdgeRunnerUI() {
         </div>
       </footer>
 
-      {/* Settings drawer */}
+      {/* Settings drawer — solid overlay, no bleed */}
       {showSettings && (
-        <div className="fixed inset-0 z-50 flex justify-end bg-black/60">
+        <div className="er-overlay er-overlay-end" role="dialog" aria-modal="true" aria-label="Settings">
           <button
             type="button"
-            className="flex-1"
-            aria-label="Close"
+            className="er-overlay-scrim"
+            aria-label="Close settings"
             onClick={() => setShowSettings(false)}
           />
-          <aside className="er-drawer w-full max-w-md h-full overflow-y-auto p-4 space-y-4 text-xs">
-            <div className="flex items-center justify-between">
-              <span className="er-logo" style={{ fontSize: "0.65rem" }}>
-                SETTINGS
-              </span>
+          <aside className="er-drawer">
+            <div className="er-drawer-head">
+              <div>
+                <div className="er-logo" style={{ fontSize: "0.7rem" }}>
+                  SETTINGS
+                </div>
+                <p className="er-section-hint mt-0.5">Connection · agent · account</p>
+              </div>
               <button
                 type="button"
+                className="er-close"
                 onClick={() => setShowSettings(false)}
-                className="text-[var(--muted)] hover:text-[var(--fg)]"
+                aria-label="Close"
               >
                 <X size={16} />
               </button>
             </div>
-
-            {/* Agent intent + view (not harness modes) */}
-            <div className="space-y-2 border border-[var(--cyan)]/40 p-3">
-              <div className="text-[var(--cyan)] tracking-wider text-[10px]">
-                AGENT · VIEW
-              </div>
-              <p className="text-[10px] text-[var(--muted)]">
-                One automatic coding loop. Build implements; plan is readonly
-                analysis. CLI is the default transcript style.
-              </p>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => patchUi({ agentMode: "build" })}
-                  className={`flex-1 py-1.5 ${
-                    uiPrefs.agentMode === "build"
-                      ? "er-btn-primary"
-                      : "er-btn"
-                  }`}
-                >
-                  build
-                </button>
-                <button
-                  type="button"
-                  onClick={() => patchUi({ agentMode: "plan" })}
-                  className={`flex-1 py-1.5 ${
-                    uiPrefs.agentMode === "plan"
-                      ? "er-btn-cyan"
-                      : "er-btn"
-                  }`}
-                >
-                  plan
-                </button>
-              </div>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => patchUi({ uiView: "cli" })}
-                  className={`flex-1 py-1.5 ${
-                    uiPrefs.uiView === "cli" ? "er-btn-primary" : "er-btn"
-                  }`}
-                >
-                  CLI view
-                </button>
-                <button
-                  type="button"
-                  onClick={() => patchUi({ uiView: "chat" })}
-                  className={`flex-1 py-1.5 ${
-                    uiPrefs.uiView === "chat" ? "er-btn-primary" : "er-btn"
-                  }`}
-                >
-                  chat view
-                </button>
-              </div>
-              <label className="flex items-center gap-2 text-[var(--muted)]">
-                <input
-                  type="checkbox"
-                  checked={uiPrefs.showThinking}
-                  onChange={(e) => patchUi({ showThinking: e.target.checked })}
-                />
-                show thinking / traces
-              </label>
-              <label className="flex items-center gap-2 text-[var(--muted)]">
-                <input
-                  type="checkbox"
-                  checked={uiPrefs.showToolDetails}
-                  onChange={(e) =>
-                    patchUi({ showToolDetails: e.target.checked })
-                  }
-                />
-                expand tool details in CLI
-              </label>
-              <label className="flex items-center gap-2 text-[var(--muted)]">
-                <input
-                  type="checkbox"
-                  checked={uiPrefs.showTimestamps}
-                  onChange={(e) =>
-                    patchUi({ showTimestamps: e.target.checked })
-                  }
-                />
-                timestamps
-              </label>
-              <p className="text-[10px] text-[var(--dim)]">
-                Slash: /help /new /compact /models /plan /build /code /init
-                /review /export /undo /thinking /cli
-              </p>
-            </div>
-
-            {/* Google account */}
-            <div className="space-y-2 border border-[var(--border)] p-3">
-              <div className="text-[var(--warn)] tracking-wider text-[10px]">
-                ACCOUNT
-              </div>
-              {googleUser ? (
-                <div className="space-y-2">
-                  <p className="text-[var(--cyan)] truncate">{googleUser.email}</p>
-                  <p className="text-[10px] text-[var(--muted)]">
-                    Signed in. Credentials sync across your devices automatically when you save them.
-                  </p>
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      disabled={googleBusy}
-                      onClick={() => void (async () => {
-                        setGoogleBusy(true);
-                        try {
-                          await runGoogleSync();
-                        } catch (e) {
-                          setSessionError(e instanceof Error ? e.message : String(e));
-                        } finally {
-                          setGoogleBusy(false);
-                        }
-                      })()}
-                      className="er-btn-cyan flex-1 py-1.5"
-                    >
-                      {googleBusy ? "syncing…" : "sync now"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        signOutGoogle();
-                        setGoogleUser(null);
-                        setGoogleMsg(null);
-                        setVaultGate("signin");
-                      }}
-                      className="er-btn flex-1 py-1.5"
-                    >
-                      sign out
-                    </button>
-                  </div>
-                  {googleMsg && (
-                    <p className="text-[10px] text-[var(--accent)]">{googleMsg}</p>
-                  )}
+            <div className="er-drawer-body">
+              {/* Agent */}
+              <section className="er-section">
+                <h3 className="er-section-title">Agent</h3>
+                <p className="er-section-hint">
+                  Build implements with tools. Plan is readonly analysis.
+                </p>
+                <div className="er-chip-row">
+                  <button
+                    type="button"
+                    className={`er-chip ${uiPrefs.agentMode === "build" ? "active" : ""}`}
+                    onClick={() => patchUi({ agentMode: "build" })}
+                  >
+                    build
+                  </button>
+                  <button
+                    type="button"
+                    className={`er-chip ${uiPrefs.agentMode === "plan" ? "active-soft" : ""}`}
+                    onClick={() => patchUi({ agentMode: "plan" })}
+                  >
+                    plan
+                  </button>
                 </div>
-              ) : (
-                <button
-                  type="button"
-                  disabled={googleBusy}
-                  onClick={() => void handleGoogleSignIn()}
-                  className="er-btn-cyan w-full py-2"
-                >
-                  Sign in with Google
-                </button>
+                <div className="er-chip-row">
+                  <button
+                    type="button"
+                    className={`er-chip ${uiPrefs.uiView === "cli" ? "active" : ""}`}
+                    onClick={() => patchUi({ uiView: "cli" })}
+                  >
+                    CLI view
+                  </button>
+                  <button
+                    type="button"
+                    className={`er-chip ${uiPrefs.uiView === "chat" ? "active" : ""}`}
+                    onClick={() => patchUi({ uiView: "chat" })}
+                  >
+                    chat view
+                  </button>
+                </div>
+                <label className="er-field-row">
+                  <input
+                    type="checkbox"
+                    checked={uiPrefs.showThinking}
+                    onChange={(e) => patchUi({ showThinking: e.target.checked })}
+                  />
+                  show thinking / traces
+                </label>
+                <label className="er-field-row">
+                  <input
+                    type="checkbox"
+                    checked={uiPrefs.showToolDetails}
+                    onChange={(e) =>
+                      patchUi({ showToolDetails: e.target.checked })
+                    }
+                  />
+                  expand tool details
+                </label>
+                <label className="er-field-row">
+                  <input
+                    type="checkbox"
+                    checked={uiPrefs.showTimestamps}
+                    onChange={(e) =>
+                      patchUi({ showTimestamps: e.target.checked })
+                    }
+                  />
+                  timestamps
+                </label>
+              </section>
+
+              {/* Account */}
+              <section className="er-section">
+                <h3 className="er-section-title">Account</h3>
+                {googleUser ? (
+                  <>
+                    <p className="text-[0.8rem] text-[var(--fg)] truncate m-0">
+                      {googleUser.email}
+                    </p>
+                    <p className="er-section-hint">
+                      Credentials sync across devices when signed in.
+                    </p>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        disabled={googleBusy}
+                        onClick={() =>
+                          void (async () => {
+                            setGoogleBusy(true);
+                            try {
+                              await runGoogleSync();
+                            } catch (e) {
+                              setSessionError(
+                                e instanceof Error ? e.message : String(e)
+                              );
+                            } finally {
+                              setGoogleBusy(false);
+                            }
+                          })()
+                        }
+                        className="er-btn-cyan flex-1 py-2"
+                      >
+                        {googleBusy ? "syncing…" : "sync now"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          signOutGoogle();
+                          setGoogleUser(null);
+                          setGoogleMsg(null);
+                          setVaultGate("signin");
+                        }}
+                        className="er-btn flex-1 py-2"
+                      >
+                        sign out
+                      </button>
+                    </div>
+                    {googleMsg && (
+                      <p className="er-section-hint text-[var(--accent)]">
+                        {googleMsg}
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={googleBusy}
+                    onClick={() => void handleGoogleSignIn()}
+                    className="er-btn-cyan er-btn-block"
+                  >
+                    Sign in with Google
+                  </button>
+                )}
+              </section>
+
+              {/* Connection */}
+              <section className="er-section">
+                <h3 className="er-section-title">Connection</h3>
+                <div className="er-tabs">
+                  <button
+                    type="button"
+                    onClick={() => setSetupTab("kaggle")}
+                    className={`er-tab ${setupTab === "kaggle" ? "active" : ""}`}
+                  >
+                    kaggle
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSetupTab("local")}
+                    className={`er-tab ${setupTab === "local" ? "active" : ""}`}
+                  >
+                    local
+                  </button>
+                </div>
+
+                {setupTab === "kaggle" ? (
+                  <>
+                    {hasStoredCreds && (
+                      <div className="flex items-center justify-between text-[var(--success)] border border-[rgba(46,230,166,0.3)] bg-[rgba(46,230,166,0.06)] px-2.5 py-1.5 rounded-md text-[0.72rem]">
+                        <span className="flex items-center gap-1.5">
+                          <Shield size={12} /> credentials saved
+                        </span>
+                        <button
+                          type="button"
+                          onClick={forgetCredentials}
+                          className="text-[var(--dim)] hover:text-[var(--danger)]"
+                        >
+                          forget
+                        </button>
+                      </div>
+                    )}
+                    <label className="er-field">
+                      username
+                      <input
+                        value={username}
+                        onChange={(e) => setUsername(e.target.value)}
+                        className="er-input"
+                        autoComplete="username"
+                      />
+                    </label>
+                    <label className="er-field">
+                      api token
+                      <input
+                        type="password"
+                        value={apiToken}
+                        onChange={(e) => setApiToken(e.target.value)}
+                        placeholder={hasStoredCreds ? "•••• saved" : "KGAT_…"}
+                        className="er-input"
+                        autoComplete="off"
+                      />
+                    </label>
+                    <label className="er-field">
+                      legacy key (optional)
+                      <input
+                        type="password"
+                        value={apiKey}
+                        onChange={(e) => setApiKey(e.target.value)}
+                        className="er-input"
+                        autoComplete="off"
+                      />
+                    </label>
+                    <div className="er-chip-row">
+                      {(
+                        [
+                          { id: "t4x2" as const, label: "T4 (rec)" },
+                          { id: "t4" as const, label: "T4 only" },
+                          { id: "p100" as const, label: "P100" },
+                          { id: "cpu" as const, label: "CPU" },
+                        ] as const
+                      ).map(({ id, label }) => (
+                        <button
+                          key={id}
+                          type="button"
+                          onClick={() => setAccelerator(id)}
+                          className={`er-chip ${accelerator === id ? "active" : ""}`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="er-section-hint">
+                      T4 preferred over P100. Dual-T4 tried first when available.
+                    </p>
+                    <label className="er-field-row">
+                      <input
+                        type="checkbox"
+                        checked={fallbackCpu}
+                        onChange={(e) => setFallbackCpu(e.target.checked)}
+                      />
+                      CPU fallback if GPU busy
+                    </label>
+                    <label className="er-field-row">
+                      <input
+                        type="checkbox"
+                        checked={rememberCreds}
+                        onChange={(e) => setRememberCreds(e.target.checked)}
+                      />
+                      remember credentials (encrypted)
+                    </label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="er-field">
+                        idle kill (s)
+                        <input
+                          type="number"
+                          value={idleTimeout}
+                          onChange={(e) =>
+                            setIdleTimeout(Number(e.target.value))
+                          }
+                          className="er-input"
+                        />
+                      </label>
+                      <label className="er-field">
+                        max life (s)
+                        <input
+                          type="number"
+                          value={maxLifetime}
+                          onChange={(e) =>
+                            setMaxLifetime(Number(e.target.value))
+                          }
+                          className="er-input"
+                        />
+                      </label>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={sessionBusy}
+                      onClick={() => void launchKaggle()}
+                      className="er-btn-primary er-btn-block disabled:opacity-50"
+                    >
+                      {sessionBusy ? "launching…" : "Launch Kaggle"}
+                    </button>
+                    {sessionError && (
+                      <p className="text-[var(--danger)] text-[0.75rem] m-0">
+                        {sessionError}
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <label className="er-field">
+                      backend url
+                      <input
+                        value={localUrl}
+                        onChange={(e) => setLocalUrl(e.target.value)}
+                        className="er-input"
+                        placeholder="http://127.0.0.1:8000"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      disabled={sessionBusy}
+                      onClick={() => void attachLocal()}
+                      className="er-btn-primary er-btn-block"
+                    >
+                      Attach local
+                    </button>
+                    {sessionError && (
+                      <p className="text-[var(--danger)] text-[0.75rem] m-0">
+                        {sessionError}
+                      </p>
+                    )}
+                  </>
+                )}
+              </section>
+
+              {backendUrl && (
+                <section className="er-section">
+                  <h3 className="er-section-title">Session</h3>
+                  <p className="er-section-hint break-all text-[var(--fg)]">
+                    {backendUrl}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void openModelPicker()}
+                    className="er-btn-cyan er-btn-block"
+                  >
+                    Choose model
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void stopSession()}
+                    disabled={sessionBusy}
+                    className="er-btn-danger er-btn-block"
+                  >
+                    Stop session
+                  </button>
+                </section>
               )}
             </div>
-
-            <div className="er-tabs">
-              <button
-                type="button"
-                onClick={() => setSetupTab("kaggle")}
-                className={`er-tab ${setupTab === "kaggle" ? "active" : ""}`}
-              >
-                kaggle
-              </button>
-              <button
-                type="button"
-                onClick={() => setSetupTab("local")}
-                className={`er-tab ${setupTab === "local" ? "active" : ""}`}
-              >
-                local
-              </button>
-            </div>
-
-            {setupTab === "kaggle" ? (
-              <div className="space-y-3">
-                {hasStoredCreds && (
-                  <div className="flex items-center justify-between text-[var(--accent)] border border-[var(--accent)]/40 px-2 py-1.5 shadow-[0_0_12px_var(--accent-glow)]">
-                    <span className="flex items-center gap-1">
-                      <Shield size={12} /> credentials saved
-                    </span>
-                    <button
-                      type="button"
-                      onClick={forgetCredentials}
-                      className="text-[var(--muted)] hover:text-[var(--danger)]"
-                    >
-                      forget
-                    </button>
-                  </div>
-                )}
-                <label className="block text-[var(--muted)]">
-                  username
-                  <input
-                    value={username}
-                    onChange={(e) => setUsername(e.target.value)}
-                    className="er-input mt-1 w-full px-2 py-2"
-                  />
-                </label>
-                <label className="block text-[var(--muted)]">
-                  api token
-                  <input
-                    type="password"
-                    value={apiToken}
-                    onChange={(e) => setApiToken(e.target.value)}
-                    placeholder={hasStoredCreds ? "•••• saved" : "KGAT_…"}
-                    className="er-input mt-1 w-full px-2 py-2"
-                  />
-                </label>
-                <label className="block text-[var(--muted)]">
-                  legacy key (optional)
-                  <input
-                    type="password"
-                    value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                    className="er-input mt-1 w-full px-2 py-2"
-                  />
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  {(
-                    [
-                      { id: "t4x2" as const, label: "T4 (rec)" },
-                      { id: "t4" as const, label: "T4 only" },
-                      { id: "p100" as const, label: "P100" },
-                      { id: "cpu" as const, label: "CPU" },
-                    ] as const
-                  ).map(({ id, label }) => (
-                    <button
-                      key={id}
-                      type="button"
-                      onClick={() => setAccelerator(id)}
-                      className={`py-1.5 er-btn uppercase tracking-wider text-[10px] ${
-                        accelerator === id
-                          ? "border-[var(--warn)] text-[var(--warn)] shadow-[0_0_10px_rgba(249,240,2,0.3)]"
-                          : ""
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-                <p className="text-[10px] text-[var(--muted)] leading-snug">
-                  Kaggle&apos;s API officially supports NvidiaTeslaT4 and
-                  NvidiaTeslaP100. T4 (rec) tries dual-T4 names then single T4 —
-                  never silent P100. Pick P100 only if you want it.
-                </p>
-                <label className="flex items-center gap-2 text-[var(--muted)]">
-                  <input
-                    type="checkbox"
-                    checked={fallbackCpu}
-                    onChange={(e) => setFallbackCpu(e.target.checked)}
-                  />
-                  cpu fallback if gpu busy
-                </label>
-                <label className="flex items-center gap-2 text-[var(--muted)]">
-                  <input
-                    type="checkbox"
-                    checked={rememberCreds}
-                    onChange={(e) => setRememberCreds(e.target.checked)}
-                  />
-                  remember credentials (encrypted)
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <label className="text-[var(--muted)]">
-                    idle kill (s)
-                    <input
-                      type="number"
-                      value={idleTimeout}
-                      onChange={(e) => setIdleTimeout(Number(e.target.value))}
-                      className="er-input mt-1 w-full px-2 py-1.5"
-                    />
-                  </label>
-                  <label className="text-[var(--muted)]">
-                    max life (s)
-                    <input
-                      type="number"
-                      value={maxLifetime}
-                      onChange={(e) => setMaxLifetime(Number(e.target.value))}
-                      className="er-input mt-1 w-full px-2 py-1.5"
-                    />
-                  </label>
-                </div>
-                <p className="text-[var(--dim)] leading-relaxed">
-                  refresh auto-reconnects (no re-launch). stop / close tab +
-                  idle timeout kills Kaggle.
-                </p>
-                <button
-                  type="button"
-                  disabled={sessionBusy}
-                  onClick={() => void launchKaggle()}
-                  className="er-btn-primary w-full py-2.5 disabled:opacity-50"
-                >
-                  {sessionBusy ? "jacking in…" : "launch kaggle"}
-                </button>
-                {sessionError && (
-                  <p className="text-[var(--danger)]">{sessionError}</p>
-                )}
-              </div>
-            ) : (
-              <div className="space-y-3">
-                <label className="block text-[var(--muted)]">
-                  backend url
-                  <input
-                    value={localUrl}
-                    onChange={(e) => setLocalUrl(e.target.value)}
-                    className="er-input mt-1 w-full px-2 py-2"
-                  />
-                </label>
-                <button
-                  type="button"
-                  disabled={sessionBusy}
-                  onClick={() => void attachLocal()}
-                  className="er-btn-primary w-full py-2.5"
-                >
-                  attach
-                </button>
-                {sessionError && (
-                  <p className="text-[var(--danger)]">{sessionError}</p>
-                )}
-              </div>
-            )}
-
-            {backendUrl && (
-              <div className="pt-2 border-t border-[var(--border)] space-y-2">
-                <p className="text-[var(--muted)] break-all">
-                  backend: {backendUrl}
-                </p>
-                <button
-                  type="button"
-                  onClick={() => void openModelPicker()}
-                  className="er-btn-cyan w-full py-2"
-                >
-                  choose model
-                </button>
-              </div>
-            )}
           </aside>
         </div>
       )}
 
       {/* Model picker */}
       {showModels && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 p-0 sm:p-4">
-          <div className="er-modal w-full max-w-lg max-h-[85vh] overflow-hidden flex flex-col rounded-t-sm sm:rounded-sm">
-            <div className="er-modal-head flex items-center justify-between px-4 py-3">
+        <div
+          className="er-overlay er-overlay-center"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Models"
+        >
+          <button
+            type="button"
+            className="er-overlay-scrim"
+            aria-label="Close models"
+            onClick={() => setShowModels(false)}
+          />
+          <div className="er-modal">
+            <div className="er-modal-head">
               <div>
-                <div className="er-logo" style={{ fontSize: "0.65rem" }}>
+                <div className="er-logo" style={{ fontSize: "0.7rem" }}>
                   MODELS
                 </div>
-                <div className="text-[10px] text-[var(--cyan)] mt-0.5">
-                  {modelHw || "scanning chrome…"} · no max-GB · unload+GC on switch
+                <div className="text-[0.68rem] text-[var(--muted)] mt-0.5">
+                  {modelHw || "scanning hardware…"} · unload + GC on switch
                 </div>
               </div>
               <button
                 type="button"
+                className="er-close"
                 onClick={() => setShowModels(false)}
-                className="text-[var(--muted)] hover:text-[var(--fg)]"
+                aria-label="Close"
               >
                 <X size={16} />
               </button>
             </div>
-            <div className="overflow-y-auto flex-1 p-2 space-y-1">
+            <div className="er-modal-body">
               {modelsLoading && (
                 <div className="flex items-center gap-2 p-4 text-[var(--muted)] text-xs">
                   <Loader2 size={14} className="animate-spin" /> fetching
@@ -2435,7 +2465,7 @@ export default function EdgeRunnerUI() {
                 </div>
               )}
               {modelSwitching && (
-                <div className="p-2 text-xs text-[var(--warn)] border border-[var(--warn)]/30 rounded mb-2">
+                <div className="px-3 py-2 text-xs text-[var(--warn)] border border-[rgba(240,193,75,0.35)] bg-[rgba(240,193,75,0.08)] rounded-md">
                   unloading previous model + GC, then loading…
                 </div>
               )}
@@ -2446,27 +2476,27 @@ export default function EdgeRunnerUI() {
                     type="button"
                     disabled={modelSwitching}
                     onClick={() => void switchToModel(opt)}
-                    className={`er-model-card w-full text-left px-3 py-2.5 text-xs ${
-                      opt.fits ? "fits" : "opacity-60"
-                    }`}
+                    className={`er-model-card ${opt.fits ? "fits" : "opacity-70"}`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-[var(--fg)] truncate font-medium">
+                      <span className="text-[var(--fg-bright)] truncate font-medium text-[0.85rem]">
                         {opt.name}
                       </span>
                       <ChevronRight
-                        size={12}
+                        size={14}
                         className="text-[var(--dim)] shrink-0"
                       />
                     </div>
-                    <div className="text-[var(--muted)] mt-0.5 flex flex-wrap gap-x-2">
+                    <div className="text-[var(--muted)] mt-1 flex flex-wrap gap-x-2 text-[0.72rem]">
                       <span>
                         {opt.file_size_gb} GB disk · ~{opt.required_ram_gb} GB
                         ram
                       </span>
                       <span
                         className={
-                          opt.fits ? "text-[var(--accent)]" : "text-[var(--danger)]"
+                          opt.fits
+                            ? "text-[var(--success)]"
+                            : "text-[var(--danger)]"
                         }
                       >
                         {opt.fit_status}
@@ -2475,13 +2505,13 @@ export default function EdgeRunnerUI() {
                         <span className="text-[var(--warn)]">sharded</span>
                       )}
                     </div>
-                    <div className="text-[10px] text-[var(--dim)] truncate mt-0.5">
+                    <div className="text-[0.65rem] text-[var(--dim)] truncate mt-1">
                       {opt.repo_id} / {opt.filename}
                     </div>
                   </button>
                 ))}
               {!modelsLoading && modelOptions.length === 0 && (
-                <p className="p-4 text-[var(--muted)] text-xs">
+                <p className="p-4 text-[var(--muted)] text-xs m-0">
                   no options — is the backend online?
                 </p>
               )}
@@ -2489,6 +2519,7 @@ export default function EdgeRunnerUI() {
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }
