@@ -12,7 +12,13 @@ import {
   EyeOff,
   ChevronRight,
   X,
+  Terminal,
+  FolderOpen,
+  Plus,
+  RotateCcw,
 } from "lucide-react";
+import { LogoBox } from "@/components/LogoBox";
+import { SessionHub } from "@/components/SessionHub";
 import {
   consumeOAuthRedirect,
   getGoogleUser,
@@ -154,6 +160,9 @@ export default function EdgeRunnerUI() {
   const [cmdSuggest, setCmdSuggest] = useState<string[]>([]);
   const undoStackRef = useRef<Message[][]>([]);
   const redoStackRef = useRef<Message[][]>([]);
+  /** boot splash → hub (continue/new) → terminal */
+  const [bootDone, setBootDone] = useState(false);
+  const [appStage, setAppStage] = useState<"hub" | "terminal">("hub");
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -173,6 +182,12 @@ export default function EdgeRunnerUI() {
   useEffect(() => {
     backendUrlRef.current = backendUrl;
   }, [backendUrl]);
+
+  // Boxed logo splash (CLI harness init)
+  useEffect(() => {
+    const t = setTimeout(() => setBootDone(true), 900);
+    return () => clearTimeout(t);
+  }, []);
 
   // ── Boot: Google redirect return → silent vault → ready ─────────────────
   useEffect(() => {
@@ -410,6 +425,8 @@ export default function EdgeRunnerUI() {
             if (m.some((x) => x.content?.includes("session restored"))) return m;
             return [...m, line];
           });
+          // Land in terminal when a live backend reconnects
+          setAppStage("terminal");
           if (!cancelled) setRestoring(false);
           return;
         }
@@ -1338,13 +1355,20 @@ export default function EdgeRunnerUI() {
     !!loadPrefs().localBackendUrl;
 
   // ── Vault gates ─────────────────────────────────────────────────────────
-  if (vaultGate === "loading" || (vaultGate === "ready" && restoring)) {
+  if (!bootDone || vaultGate === "loading" || (vaultGate === "ready" && restoring)) {
     return (
-      <div className="er-shell min-h-screen flex flex-col items-center justify-center text-sm gap-3">
-        <div className="er-logo">EDGERUNNER</div>
-        <div className="flex items-center gap-2 text-[var(--cyan)]">
-          <Loader2 className="animate-spin" size={16} />
-          <span className="er-logo-sub">jacking into vault…</span>
+      <div className="er-shell min-h-screen flex flex-col items-center justify-center gap-5 p-6">
+        <LogoBox pulse tag="initializing" />
+        <div className="flex items-center gap-2 text-[var(--muted)] text-xs">
+          <Loader2 className="animate-spin" size={14} />
+          <span>
+            {!bootDone
+              ? "starting…"
+              : vaultGate === "loading"
+                ? "unlocking vault…"
+                : "restoring session…"}
+          </span>
+          <span className="er-cursor" />
         </div>
       </div>
     );
@@ -1354,15 +1378,18 @@ export default function EdgeRunnerUI() {
     return (
       <div className="er-shell min-h-screen flex flex-col text-sm">
         <div className="er-hazard" />
-        <header className="er-header flex items-center gap-3 px-5 py-4">
-          <span className="er-logo">EDGERUNNER</span>
-          <span className="er-logo-sub">// night city</span>
+        <header className="er-term-bar">
+          <div className="er-term-dots" aria-hidden>
+            <span /><span /><span />
+          </div>
+          <div className="er-term-title">edgerunner · auth</div>
         </header>
-        <main className="flex-1 flex items-center justify-center p-6">
-          <div className="w-full max-w-sm space-y-5 er-panel er-panel-hot er-clip p-6 text-center">
+        <main className="flex-1 flex flex-col items-center justify-center p-6 gap-6">
+          <LogoBox subtitle="sign in to continue" />
+          <div className="w-full max-w-sm space-y-5 er-panel er-panel-hot p-6 text-center">
             <div className="er-hero-tag mx-auto">SECURE SESSION</div>
-            <h1 className="er-logo" style={{ fontSize: "1rem", letterSpacing: "0.2em" }}>
-              EDGERUNNER
+            <h1 className="er-logo" style={{ fontSize: "0.85rem" }}>
+              SIGN IN
             </h1>
             <p className="text-xs text-[var(--muted)] leading-relaxed">
               Sign in with Google to use EdgeRunner. Your vault, encryption, and
@@ -1424,14 +1451,17 @@ export default function EdgeRunnerUI() {
     return (
       <div className="er-shell min-h-screen flex flex-col text-sm">
         <div className="er-hazard" />
-        <header className="er-header flex items-center gap-3 px-5 py-4">
-          <span className="er-logo">EDGERUNNER</span>
-          <span className="er-logo-sub">// unlock</span>
+        <header className="er-term-bar">
+          <div className="er-term-dots" aria-hidden>
+            <span /><span /><span />
+          </div>
+          <div className="er-term-title">edgerunner · unlock</div>
         </header>
-        <main className="flex-1 flex items-center justify-center p-6">
+        <main className="flex-1 flex flex-col items-center justify-center p-6 gap-5">
+          <LogoBox subtitle="vault locked" />
           <div className="w-full max-w-sm space-y-4 er-panel p-5">
-            <p className="text-[var(--fg)] flex items-center gap-2">
-              <Lock size={14} className="text-[var(--warn)]" /> vault locked
+            <p className="text-[var(--fg)] flex items-center gap-2 text-sm">
+              <Lock size={14} className="text-[var(--warn)]" /> enter passphrase
             </p>
             <input
               type={showPass ? "text" : "password"}
@@ -1468,78 +1498,139 @@ export default function EdgeRunnerUI() {
     );
   }
 
-  // ── Main CLI shell (always — setup is a panel, not a dead-end page) ─────
-  return (
-    <div className="er-shell min-h-screen flex flex-col text-sm">
-      <div className="er-hazard shrink-0" />
-      {/* Title bar */}
-      <header className="er-header flex items-center gap-3 px-3 sm:px-4 py-2.5 shrink-0">
-        <div className="flex items-center gap-2 min-w-0 flex-1">
-          <span className="er-logo shrink-0">EDGERUNNER</span>
-          <span className="text-[var(--dim)] hidden sm:inline">│</span>
-          <span className="er-logo-sub truncate hidden sm:inline">
-            night city · agent harness
-          </span>
-        </div>
-        <div className="flex items-center gap-2 sm:gap-3 text-xs shrink-0">
-          <span className="flex items-center gap-1.5 text-[var(--muted)]">
-            <span className={`er-status-dot ${statusKind}`} />
-            {isOnline && modelReady
-              ? "ready"
-              : isOnline
-                ? "booting"
-                : backendUrl
-                  ? "down"
-                  : "idle"}
-          </span>
-          {modelName && (
-            <button
-              type="button"
-              onClick={() => void openModelPicker()}
-              className="hidden sm:inline text-[var(--info)] hover:underline truncate max-w-[10rem]"
-              title="Switch model"
-            >
-              {modelName}
-            </button>
-          )}
-          {backendUrl && (
-            <button
-              type="button"
-              onClick={() => void openModelPicker()}
-              className="er-btn-cyan px-2 py-0.5"
-              title="Models"
-            >
-              model
-            </button>
-          )}
-          {backendUrl && (
-            <button
-              type="button"
-              onClick={() => void stopSession()}
-              disabled={sessionBusy}
-              className="er-btn-danger px-2 py-0.5"
-              title="Stop Kaggle session"
-            >
-              <Square size={12} className="inline" /> stop
-            </button>
-          )}
-          {googleUser && (
-            <span
-              className="hidden md:inline text-[10px] text-[var(--cyan)] truncate max-w-[8rem]"
-              title={googleUser.email}
-            >
+  // ── Session hub (continue / new workspace) ─────────────────────────────
+  if (appStage === "hub") {
+    const live = loadLiveSession();
+    const hasLive = !!(live?.backendUrl || backendUrl);
+    const hasChat = messages.some((m) => m.role === "user" || m.role === "assistant");
+    return (
+      <div className="er-shell min-h-screen flex flex-col">
+        <div className="er-hazard shrink-0" />
+        <header className="er-term-bar">
+          <div className="er-term-dots" aria-hidden>
+            <span /><span /><span />
+          </div>
+          <div className="er-term-title">edgerunner · workspace</div>
+          {googleUser ? (
+            <span className="text-[10px] text-[var(--dim)] truncate max-w-[8rem]" title={googleUser.email}>
               {googleUser.email}
             </span>
-          )}
+          ) : null}
+        </header>
+        <main className="flex-1 flex flex-col items-center justify-center p-6 gap-6">
+          <LogoBox
+            subtitle="coding agent"
+            tag={hasLive ? "session available" : "ready"}
+          />
+          <SessionHub
+            actions={[
+              {
+                id: "continue",
+                title: hasLive || hasChat ? "Continue session" : "Open terminal",
+                description: hasLive
+                  ? `Resume ${live?.accelerator || phase || "backend"} · ${
+                      (live?.backendUrl || backendUrl || "").replace(/^https?:\/\//, "").slice(0, 36) || "saved chat"
+                    }`
+                  : hasChat
+                    ? "Pick up the chat already on this device"
+                    : "Start the CLI session (launch Kaggle or attach local next)",
+                icon: hasLive || hasChat ? <RotateCcw size={16} /> : <Terminal size={16} />,
+                primary: true,
+                onClick: () => setAppStage("terminal"),
+              },
+              {
+                id: "new",
+                title: "New workspace",
+                description: "Clear chat transcript and open a clean agent session",
+                icon: <Plus size={16} />,
+                onClick: () => {
+                  clearChat();
+                  setAppStage("terminal");
+                },
+              },
+              {
+                id: "settings",
+                title: "Connection settings",
+                description: "Kaggle GPU / local URL · models · credentials",
+                icon: <Settings2 size={16} />,
+                onClick: () => {
+                  setAppStage("terminal");
+                  setShowSettings(true);
+                },
+              },
+            ]}
+            footnote={
+              <>
+                tip: <span className="text-[var(--accent)]">/help</span> in the
+                terminal · Tab toggles plan/build
+              </>
+            }
+          />
+        </main>
+      </div>
+    );
+  }
+
+  // ── Main CLI shell ─────────────────────────────────────────────────────
+  return (
+    <div className="er-shell er-term text-sm">
+      <div className="er-hazard shrink-0" />
+      {/* Terminal chrome */}
+      <header className="er-term-bar">
+        <div className="er-term-dots" aria-hidden>
+          <span /><span /><span />
+        </div>
+        <button
+          type="button"
+          onClick={() => setAppStage("hub")}
+          className="er-btn-ghost text-[10px] px-1 text-[var(--dim)] hover:text-[var(--fg)]"
+          title="Workspaces"
+        >
+          <FolderOpen size={14} />
+        </button>
+        <div className="er-term-title truncate">
+          edgerunner · {uiPrefs.agentMode}
+          {modelName ? ` · ${modelName}` : ""}
+        </div>
+        <span className={`er-status-pill ${statusKind}`}>
+          <span className={`er-status-dot ${statusKind}`} />
+          {isOnline && modelReady
+            ? "ready"
+            : isOnline
+              ? "booting"
+              : backendUrl
+                ? "down"
+                : "idle"}
+        </span>
+        {backendUrl && (
           <button
             type="button"
-            onClick={() => setShowSettings(true)}
-            className="er-btn-ghost p-1"
-            title="Settings"
+            onClick={() => void openModelPicker()}
+            className="er-btn-cyan px-2 py-0.5 text-[10px]"
+            title="Models"
           >
-            <Settings2 size={15} />
+            model
           </button>
-        </div>
+        )}
+        {backendUrl && (
+          <button
+            type="button"
+            onClick={() => void stopSession()}
+            disabled={sessionBusy}
+            className="er-btn-danger px-2 py-0.5 text-[10px]"
+            title="Stop Kaggle session"
+          >
+            <Square size={11} className="inline" /> stop
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => setShowSettings(true)}
+          className="er-btn-ghost p-1"
+          title="Settings"
+        >
+          <Settings2 size={15} />
+        </button>
       </header>
 
       {/* Status strip */}
@@ -1552,33 +1643,24 @@ export default function EdgeRunnerUI() {
         </div>
       )}
 
-      {/* Transcript — CLI (OpenCode TUI-inspired) or chat */}
-      <main
-        className={`flex-1 overflow-y-auto px-3 sm:px-6 py-4 space-y-3 ${
-          uiPrefs.uiView === "cli" ? "font-mono text-[13px] leading-relaxed" : ""
-        }`}
-      >
+      {/* Transcript — CLI scrollback */}
+      <main className="er-scrollback">
         {messages.length === 0 && (
-          <div className="text-[var(--muted)] text-xs space-y-2 pt-10 max-w-xl">
-            <div className="er-hero-tag">CHOOMS · NETRUNNERS · ONLY</div>
-            <p className="text-[var(--fg)] text-sm">
-              <span className="er-prompt-char">›</span>{" "}
-              <span className="er-logo" style={{ letterSpacing: "0.15em", fontSize: "0.85rem" }}>
-                EDGERUNNER
-              </span>{" "}
-              <span className="text-[var(--cyan)]">coding agent</span>
+          <div className="er-empty space-y-2">
+            <p className="text-[var(--fg-bright)]">
+              <span className="er-prompt-char">›</span> EdgeRunner agent ready
             </p>
-            <p className="pl-3">
-              agent=<code className="text-[var(--warn)]">{uiPrefs.agentMode}</code> ·{" "}
-              <code className="text-[var(--accent)]">/help</code> ·{" "}
-              <code className="text-[var(--accent)]">/code</code> ·{" "}
-              <code className="text-[var(--accent)]">/plan</code>
+            <p>
+              agent=<span className="cmd">{uiPrefs.agentMode}</span> ·{" "}
+              <span className="cmd">/help</span> ·{" "}
+              <span className="cmd">/code</span> ·{" "}
+              <span className="cmd">/plan</span>
             </p>
-            <p className="pl-3 text-[var(--dim)]">
-              Coding tasks run automatically (plan → code → verify). No mode setup.
+            <p className="text-[var(--dim)]">
+              Coding tasks run automatically (plan → code → verify).
               {configured
-                ? " Chrome saved — /settings when you need a new run."
-                : " /settings to launch Kaggle or attach local."}
+                ? " Connection saved — /settings to relaunch."
+                : " Open settings to launch Kaggle or attach local."}
             </p>
           </div>
         )}
@@ -1586,22 +1668,17 @@ export default function EdgeRunnerUI() {
         {messages.map((m, i) => {
           if (m.role === "system") {
             return (
-              <div
-                key={i}
-                className={`er-sys-line flex gap-2 items-start ${
-                  uiPrefs.uiView === "cli" ? "text-[11px] opacity-90" : ""
-                }`}
-              >
-                <span className="er-sys-char">#</span>
-                <span className="whitespace-pre-wrap">{m.content}</span>
+              <div key={i} className="er-line">
+                <span className="er-gutter sys">#</span>
+                <div className="er-body sys">{m.content}</div>
               </div>
             );
           }
           if (m.role === "user") {
             return (
-              <div key={i} className="flex gap-2 items-start">
-                <span className="er-prompt-char shrink-0">›</span>
-                <div className="er-user-line whitespace-pre-wrap break-words flex-1">
+              <div key={i} className="er-line">
+                <span className="er-gutter user">›</span>
+                <div className="er-body user">
                   {uiPrefs.showTimestamps && m.ts ? (
                     <span className="text-[10px] text-[var(--dim)] mr-2">
                       {new Date(m.ts).toLocaleTimeString()}
@@ -1613,32 +1690,26 @@ export default function EdgeRunnerUI() {
             );
           }
           return (
-            <div key={i} className="flex gap-2 items-start">
-              <span className="er-reply-char shrink-0">
-                {uiPrefs.uiView === "cli" ? "‹" : "‹"}
-              </span>
-              <div className="flex-1 min-w-0">
+            <div key={i} className="er-line">
+              <span className="er-gutter agent">‹</span>
+              <div className="er-body agent">
                 {uiPrefs.showThinking &&
                   m.thoughts &&
                   m.thoughts.length > 0 && (
                     <details
-                      className="mb-1 text-xs text-[var(--muted)]"
+                      className="er-trace"
                       open={uiPrefs.showToolDetails && uiPrefs.uiView === "cli"}
                     >
-                      <summary className="cursor-pointer hover:text-[var(--fg)]">
-                        trace ({m.thoughts.length})
-                      </summary>
-                      <pre className="mt-1 whitespace-pre-wrap text-[10px] text-[var(--dim)] border-l border-[var(--border)] pl-2">
-                        {m.thoughts.join("\n")}
-                      </pre>
+                      <summary>trace ({m.thoughts.length})</summary>
+                      <pre>{m.thoughts.join("\n")}</pre>
                     </details>
                   )}
                 {uiPrefs.uiView === "cli" ? (
-                  <pre className="whitespace-pre-wrap break-words text-[var(--fg)] text-[12px] sm:text-[13px] font-mono">
+                  <pre className="whitespace-pre-wrap break-words m-0 font-inherit text-[13px] leading-relaxed">
                     {m.content}
                   </pre>
                 ) : (
-                  <div className="er-md text-[var(--fg)]">
+                  <div className="er-md">
                     <ReactMarkdown>{m.content}</ReactMarkdown>
                   </div>
                 )}
@@ -1650,7 +1721,7 @@ export default function EdgeRunnerUI() {
       </main>
 
       {/* Composer */}
-      <footer className="er-footer p-3 shrink-0">
+      <footer className="er-prompt-bar">
         {!backendUrl && (
           <div className="mb-2 flex flex-wrap gap-2 text-xs">
             {hasStoredCreds || username ? (
@@ -1660,7 +1731,7 @@ export default function EdgeRunnerUI() {
                 onClick={() => void launchKaggle()}
                 className="er-btn-primary px-3 py-1.5"
               >
-                {sessionBusy ? "jacking in…" : "▶ launch kaggle"}
+                {sessionBusy ? "launching…" : "▶ launch kaggle"}
               </button>
             ) : (
               <button
@@ -1668,7 +1739,7 @@ export default function EdgeRunnerUI() {
                 onClick={() => setShowSettings(true)}
                 className="er-btn px-3 py-1.5"
               >
-                configure chrome
+                configure connection
               </button>
             )}
             <button
@@ -1683,18 +1754,19 @@ export default function EdgeRunnerUI() {
             </button>
           </div>
         )}
-        <div className="relative flex gap-2 items-end max-w-4xl mx-auto">
-          <span className="er-prompt-char pb-2.5 shrink-0" title={`agent: ${uiPrefs.agentMode}`}>
+        <div className="relative max-w-4xl mx-auto">
+          <div className="er-prompt-row">
+          <span className="er-prompt-char" title={`agent: ${uiPrefs.agentMode}`}>
             {uiPrefs.agentMode === "plan" ? "?" : "›"}
           </span>
-          <div className="flex-1 relative">
+          <div className="flex-1 relative min-w-0">
             {cmdSuggest.length > 0 && (
-              <div className="absolute bottom-full left-0 right-0 mb-1 border border-[var(--border)] bg-[var(--bg-elevated)] text-[11px] max-h-40 overflow-y-auto z-20 shadow-lg">
+              <div className="er-cmd-menu">
                 {cmdSuggest.map((line) => (
                   <button
                     key={line}
                     type="button"
-                    className="block w-full text-left px-2 py-1 hover:bg-[var(--bg-panel)] text-[var(--cyan)] font-mono"
+                    className="er-cmd-item"
                     onClick={() => {
                       const name = line.split(" ")[0];
                       setInput(name + " ");
@@ -1751,23 +1823,24 @@ export default function EdgeRunnerUI() {
                   : "launch a session first…"
               }
               disabled={isLoading || modelSwitching}
-              className="w-full bg-transparent border-0 outline-none resize-none text-sm text-[var(--fg)] placeholder:text-[var(--dim)] max-h-32 py-2 caret-[var(--warn)] font-mono"
+              className="er-prompt-input"
             />
           </div>
           <button
             type="button"
             onClick={() => void handleSend()}
             disabled={isLoading || !input.trim()}
-            className="p-2 text-[var(--accent)] disabled:text-[var(--dim)] hover:drop-shadow-[0_0_8px_var(--accent-glow)]"
+            className="er-prompt-send"
           >
             {isLoading ? (
-              <Loader2 size={16} className="animate-spin" />
+              <Loader2 size={15} className="animate-spin" />
             ) : (
-              <Send size={16} />
+              <Send size={15} />
             )}
           </button>
+          </div>
         </div>
-        <div className="flex justify-between mt-1 text-[10px] text-[var(--dim)] max-w-4xl mx-auto px-5">
+        <div className="er-prompt-meta">
           <span>
             {phase !== "setup" ? phase : "—"}
             {session?.accelerator ? ` · ${session.accelerator}` : ""}

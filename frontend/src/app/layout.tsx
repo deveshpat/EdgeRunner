@@ -32,9 +32,9 @@ const shareTech = Share_Tech_Mono({
  * - Secrets + chat encrypted client-side (see src/lib/vault.ts)
  */
 export const metadata: Metadata = {
-  title: "EdgeRunner — Night City Agent Harness",
+  title: "EdgeRunner — CLI coding agent",
   description:
-    "Cyberpunk agentic coding harness. Run on Kaggle CPU/GPU or local — encrypted vault, neon CLI, SOTA models.",
+    "Terminal-style coding agent harness. Kaggle GPU or local — encrypted vault, plan/build agents, SOTA GGUF models.",
   robots: { index: true, follow: true },
   referrer: "no-referrer",
   other: {
@@ -63,7 +63,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#07010f",
+  themeColor: "#0c0e12",
   colorScheme: "dark",
 };
 
