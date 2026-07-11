@@ -1562,16 +1562,16 @@ export default function EdgeRunnerUI() {
               <span className="er-logo" style={{ letterSpacing: "0.15em", fontSize: "0.85rem" }}>
                 EDGERUNNER
               </span>{" "}
-              <span className="text-[var(--cyan)]">best-of harness</span>
+              <span className="text-[var(--cyan)]">coding agent</span>
             </p>
             <p className="pl-3">
-              CLI view · agent=<code className="text-[var(--warn)]">{uiPrefs.agentMode}</code> ·{" "}
+              agent=<code className="text-[var(--warn)]">{uiPrefs.agentMode}</code> ·{" "}
               <code className="text-[var(--accent)]">/help</code> ·{" "}
               <code className="text-[var(--accent)]">/code</code> ·{" "}
               <code className="text-[var(--accent)]">/plan</code>
             </p>
             <p className="pl-3 text-[var(--dim)]">
-              Harness mixes OpenCode tools, SWE-agent verify, Aider edits, phased GGUF loop.
+              Coding tasks run automatically (plan → code → verify). No mode setup.
               {configured
                 ? " Chrome saved — /settings when you need a new run."
                 : " /settings to launch Kaggle or attach local."}
@@ -1829,14 +1829,14 @@ export default function EdgeRunnerUI() {
               </button>
             </div>
 
-            {/* OpenCode-inspired agent + view */}
+            {/* Agent intent + view (not harness modes) */}
             <div className="space-y-2 border border-[var(--cyan)]/40 p-3">
               <div className="text-[var(--cyan)] tracking-wider text-[10px]">
-                HARNESS · OPENCODE-STYLE
+                AGENT · VIEW
               </div>
               <p className="text-[10px] text-[var(--muted)]">
-                Best-of loop: phased PLAN→CODE→VERIFY (GGUF) · OpenCode tools ·
-                SWE-agent verify · Aider edits. See docs/HARNESS.md
+                One automatic coding loop. Build implements; plan is readonly
+                analysis. CLI is the default transcript style.
               </p>
               <div className="flex gap-2">
                 <button

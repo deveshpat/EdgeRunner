@@ -5,7 +5,6 @@ uvicorn[standard]>=0.27,<1
 pydantic>=2,<3
 langchain>=0.3,<2
 langchain-community>=0.3,<1
-langgraph>=0.2,<2
 # Installed SEPARATELY by bootstrap from manylinux_2_28 release wheel.
 # Do NOT let plain `pip install -r` resolve this on Kaggle — it compiles (slow).
 # Bootstrap strips this line and installs the prebuilt wheel instead.

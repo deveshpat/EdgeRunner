@@ -1,18 +1,18 @@
 """
-OpenCode-inspired agent loop for EdgeRunner.
+EdgeRunner coding agent — single integrated loop.
 
-OpenCode architecture (anomalyco/opencode packages/core + packages/opencode):
-  - Session runner streams one LLM turn with registered tools
-  - Tool calls are settled (executed), results appended, loop continues
-  - Primary agents: build (default) and plan (readonly)
-  - Max steps bound the loop; final text-only turn when limit hit
-  - Built-in tools: bash, read, write, edit, grep, glob, apply_patch, todo, …
+Design decisions come from research literature + production harnesses
+(see docs/HARNESS.md). There is no harness menu and no fallback modes:
+the loop always does the right thing for the task.
 
-EdgeRunner adaptation for local GGUF (often no native tool JSON mode):
-  - Same tool set + `done` / `run_python`
-  - Tools invoked via <tool name="…">{…}</tool> text protocol
-  - Workspace sandbox per run
-  - History-aware task text still comes from routing
+Integrated logic (always on):
+  • OpenCode tools + max-steps + done
+  • Plan vs build (readonly when planning)
+  • Phase rhythm PLAN → CODE → VERIFY → REFLECT (statewright: helps GGUF)
+  • Aider-style exact edit + read-before-edit
+  • SWE-agent ACI observations via tools
+  • Must verify before success / auto-done on green tests
+  • Code-fence auto-materialize when the model forgets tools
 """
 
 from __future__ import annotations
@@ -21,63 +21,69 @@ import os
 import re
 from typing import Optional
 
-from langchain_core.messages import HumanMessage
-
 from harness.language import extract_fenced_code
 from harness.tools.registry import ToolRegistry, parse_tool_calls
 
 _progress_cb = None
 
-# Mirrors OpenCode session runner step limits
-MAX_STEPS_DEFAULT = int(os.environ.get("EDGERUNNER_MAX_STEPS", "20"))
+MAX_STEPS_BUILD = int(os.environ.get("EDGERUNNER_MAX_STEPS", "24"))
 MAX_STEPS_PLAN = int(os.environ.get("EDGERUNNER_MAX_STEPS_PLAN", "12"))
 
-# Exact spirit of OpenCode packages/core/src/session/runner/max-steps.ts
-MAX_STEPS_PROMPT = """CRITICAL - MAXIMUM STEPS REACHED
+# Soft phase rhythm (tools preferred per stage; full build set remains available
+# after first CODE so the model is never stuck — gates guide, not brick walls)
+PHASE_ORDER = ("PLAN", "CODE", "VERIFY", "REFLECT")
 
-The maximum number of steps allowed for this task has been reached. Tools are disabled until next user input. Respond with text only.
+PHASE_FOCUS: dict[str, str] = {
+    "PLAN": (
+        "Focus: understand the task, optionally write tests_auto.py and todowrite. "
+        "Prefer readonly tools + write for tests only. Do not claim done yet."
+    ),
+    "CODE": (
+        "Focus: implement in solution.py (or language-appropriate main file) via "
+        "write/edit/apply_patch. Prefer small edits after the first draft."
+    ),
+    "VERIFY": (
+        "Focus: run tests with run_python or bash. Do not claim success without "
+        "a green observation. If green, call done."
+    ),
+    "REFLECT": (
+        "Focus: read the failure, edit the minimal fix, then we re-verify."
+    ),
+}
 
-STRICT REQUIREMENTS:
-1. Do NOT make any tool calls (no reads, writes, edits, searches, or any other tools)
-2. MUST provide a text response summarizing work done so far
-3. This constraint overrides ALL other instructions, including any user requests for edits or tool use
+MAX_STEPS_PROMPT = """CRITICAL — MAXIMUM STEPS REACHED
 
-Response must include:
-- Statement that maximum steps for this agent have been reached
-- Summary of what has been accomplished so far
-- List of any remaining tasks that were not completed
-- Recommendations for what should be done next
+Tools are disabled. Respond with text only:
+1. What you accomplished
+2. What remains
+3. Recommended next steps
+Do not invent successful test results.
+"""
 
-Any attempt to use tools is a critical violation. Respond with text ONLY."""
+BUILD_SYSTEM = """You are EdgeRunner, an autonomous coding agent.
 
-BUILD_SYSTEM = """You are EdgeRunner Build agent — an OpenCode-style coding agent.
+You solve tasks with tools in a workspace. The harness advances phases for you
+(PLAN → CODE → VERIFY → REFLECT). Follow the current phase focus.
 
-You solve the user task by using tools in a workspace. Workflow:
-1) For multi-step work, set todos with todowrite
-2) Write or edit code with write / edit / apply_patch
-3) Verify with bash or run_python (run real tests — do not invent pass results)
-4) Call done with a clear summary when finished
-
-Rules (OpenCode-aligned):
-- Prefer small edit steps over huge rewrites when fixing failures
-- You MUST read a file before editing it
-- Prefer editing existing files over rewriting from scratch
-- After writing code, run tests; fix until green, then done
+Rules:
+- Prefer write/edit over huge rewrites when fixing failures
+- You must read a file before editing it
+- After writing code, run real tests (run_python or bash)
+- Never invent pass results — only trust tool observations
+- Call done with a short summary when verified
 - Paths are workspace-relative
-- For pure coding exercises (e.g. reverse a string), create solution.py (+ tests), run them, fix, then done
-- Never claim success without running verification tools
+- Pure exercises (e.g. reverse a string): solution.py + tests → run → fix → done
 
-Tool call format (required):
+Tool format (required):
 <tool name="write">
 {"path": "solution.py", "content": "def reverse_string(s):\\n    return s[::-1]\\n"}
 </tool>
 """
 
-PLAN_SYSTEM = """You are EdgeRunner Plan agent (OpenCode plan mode).
+PLAN_SYSTEM = """You are EdgeRunner in plan mode (readonly analysis).
 
-You may only use readonly tools (read, grep, glob, list_dir, webfetch, todowrite, done).
-Analyze the task and propose a concrete implementation plan with steps and risks.
-Do not write or edit files. Call done with the plan when ready.
+Use only: read, grep, glob, list_dir, webfetch, todowrite, done.
+Do not write or edit code files. Produce a concrete plan, then call done.
 """
 
 
@@ -96,6 +102,7 @@ def _progress(msg: str) -> None:
 
 
 def _llm_text(prompt: str, *, max_tokens: int = 1200) -> str:
+    from langchain_core.messages import HumanMessage
     from harness.llm_bridge import get_llm
 
     llm = get_llm()
@@ -119,15 +126,13 @@ def _wants_plan_mode(task: str) -> bool:
 
 
 def _extract_assert_hints(task: str) -> list[str]:
-    """Pull simple assert-like expectations from the user task for auto-tests."""
-    hints = []
+    hints: list[str] = []
     for m in re.finditer(
         r"(?:assert|expect|should\s+(?:return|be)|e\.g\.|example)[:\s]+(.+)",
         task or "",
         re.I,
     ):
         hints.append(m.group(0).strip()[:200])
-    # reverse string common cases
     if re.search(r"reverse\s+(a\s+)?string", task or "", re.I):
         hints.extend(
             [
@@ -141,18 +146,20 @@ def _extract_assert_hints(task: str) -> list[str]:
 
 def _auto_tests_for_solution(task: str) -> str:
     hints = _extract_assert_hints(task)
-    assert_lines = "\n".join(f"    {h}" if h.startswith("assert") else f"    # {h}" for h in hints)
+    assert_lines = "\n".join(
+        f"    {h}" if h.startswith("assert") else f"    # {h}" for h in hints
+    )
     if not any(h.startswith("assert") for h in hints):
         assert_lines = (
             "    assert fn is not None, 'no public function found in solution'\n"
-            "    # smoke: callable returns something for empty/str input\n"
             "    try:\n"
-            "        r = fn('') if fn.__code__.co_argcount >= 1 else fn()\n"
+            "        r = fn('') if getattr(fn, '__code__', None) and "
+            "fn.__code__.co_argcount >= 1 else fn()\n"
             "        assert r is not None or r == '' or r == [] or r == 0\n"
             "    except TypeError:\n"
             "        pass\n"
         )
-    return f'''"""Auto-generated smoke tests (OpenCode-style verify step)."""
+    return f'''"""Auto smoke tests."""
 import solution as sol
 
 def _first_fn():
@@ -192,7 +199,6 @@ def _find_solution(tools: ToolRegistry) -> str:
         p = tools.cwd / candidate
         if p.is_file():
             return p.read_text(encoding="utf-8", errors="replace")
-    # any single .py that isn't tests
     pys = [
         p
         for p in tools.cwd.glob("*.py")
@@ -203,42 +209,56 @@ def _find_solution(tools: ToolRegistry) -> str:
     return ""
 
 
-def run_opencode_style_agent(
+def _advance_phase(phase: str, tools: ToolRegistry, wrote_code: bool) -> str:
+    if phase == "PLAN":
+        return "CODE"
+    if phase == "CODE":
+        return "VERIFY" if wrote_code or _find_solution(tools) else "CODE"
+    if phase == "VERIFY":
+        return "DONE" if tools.ctx.last_test_ok else "REFLECT"
+    if phase == "REFLECT":
+        return "CODE"
+    return phase
+
+
+def run_coding_agent(
     task: str,
     *,
     max_steps: Optional[int] = None,
     plan_mode: Optional[bool] = None,
 ) -> dict:
     """
-    Main harness entry: OpenCode-like tool loop (build or plan agent).
+    Single hands-free coding agent entry.
+    plan_mode: True = analysis only; False = full build; None = detect from task.
     """
     plan = plan_mode if plan_mode is not None else _wants_plan_mode(task)
-    steps = max_steps or (MAX_STEPS_PLAN if plan else MAX_STEPS_DEFAULT)
+    steps = max_steps or (MAX_STEPS_PLAN if plan else MAX_STEPS_BUILD)
     tools = ToolRegistry()
     system = PLAN_SYSTEM if plan else BUILD_SYSTEM
     tool_block = tools.list_for_prompt(plan_mode=plan)
 
-    transcript: list[str] = []
     thought: list[str] = []
+    transcript: list[str] = []
     final_text = ""
     finished = False
     last_reply = ""
+    phase = "PLAN" if not plan else "PLAN"
+    wrote_code = False
 
     _progress(
-        f"⚙️ [OpenCode] {'Plan' if plan else 'Build'} agent · max {steps} steps · ws={tools.cwd.name}"
+        f"⚙️ [Agent] {'plan' if plan else 'build'} · up to {steps} steps · ws={tools.cwd.name}"
     )
 
-    seed = (
+    messages_blob = (
         f"{system}\n\n{tool_block}\n\n"
         f"## User task\n{task}\n\n"
-        "Begin. Use tools now. For a coding exercise, create files under the workspace, "
-        "test them, then call done.\n"
+        "Begin with tools.\n"
     )
-    messages_blob = seed
 
     for step in range(1, steps + 1):
         tools.ctx.step = step
-        _progress(f"🔁 [OpenCode] step {step}/{steps}")
+        focus = PHASE_FOCUS.get(phase, "") if not plan else "Produce the plan, then done."
+        _progress(f"🔁 step {step}/{steps}" + (f" · {phase}" if not plan else " · plan"))
 
         if step == steps:
             prompt = messages_blob + "\n\n" + MAX_STEPS_PROMPT + "\nassistant:"
@@ -246,83 +266,92 @@ def run_opencode_style_agent(
             thought.append(f"**Step {step} (max):** {final_text[:1500]}")
             break
 
-        prompt = messages_blob + "\nassistant:"
+        phase_hdr = f"\n## Phase: {phase}\n{focus}\n" if not plan else "\n"
+        prompt = messages_blob + phase_hdr + "assistant:"
         reply = _llm_text(prompt, max_tokens=1400)
         last_reply = reply
-        thought.append(f"**Step {step}:**\n{reply[:2000]}")
+        thought.append(f"**Step {step} ({phase}):**\n{reply[:2000]}")
         transcript.append(f"assistant:\n{reply}")
 
         calls = parse_tool_calls(reply)
 
-        # If model only wrote a code fence without tools, auto-materialize (build only)
         if not calls and not plan:
             code = extract_fenced_code(reply, preferred="python")
-            if code and step <= 3:
-                _progress("📝 [OpenCode] No tool call — auto write solution.py from fence")
+            if code and step <= 4:
+                _progress("📝 materializing solution.py from code fence")
                 tools.call("write", {"path": "solution.py", "content": code})
                 tools.call(
                     "write",
                     {"path": "tests_auto.py", "content": _auto_tests_for_solution(task)},
                 )
+                wrote_code = True
                 calls = [("run_python", {"path": "tests_auto.py"})]
+                phase = "VERIFY"
             else:
                 messages_blob += (
                     f"\nassistant:\n{reply}\n\n"
-                    "user:\nContinue using tools (write/edit/bash/run_python). "
-                    "Call done when finished.\n"
+                    "user:\nContinue with tools. Call done when verified.\n"
                 )
-                # keep prompt bounded
                 if len(messages_blob) > 24000:
                     messages_blob = messages_blob[-20000:]
+                if not plan:
+                    phase = _advance_phase(phase, tools, wrote_code)
                 continue
 
         observations: list[str] = []
-        # OpenCode settles all tool calls in a turn; cap for GGUF context
         for name, args in calls[:6]:
-            if plan and name not in tools.names(plan_mode=True) and tools.resolve_name(name) not in tools.names(
-                plan_mode=True
-            ):
-                res_txt = f"Tool '{name}' blocked in plan mode (readonly only)."
-                observations.append(f"### observation:{name}\n{res_txt}")
-                thought.append(f"🔧 {name} blocked (plan mode)")
+            resolved = tools.resolve_name(name)
+            if plan and resolved not in tools.names(plan_mode=True):
+                observations.append(
+                    f"### observation:{name}\nTool blocked in plan mode (readonly)."
+                )
+                thought.append(f"🔧 {name} blocked (plan)")
                 continue
-            _progress(f"🔧 [Tool] {name}")
-            result = tools.call(name, args)
+            _progress(f"🔧 {resolved}")
+            result = tools.call(resolved, args)
             obs = result.observation()
-            observations.append(f"### observation:{name}\n{obs}")
+            observations.append(f"### observation:{resolved}\n{obs}")
             thought.append(
-                f"🔧 **{name}** → {'ok' if result.ok else 'error'}\n```\n{obs[:800]}\n```"
+                f"🔧 **{resolved}** → {'ok' if result.ok else 'error'}\n```\n{obs[:800]}\n```"
             )
-            if tools.resolve_name(name) == "done" and result.ok:
-                finished = True
-                final_text = result.content
-                break
+            if resolved in ("write", "edit", "apply_patch") and result.ok:
+                path = str(args.get("path") or "")
+                if path and "test" not in path.lower():
+                    wrote_code = True
+            if resolved == "done" and result.ok:
+                if plan or tools.ctx.last_test_ok or step >= steps - 1:
+                    finished = True
+                    final_text = result.content
+                    break
+                observations.append(
+                    "### note\ndone deferred: run verification (tests) first, then done."
+                )
 
         messages_blob += f"\nassistant:\n{reply}\n\n"
         messages_blob += "user:\n" + "\n\n".join(observations) + "\n"
-        if not finished:
-            messages_blob += (
-                "Continue. If tests passed, call done with a summary. "
-                "If tests failed, edit and re-run.\n"
-            )
+        if not finished and not plan:
+            if tools.ctx.last_test_ok:
+                messages_blob += "Tests passed. Call done with a short summary.\n"
+            else:
+                messages_blob += "Continue. Fix failures then re-verify.\n"
         if len(messages_blob) > 24000:
             messages_blob = messages_blob[-20000:]
 
         if finished:
             break
 
-        # Auto-finish if tests passed and solution exists (model forgot done)
-        if tools.ctx.last_test_ok and _find_solution(tools) and step >= 2:
-            _progress("✅ [OpenCode] Tests passed — auto done")
+        # Auto-complete when verified (model forgot done)
+        if not plan and tools.ctx.last_test_ok and _find_solution(tools) and step >= 2:
+            _progress("✅ tests green — finishing")
             finished = True
-            final_text = (
-                "Tests passed. Solution is ready "
-                f"(auto-completed after successful verification at step {step})."
-            )
+            final_text = "Tests passed. Solution ready."
             break
 
+        if not plan and not finished:
+            phase = _advance_phase(phase, tools, wrote_code)
+
     if not final_text:
-        final_text = last_reply or "Agent stopped without calling done."
+        final_text = last_reply or "Agent stopped without finishing."
 
     solution_body = _find_solution(tools)
     if not solution_body:
@@ -330,7 +359,6 @@ def run_opencode_style_agent(
             "\n".join(transcript), preferred="python"
         )
 
-    # Detect language fence for display
     fence = "python"
     if (tools.cwd / "index.js").is_file() or (tools.cwd / "solution.js").is_file():
         fence = "javascript"
@@ -339,8 +367,8 @@ def run_opencode_style_agent(
     elif (tools.cwd / "main.rs").is_file():
         fence = "rust"
 
-    status_line = "✅ complete" if finished else "⚠️ stopped (max steps or incomplete)"
-    response = f"### EdgeRunner OpenCode agent ({status_line})\n\n{final_text}\n"
+    status = "✅ complete" if finished else "⚠️ incomplete"
+    response = f"### EdgeRunner ({status})\n\n{final_text}\n"
     if solution_body:
         response += f"\n### Solution\n\n```{fence}\n{solution_body.rstrip()}\n```\n"
     if tools.ctx.todos:
@@ -348,7 +376,7 @@ def run_opencode_style_agent(
         for t in tools.ctx.todos:
             if isinstance(t, dict):
                 response += f"- [{t.get('status', '?')}] {t.get('content', t.get('id', ''))}\n"
-    response += f"\n_Workspace: `{tools.cwd}` · steps: {tools.ctx.step}/{steps} · mode: {'plan' if plan else 'build'}_\n"
+    response += f"\n_steps {tools.ctx.step}/{steps} · {'plan' if plan else 'build'}_\n"
 
     return {
         "mode": "harness",
@@ -362,3 +390,7 @@ def run_opencode_style_agent(
         "finished": finished,
         "tests_ok": tools.ctx.last_test_ok,
     }
+
+
+# Backward-compatible name (internal callers)
+run_opencode_style_agent = run_coding_agent

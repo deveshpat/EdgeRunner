@@ -1,10 +1,7 @@
-"""EdgeRunner coding harness — best-of SOTA agent loop + MCP tools.
+"""EdgeRunner coding harness — one automatic agent loop + tools.
 
-See docs/HARNESS.md for the research synthesis (OpenCode, SWE-agent, Aider,
-Claude Code, CodeAct, phased tools).
+Research basis: docs/HARNESS.md. No multi-mode fallbacks.
 """
-
-# Lazy exports so lightweight modules (language/sandbox) import without langchain.
 
 
 def __getattr__(name: str):
@@ -27,21 +24,19 @@ def __getattr__(name: str):
             "simple_chat": simple_chat,
             "set_routing_progress": set_routing_progress,
         }[name]
-    if name == "run_opencode_style_agent":
-        from harness.agent_loop import run_opencode_style_agent
+    if name in ("run_coding_agent", "run_opencode_style_agent"):
+        from harness.agent_loop import run_coding_agent, run_opencode_style_agent
 
-        return run_opencode_style_agent
-    if name == "run_phased_agent":
-        from harness.phased_loop import run_phased_agent
-
-        return run_phased_agent
+        return {
+            "run_coding_agent": run_coding_agent,
+            "run_opencode_style_agent": run_opencode_style_agent,
+        }[name]
     raise AttributeError(name)
 
 
 __all__ = [
     "run_coding_harness",
-    "run_opencode_style_agent",
-    "run_phased_agent",
+    "run_coding_agent",
     "looks_like_coding_task",
     "simple_chat",
     "set_harness_progress",
