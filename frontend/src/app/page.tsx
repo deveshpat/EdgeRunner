@@ -42,11 +42,14 @@ import {
 } from "@/lib/session-persist";
 import ReactMarkdown from "react-markdown";
 import {
-  attachRunningKaggleSession,
   launchKaggleSession,
   waitForBackendHealth,
   type LaunchProgress,
 } from "@/lib/kaggle";
+import {
+  discoverActiveBackend,
+  discoverNote,
+} from "@/lib/session-discover";
 import {
   clearSecret,
   createVault,
@@ -337,6 +340,30 @@ export default function EdgeRunnerUI() {
       };
       return m.length ? [...m, line] : [line];
     });
+    // After cloud prefs/secret land, attach any running backend (other device)
+    try {
+      setProgressMsg("discovering backend after Google sync…");
+      const found = await discoverActiveBackend({
+        onProgress: (msg) => setProgressMsg(msg),
+      });
+      if (found) {
+        setBackendUrl(found.backendUrl);
+        setIsOnline(true);
+        setModelReady(found.modelReady);
+        setModelName(found.modelName);
+        setPhase(found.phase);
+        setProgressMsg(
+          found.modelReady ? null : "backend up; model still loading…"
+        );
+        if (found.accelerator) setAccelerator(found.accelerator);
+        setAppStage("terminal");
+        setMessages((m) => [...m, sysLine(discoverNote(found))]);
+      } else {
+        setProgressMsg(null);
+      }
+    } catch {
+      setProgressMsg(null);
+    }
     return result;
   };
 
@@ -384,95 +411,44 @@ export default function EdgeRunnerUI() {
         chatIdRef.current = rec.id;
       }
 
-      // Shared live session (localStorage + prefs) — works across tabs
-      const live = loadLiveSession();
-      const last = (
-        live?.backendUrl ||
-        prefs.lastBackendUrl ||
-        ""
-      ).replace(/\/$/, "");
-
-      const attachUrl = async (
-        url: string,
-        meta?: { phase?: "kaggle" | "local"; kernelRef?: string; accelerator?: Accelerator }
-      ) => {
-        setProgressMsg("reconnecting to session…");
-        pokeHeartbeat(url);
-        const probe = await probeBackend(url, { retries: 4, timeoutMs: 7000 });
-        if (!probe.ok || cancelled) return false;
-        const isTunnel =
-          /trycloudflare\.com|loca\.lt|localtunnel\.me|bore\.pub/i.test(url);
-        const phase: "kaggle" | "local" =
-          meta?.phase || live?.phase || (isTunnel ? "kaggle" : "local");
-        setBackendUrl(url);
-        setIsOnline(true);
-        setModelReady(probe.model_ready);
-        setModelName(probe.modelName);
-        setPhase(phase);
-        setProgressMsg(
-          probe.model_ready ? null : "backend up; model still loading…"
-        );
-        saveLiveSession({
-          backendUrl: url,
-          phase,
-          kernelRef: meta?.kernelRef || live?.kernelRef,
-          accelerator:
-            meta?.accelerator || live?.accelerator || prefs.accelerator,
-          savedAt: Date.now(),
+      // Cross-device discovery:
+      //  1) Google-synced / local prefs URL
+      //  2) Kaggle API with same API key (works without Google)
+      setProgressMsg("discovering active backend…");
+      try {
+        const found = await discoverActiveBackend({
+          form: {
+            username: secret?.username || prefs.username || username,
+            apiToken: secret?.apiToken || apiToken,
+            apiKey: secret?.apiKey || apiKey,
+          },
+          hintUrl: loadLiveSession()?.backendUrl || prefs.lastBackendUrl,
+          onProgress: (msg) => {
+            if (!cancelled) setProgressMsg(msg);
+          },
         });
-        setMessages((m) => {
-          const line = sysLine(
-            `session restored · ${url.replace(/^https?:\/\//, "")}`
+        if (found && !cancelled) {
+          setBackendUrl(found.backendUrl);
+          setIsOnline(true);
+          setModelReady(found.modelReady);
+          setModelName(found.modelName);
+          setPhase(found.phase);
+          setProgressMsg(
+            found.modelReady ? null : "backend up; model still loading…"
           );
-          if (!m.length) return [line];
-          if (m.some((x) => x.content?.includes("session restored"))) return m;
-          return [...m, line];
-        });
-        setAppStage("terminal");
-        return true;
-      };
-
-      if (last && (await attachUrl(last))) {
-        if (!cancelled) setRestoring(false);
-        return;
-      }
-
-      // URL dead — ask Kaggle if the stable notebook is still RUNNING
-      const uname = (secret?.username || prefs.username || "").trim();
-      const token = secret?.apiToken || apiToken;
-      const key = secret?.apiKey || apiKey;
-      if (uname && (token || key) && !cancelled) {
-        setProgressMsg("checking Kaggle for active worker…");
-        try {
-          const attached = await attachRunningKaggleSession(
-            {
-              username: uname,
-              apiToken: token || undefined,
-              apiKey: key || undefined,
-            },
-            {
-              hintUrl: last || undefined,
-              onProgress: (msg) => setProgressMsg(msg),
-            }
-          );
-          if (attached && !cancelled) {
-            await attachUrl(attached.publicUrl, {
-              phase: "kaggle",
-              kernelRef: attached.kernelRef,
-              accelerator: attached.accelerator,
-            });
-            setMessages((m) => [
-              ...m,
-              sysLine(
-                `attached running kaggle · ${attached.publicUrl.replace(/^https?:\/\//, "")}`
-              ),
-            ]);
-            if (!cancelled) setRestoring(false);
-            return;
-          }
-        } catch {
-          /* no active kernel */
+          if (found.accelerator) setAccelerator(found.accelerator);
+          setMessages((m) => {
+            const line = sysLine(discoverNote(found));
+            if (!m.length) return [line];
+            if (m.some((x) => x.content === line.content)) return m;
+            return [...m, line];
+          });
+          setAppStage("terminal");
+          setRestoring(false);
+          return;
         }
+      } catch {
+        /* no active backend */
       }
 
       // Nothing live
@@ -486,7 +462,7 @@ export default function EdgeRunnerUI() {
               ? m
               : [
                   sysLine(
-                    "no live session · launch kaggle once — other tabs/devices will reuse it"
+                    "no live session · launch once; other devices with the same Kaggle API key (or Google sync) will attach automatically"
                   ),
                 ]
           );
@@ -1614,7 +1590,56 @@ export default function EdgeRunnerUI() {
                     : "Start the CLI session (launch Kaggle or attach local next)",
                 icon: hasLive || hasChat ? <RotateCcw size={16} /> : <Terminal size={16} />,
                 primary: true,
-                onClick: () => setAppStage("terminal"),
+                onClick: () => {
+                  void (async () => {
+                    if (backendUrl) {
+                      setAppStage("terminal");
+                      return;
+                    }
+                    setProgressMsg("looking for active backend…");
+                    try {
+                      const found = await discoverActiveBackend({
+                        form: {
+                          username,
+                          apiToken,
+                          apiKey,
+                        },
+                        onProgress: (msg) => setProgressMsg(msg),
+                      });
+                      if (found) {
+                        setBackendUrl(found.backendUrl);
+                        setIsOnline(true);
+                        setModelReady(found.modelReady);
+                        setModelName(found.modelName);
+                        setPhase(found.phase);
+                        if (found.accelerator) setAccelerator(found.accelerator);
+                        setMessages((m) => [...m, sysLine(discoverNote(found))]);
+                        setProgressMsg(
+                          found.modelReady
+                            ? null
+                            : "backend up; model still loading…"
+                        );
+                      } else {
+                        setProgressMsg(null);
+                        setMessages((m) => [
+                          ...m,
+                          sysLine(
+                            "no active backend found — open settings to launch Kaggle"
+                          ),
+                        ]);
+                      }
+                    } catch (e) {
+                      setProgressMsg(null);
+                      setMessages((m) => [
+                        ...m,
+                        sysLine(
+                          `discover failed · ${e instanceof Error ? e.message : String(e)}`
+                        ),
+                      ]);
+                    }
+                    setAppStage("terminal");
+                  })();
+                },
               },
               {
                 id: "new",
