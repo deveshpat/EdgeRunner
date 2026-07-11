@@ -5,7 +5,30 @@ export type Message = {
   ts?: number;
 };
 
-export type Accelerator = "cpu" | "gpu";
+/** cpu | generic gpu | dual T4 (preferred) | single T4 | P100 */
+export type Accelerator = "cpu" | "gpu" | "t4x2" | "t4" | "p100";
+
+/** Kaggle machine_shape values (kernel-metadata / SaveKernel). */
+export function kaggleMachineShape(acc: Accelerator): string | undefined {
+  switch (acc) {
+    case "t4x2":
+      // Dual T4 ≈ 2× VRAM/compute vs P100 on free tier when available
+      return "NvidiaTeslaT4x2";
+    case "t4":
+      return "NvidiaTeslaT4";
+    case "p100":
+      return "NvidiaTeslaP100";
+    case "gpu":
+      // Prefer dual T4 when only "gpu" is selected
+      return "NvidiaTeslaT4x2";
+    default:
+      return undefined;
+  }
+}
+
+export function isGpuAccelerator(acc: Accelerator): boolean {
+  return acc !== "cpu";
+}
 
 export type ConnectionMode = "setup" | "local" | "kaggle";
 

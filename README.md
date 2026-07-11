@@ -43,11 +43,52 @@ Compiling `llama-cpp-python` every launch is the main delay. The worker installs
 **prebuilt Linux wheels** from the GitHub release tag [`wheels-v1`](https://github.com/deveshpat/EdgeRunner/releases/tag/wheels-v1)
 (see [wheels/README.md](wheels/README.md)). CI builds CPU wheels; GPU wheels are built once on Kaggle.
 
+## Coding harness (SOTA-inspired)
+
+Casual chat (`hi`) uses a single short LLM turn. Coding tasks (or `/code …`) run the **multi-step harness**:
+
+```
+plan + tests → implement → sandbox execute → reflect on failure → re-implement (≤3 iters)
+```
+
+Design draws on:
+
+| Idea | Source | How EdgeRunner uses it |
+|------|--------|-------------------------|
+| Tests-first / tight edit loop | Aider, SWE-bench agents | Plan emits asserts before implementation |
+| Agent–computer interface (ACI) | SWE-agent | Structured sandbox observations (`status/stdout/stderr`) |
+| Reflect then act | ReAct | Dedicated critic node before rewrite |
+| Code + shell as actions | CodeAct / OpenHands | Workspace files + multi-language runners |
+| Standardized tools | MCP | Builtin tools always; optional external MCP servers |
+
+### Builtin tools (no Node required)
+
+`shell_exec`, `read_file`, `write_file`, `list_dir`, `python_exec`, `node_exec`, `which`
+
+The model may emit:
+
+```xml
+<tool name="which">{"name": "python"}</tool>
+```
+
+### Optional MCP servers
+
+Copy [`backend/mcp_config.example.json`](backend/mcp_config.example.json) → `backend/mcp_config.json`
+(or set `EDGERUNNER_MCP_CONFIG`). Example: filesystem + git via `npx @modelcontextprotocol/server-*`.
+On Kaggle, prefer **builtin** tools if Node/`npx` is unavailable.
+
+### Languages
+
+Python (primary), JavaScript/Node, Bash, Go, Rust (best-effort if toolchain present).
+
 ## Repo layout
 
 ```
 EdgeRunner/
 ├── backend/              # FastAPI + LangGraph agent (local or on Kaggle)
+│   ├── agent.py          # model load + chat/harness routing
+│   ├── harness/          # plan→test→code→sandbox→reflect + MCP tools
+│   └── mcp_config.example.json
 ├── frontend/             # Next.js static UI (GH Pages)
 │   └── public/kernel-bundle.json   # packed worker (generated)
 ├── orchestrator/         # Optional local control plane (dev / offline)
@@ -56,6 +97,7 @@ EdgeRunner/
     ├── pack_kernel_bundle.py   # rebuild kernel-bundle.json
     └── dev.sh
 ```
+
 
 ## Quick start (local backend + UI)
 

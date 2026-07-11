@@ -398,7 +398,7 @@ export type StoredPrefs = {
   username?: string;
   mode?: "local" | "kaggle";
   localBackendUrl?: string;
-  accelerator?: "cpu" | "gpu";
+  accelerator?: import("./types").Accelerator;
   idleTimeout?: number;
   maxLifetime?: number;
   lastBackendUrl?: string;

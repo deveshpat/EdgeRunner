@@ -8,6 +8,7 @@
  */
 
 import type { Accelerator } from "./types";
+import { isGpuAccelerator, kaggleMachineShape } from "./types";
 import {
   STABLE_KERNEL_TITLE,
   kernelSlug,
@@ -121,13 +122,15 @@ export async function saveKernel(
     title: string;
     source: string;
     enableGpu: boolean;
+    /** Kaggle machine_shape, e.g. NvidiaTeslaT4x2 (dual T4). */
+    machineShape?: string;
     sessionTimeoutSeconds: number;
     /** Attach previous run output (same notebook) so models/cache persist. */
     kernelDataSources?: string[];
   },
   signal?: AbortSignal
 ): Promise<{ ref?: string; url?: string; error?: string; kernelId?: number }> {
-  const body = {
+  const body: Record<string, unknown> = {
     slug: opts.slug,
     newTitle: opts.title,
     text: opts.source,
@@ -145,6 +148,10 @@ export async function saveKernel(
     modelDataSources: [] as string[],
     categoryIds: [] as string[],
   };
+  // Prefer dual T4 when set — Kaggle docs: machine_shape on kernel metadata / SaveKernel
+  if (opts.enableGpu && opts.machineShape) {
+    body.machineShape = opts.machineShape;
+  }
   return kagglePost(
     "/kernels.KernelsApiService/SaveKernel",
     auth,
@@ -386,20 +393,74 @@ export async function launchKaggleSession(
     // Mounting multi‑GB GGUF outputs makes Kaggle session start very slow.
     // Models still land under /kaggle/working for this run; next run re-downloads
     // a small default GGUF quickly (or set EDGERUNNER_KERNEL_CACHE=1 later).
-    const push = await saveKernel(
-      auth,
-      {
-        slug: kernelRef,
-        title: STABLE_KERNEL_TITLE,
-        source,
-        enableGpu: accelerator === "gpu",
-        sessionTimeoutSeconds: maxLifetime,
-        kernelDataSources: [],
-      },
-      signal
-    );
-    if (push.error) {
-      throw new Error(String(push.error));
+    // Prefer dual T4 (more VRAM/compute than default P100). If the shape is
+    // rejected, retry with plain enableGpu (Kaggle assigns whatever is free).
+    const shapesToTry: (string | undefined)[] = isGpuAccelerator(accelerator)
+      ? [
+          kaggleMachineShape(accelerator),
+          // Fallbacks if dual T4 name differs / unavailable
+          accelerator === "t4x2" || accelerator === "gpu"
+            ? "NvidiaTeslaT4"
+            : undefined,
+          undefined,
+        ]
+      : [undefined];
+
+    let push: { ref?: string; url?: string; error?: string; kernelId?: number } | null =
+      null;
+    let lastPushErr: Error | null = null;
+    const tried = new Set<string>();
+    for (const shape of shapesToTry) {
+      const key = shape || "__default__";
+      if (tried.has(key)) continue;
+      tried.add(key);
+      try {
+        push = await saveKernel(
+          auth,
+          {
+            slug: kernelRef,
+            title: STABLE_KERNEL_TITLE,
+            source,
+            enableGpu: isGpuAccelerator(accelerator),
+            machineShape: shape,
+            sessionTimeoutSeconds: maxLifetime,
+            kernelDataSources: [],
+          },
+          signal
+        );
+        if (push.error) {
+          lastPushErr = new Error(String(push.error));
+          // Invalid shape → try next; real quota errors fall through
+          const em = String(push.error).toLowerCase();
+          if (
+            em.includes("machine") ||
+            em.includes("shape") ||
+            em.includes("accelerator") ||
+            em.includes("invalid")
+          ) {
+            continue;
+          }
+          throw lastPushErr;
+        }
+        lastPushErr = null;
+        break;
+      } catch (e) {
+        lastPushErr = e instanceof Error ? e : new Error(String(e));
+        const em = lastPushErr.message.toLowerCase();
+        if (
+          isGpuAccelerator(accelerator) &&
+          (em.includes("machine") ||
+            em.includes("shape") ||
+            em.includes("invalid") ||
+            em.includes("accelerator"))
+        ) {
+          continue;
+        }
+        throw lastPushErr;
+      }
+    }
+    if (!push || push.error) {
+      throw lastPushErr || new Error(String(push?.error || "Kernel push failed"));
     }
 
     onProgress?.({
@@ -510,7 +571,7 @@ export async function launchKaggleSession(
     return await tryOnce(requested);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (requested === "gpu" && fallbackCpu && isGpuQuotaError(msg)) {
+    if (isGpuAccelerator(requested) && fallbackCpu && isGpuQuotaError(msg)) {
       onProgress?.({
         state: "retrying_cpu",
         sessionId: "",
@@ -522,7 +583,7 @@ export async function launchKaggleSession(
       return await tryOnce("cpu");
     }
     // Also fall back on any GPU push failure if fallback enabled
-    if (requested === "gpu" && fallbackCpu) {
+    if (isGpuAccelerator(requested) && fallbackCpu) {
       onProgress?.({
         state: "retrying_cpu",
         sessionId: "",

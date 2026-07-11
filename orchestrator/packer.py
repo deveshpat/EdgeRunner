@@ -106,7 +106,30 @@ def write_kernel_bundle(
     slug = slug.lower().replace("_", "-")
     title = "EdgeRunner"
 
-    enable_gpu = accelerator.lower() in ("gpu", "nvidia", "t4", "p100", "true", "1")
+    acc = accelerator.lower().strip()
+    enable_gpu = acc in (
+        "gpu",
+        "nvidia",
+        "t4",
+        "t4x2",
+        "p100",
+        "true",
+        "1",
+        "nvidiateslat4",
+        "nvidiateslat4x2",
+        "nvidiateslap100",
+    )
+    # Prefer dual T4 for "gpu" (more RAM/compute than free-tier P100 when available)
+    machine_shape_map = {
+        "t4x2": "NvidiaTeslaT4x2",
+        "gpu": "NvidiaTeslaT4x2",
+        "t4": "NvidiaTeslaT4",
+        "p100": "NvidiaTeslaP100",
+        "nvidiateslat4x2": "NvidiaTeslaT4x2",
+        "nvidiateslat4": "NvidiaTeslaT4",
+        "nvidiateslap100": "NvidiaTeslaP100",
+    }
+    machine_shape = machine_shape_map.get(acc) if enable_gpu else None
 
     worker_src = render_worker(
         session_id=session_id,
@@ -135,6 +158,8 @@ def write_kernel_bundle(
         "model_sources": [],
         "keywords": [],
     }
+    if machine_shape:
+        metadata["machine_shape"] = machine_shape
 
     (out_dir / "kernel-metadata.json").write_text(
         json.dumps(metadata, indent=2), encoding="utf-8"

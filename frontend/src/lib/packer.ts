@@ -41,7 +41,11 @@ export function renderWorkerSource(opts: {
   // Quoted + bare placeholders (matches orchestrator/packer.py)
   const pairs: [string, string][] = [
     ["__SESSION_ID__", sessionId],
-    ["__ACCELERATOR__", accelerator],
+    // Worker only needs cpu vs gpu for wheel selection; map shapes → gpu
+    [
+      "__ACCELERATOR__",
+      accelerator === "cpu" ? "cpu" : "gpu",
+    ],
     ["__IDLE_TIMEOUT__", String(idleTimeout)],
     ["__MAX_LIFETIME__", String(maxLifetime)],
     ["__STARTUP_GRACE__", String(startupGrace)],

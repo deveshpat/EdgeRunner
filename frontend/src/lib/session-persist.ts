@@ -11,7 +11,7 @@ export type LiveSession = {
   backendUrl: string;
   phase: "kaggle" | "local";
   kernelRef?: string;
-  accelerator?: "cpu" | "gpu";
+  accelerator?: import("./types").Accelerator;
   savedAt: number;
 };
 

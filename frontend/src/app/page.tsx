@@ -114,7 +114,8 @@ export default function EdgeRunnerUI() {
   const [apiKey, setApiKey] = useState("");
   const [hasStoredCreds, setHasStoredCreds] = useState(false);
   const [localUrl, setLocalUrl] = useState("http://127.0.0.1:8000");
-  const [accelerator, setAccelerator] = useState<Accelerator>("gpu");
+  // Prefer dual T4 (more VRAM than default P100 when Kaggle allows it)
+  const [accelerator, setAccelerator] = useState<Accelerator>("t4x2");
   const [idleTimeout, setIdleTimeout] = useState(90);
   const [maxLifetime, setMaxLifetime] = useState(3600);
   const [fallbackCpu, setFallbackCpu] = useState(true);
@@ -1590,22 +1591,33 @@ export default function EdgeRunnerUI() {
                     className="er-input mt-1 w-full px-2 py-2"
                   />
                 </label>
-                <div className="flex gap-2">
-                  {(["gpu", "cpu"] as const).map((a) => (
+                <div className="grid grid-cols-2 gap-2">
+                  {(
+                    [
+                      { id: "t4x2" as const, label: "T4×2 (rec)" },
+                      { id: "t4" as const, label: "T4" },
+                      { id: "p100" as const, label: "P100" },
+                      { id: "cpu" as const, label: "CPU" },
+                    ] as const
+                  ).map(({ id, label }) => (
                     <button
-                      key={a}
+                      key={id}
                       type="button"
-                      onClick={() => setAccelerator(a)}
-                      className={`flex-1 py-1.5 er-btn uppercase tracking-wider ${
-                        accelerator === a
+                      onClick={() => setAccelerator(id)}
+                      className={`py-1.5 er-btn uppercase tracking-wider text-[10px] ${
+                        accelerator === id
                           ? "border-[var(--warn)] text-[var(--warn)] shadow-[0_0_10px_rgba(249,240,2,0.3)]"
                           : ""
                       }`}
                     >
-                      {a}
+                      {label}
                     </button>
                   ))}
                 </div>
+                <p className="text-[10px] text-[var(--muted)] leading-snug">
+                  T4×2 ≈ 2× VRAM vs P100 when Kaggle has capacity; falls back if
+                  shape unavailable.
+                </p>
                 <label className="flex items-center gap-2 text-[var(--muted)]">
                   <input
                     type="checkbox"
