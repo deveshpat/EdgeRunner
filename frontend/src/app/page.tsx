@@ -2312,7 +2312,8 @@ export default function EdgeRunnerUI() {
                       ))}
                     </div>
                     <p className="er-section-hint">
-                      T4 preferred over P100. Dual-T4 tried first when available.
+                      T4 uses official machineShape=NvidiaTeslaT4. Leftover P100
+                      sessions are not reused — Launch relaunches on T4.
                     </p>
                     <label className="er-field-row">
                       <input

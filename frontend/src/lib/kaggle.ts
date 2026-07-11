@@ -11,8 +11,11 @@ import type { Accelerator } from "./types";
 import {
   acceleratorFromLogs,
   acceleratorFromMachineShape,
+  acceleratorMatchesRequest,
   isGpuAccelerator,
   kaggleMachineShapesToTry,
+  wantsT4,
+  KAGGLE_SHAPE_T4,
 } from "./types";
 import {
   STABLE_KERNEL_SLUG,
@@ -134,9 +137,9 @@ export async function saveKernel(
     source: string;
     enableGpu: boolean;
     /**
-     * Kaggle machineShape (wire camelCase). Official: NvidiaTeslaT4,
-     * NvidiaTeslaP100, Tpu1VmV38. When set, this is authoritative —
-     * bare enableGpu alone often defaults to P100.
+     * Kaggle machineShape (wire camelCase). Official only:
+     * NvidiaTeslaT4 | NvidiaTeslaP100 | Tpu1VmV38.
+     * This field is authoritative; enableGpu is deprecated.
      */
     machineShape?: string;
     sessionTimeoutSeconds: number;
@@ -147,9 +150,12 @@ export async function saveKernel(
 ): Promise<{ ref?: string; url?: string; error?: string; kernelId?: number }> {
   const shape = (opts.machineShape || "").trim();
   const isTpu = /^Tpu/i.test(shape);
-  // enableGpu/enableTpu are deprecated in favor of machineShape, but still set
-  // for older API paths. Never send enableGpu:true without a shape when caller
-  // wanted a specific GPU — that path is how P100 gets selected silently.
+  const isGpuShape = /^NvidiaTesla/i.test(shape);
+
+  // Kaggle docs: enable_gpu / enable_tpu are DEPRECATED — use machineShape.
+  // Sending enableGpu:true without a valid machineShape defaults to P100.
+  // When we have an official shape, always send it; set enableGpu true only
+  // for Nvidia GPU shapes so older API paths still enable the accelerator.
   const body: Record<string, unknown> = {
     slug: opts.slug,
     newTitle: opts.title,
@@ -157,20 +163,26 @@ export async function saveKernel(
     language: "python",
     kernelType: "script",
     isPrivate: true,
-    enableGpu: Boolean(opts.enableGpu && !isTpu),
-    enableTpu: isTpu,
     enableInternet: true,
     sessionTimeoutSeconds: opts.sessionTimeoutSeconds,
     datasetDataSources: [] as string[],
-    // Self-source: mounts prior version's /kaggle/working under /kaggle/input/
     kernelDataSources: opts.kernelDataSources ?? [],
     competitionDataSources: [] as string[],
     modelDataSources: [] as string[],
     categoryIds: [] as string[],
   };
+
   if (shape) {
+    // Authoritative — always set when we know the target hardware
     body.machineShape = shape;
+    body.enableGpu = isGpuShape;
+    body.enableTpu = isTpu;
+  } else {
+    // CPU only — never bare enableGpu:true (that is the P100 trap)
+    body.enableGpu = false;
+    body.enableTpu = false;
   }
+
   return kagglePost(
     "/kernels.KernelsApiService/SaveKernel",
     auth,
@@ -221,6 +233,10 @@ export function isKernelSessionActive(
 /**
  * If the stable EdgeRunner notebook is already RUNNING on Kaggle, scrape the
  * tunnel URL from logs and probe /health. Returns null if nothing usable.
+ *
+ * When `requireAccelerator` is set (e.g. t4), sessions on the wrong GPU
+ * (e.g. leftover P100) are rejected so the caller can relaunch with the
+ * correct machineShape.
  */
 export async function attachRunningKaggleSession(
   auth: KaggleAuth,
@@ -230,6 +246,8 @@ export async function attachRunningKaggleSession(
     /** Prefer this URL first (from localStorage / other tab). */
     hintUrl?: string;
     maxWaitMs?: number;
+    /** If set, refuse to attach when logs show a different GPU class. */
+    requireAccelerator?: Accelerator;
   }
 ): Promise<LaunchResult | null> {
   const username = auth.username.trim();
@@ -238,6 +256,36 @@ export async function attachRunningKaggleSession(
   const kernelRef = `${username}/${slug}`;
   const signal = opts?.signal;
   const maxWaitMs = opts?.maxWaitMs ?? 45_000;
+  const require = opts?.requireAccelerator;
+
+  const accept = (
+    result: LaunchResult,
+    logs: string
+  ): LaunchResult | null => {
+    const fromLogs = acceleratorFromLogs(logs) || result.accelerator;
+    const merged = { ...result, accelerator: fromLogs };
+    if (
+      require &&
+      wantsT4(require) &&
+      !acceleratorMatchesRequest(require, fromLogs)
+    ) {
+      opts?.onProgress?.(
+        `Running session is ${fromLogs || "unknown GPU"} but you requested T4 — will relaunch`
+      );
+      return null;
+    }
+    if (
+      require === "p100" &&
+      fromLogs &&
+      fromLogs !== "p100"
+    ) {
+      opts?.onProgress?.(
+        `Running session is ${fromLogs} but you requested P100 — will relaunch`
+      );
+      return null;
+    }
+    return merged;
+  };
 
   // 1) Fast path: probe known URL from another tab / prefs
   if (opts?.hintUrl) {
@@ -247,14 +295,51 @@ export async function attachRunningKaggleSession(
       timeoutMs: 6000,
     });
     if (probe.ok) {
-      return {
-        sessionId: newSessionId(),
-        kernelRef,
-        accelerator: "gpu",
-        publicUrl: opts.hintUrl.replace(/\/$/, ""),
-        logsTail: "",
-        reused: true,
-      };
+      // Try to learn GPU from recent logs while kernel is up
+      let logs = "";
+      try {
+        logs = await kernelLogs(auth, username, slug, {
+          maxMs: 6_000,
+          signal,
+        });
+      } catch {
+        /* ignore */
+      }
+      const fromLogs = acceleratorFromLogs(logs);
+      // If user wants T4 and we can't confirm GPU from logs, still reject
+      // when require is T4 and logs clearly say P100; if no logs, probe only
+      // attaches when require is unset or logs match.
+      if (require && wantsT4(require)) {
+        if (fromLogs === "p100") {
+          opts.onProgress?.(
+            "Known URL is a P100 session — not reusing (need T4)"
+          );
+          // fall through to status check / relaunch
+        } else if (fromLogs === "t4" || fromLogs === "t4x2") {
+          return {
+            sessionId: newSessionId(),
+            kernelRef,
+            accelerator: fromLogs,
+            publicUrl: opts.hintUrl.replace(/\/$/, ""),
+            logsTail: logs,
+            reused: true,
+          };
+        } else {
+          // Unknown GPU on live URL — for T4 request, scrape more logs below
+          opts.onProgress?.(
+            "Live URL OK but GPU type unclear — checking logs…"
+          );
+        }
+      } else {
+        return {
+          sessionId: newSessionId(),
+          kernelRef,
+          accelerator: fromLogs || "gpu",
+          publicUrl: opts.hintUrl.replace(/\/$/, ""),
+          logsTail: logs,
+          reused: true,
+        };
+      }
     }
   }
 
@@ -284,7 +369,6 @@ export async function attachRunningKaggleSession(
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new Error("Launch aborted");
     try {
-      // Re-check status — COMPLETE means we lost it
       const st = await kernelStatus(auth, username, slug, signal);
       if (!isKernelSessionActive(st.status)) {
         return null;
@@ -301,7 +385,7 @@ export async function attachRunningKaggleSession(
           const probe = await probeBackend(url, { retries: 4, timeoutMs: 8000 });
           if (probe.ok) {
             const fromLogs = acceleratorFromLogs(logsTail);
-            return {
+            const candidate: LaunchResult = {
               sessionId: newSessionId(),
               kernelRef,
               accelerator: fromLogs || "gpu",
@@ -309,6 +393,10 @@ export async function attachRunningKaggleSession(
               logsTail,
               reused: true,
             };
+            const ok = accept(candidate, logsTail);
+            if (ok) return ok;
+            // Wrong GPU — stop waiting; caller will relaunch
+            return null;
           }
         }
       }
@@ -519,10 +607,15 @@ export async function launchKaggleSession(
     // Dynamic to avoid any circular init with session-persist helpers
     const sp = await import("./session-persist");
     const hint = sp.loadLiveSession()?.backendUrl;
+    // Never reuse a P100 worker when the user selected T4 (common leftover
+    // from older launches / bare enableGpu defaults).
+    const requireAcc =
+      wantsT4(requested) || requested === "p100" ? requested : undefined;
     const attached = await attachRunningKaggleSession(auth, {
       signal,
       hintUrl: hint,
-      maxWaitMs: 60_000,
+      maxWaitMs: 45_000,
+      requireAccelerator: requireAcc,
       onProgress: (message) =>
         onProgress?.({
           state: "provisioning",
@@ -539,13 +632,13 @@ export async function launchKaggleSession(
         kernelRef: attached.kernelRef,
         accelerator: attached.accelerator,
         publicUrl: attached.publicUrl,
-        message: "Reused existing Kaggle session (no new launch)",
+        message: `Reused existing session (${attached.accelerator})`,
       });
       return attached;
     }
 
-    // If still RUNNING but tunnel not recovered, do NOT SaveKernel (would restart).
-    // Give one more wait window instead.
+    // Kernel may still be RUNNING on the *wrong* GPU — SaveKernel with the
+    // correct machineShape will push a new version and start a new session.
     try {
       const st = await kernelStatus(
         auth,
@@ -554,42 +647,55 @@ export async function launchKaggleSession(
         signal
       );
       if (isKernelSessionActive(st.status)) {
+        // One more attach attempt only if we don't require a specific GPU class
+        if (!requireAcc) {
+          onProgress?.({
+            state: "provisioning",
+            sessionId: sessionIdEarly,
+            kernelRef: kernelRefEarly,
+            accelerator: requested,
+            message:
+              "Kernel still running — waiting longer for tunnel (not re-launching)…",
+          });
+          const retry = await attachRunningKaggleSession(auth, {
+            signal,
+            hintUrl: hint,
+            maxWaitMs: 90_000,
+            onProgress: (message) =>
+              onProgress?.({
+                state: "provisioning",
+                sessionId: sessionIdEarly,
+                kernelRef: kernelRefEarly,
+                accelerator: requested,
+                message,
+              }),
+          });
+          if (retry) {
+            onProgress?.({
+              state: "online",
+              sessionId: retry.sessionId,
+              kernelRef: retry.kernelRef,
+              accelerator: retry.accelerator,
+              publicUrl: retry.publicUrl,
+              message: "Reused existing Kaggle session",
+            });
+            return retry;
+          }
+          throw new Error(
+            "EdgeRunner kernel is RUNNING on Kaggle but the tunnel URL could not be recovered from logs. " +
+              "Open the notebook on kaggle.com or wait and try Launch again — we will not start a second session."
+          );
+        }
         onProgress?.({
-          state: "provisioning",
+          state: "pushing",
           sessionId: sessionIdEarly,
           kernelRef: kernelRefEarly,
           accelerator: requested,
-          message:
-            "Kernel still running — waiting longer for tunnel (not re-launching)…",
+          message: wantsT4(requested)
+            ? `Active session is not T4 — relaunching with ${KAGGLE_SHAPE_T4}…`
+            : `Relaunching with requested accelerator (${requested})…`,
         });
-        const retry = await attachRunningKaggleSession(auth, {
-          signal,
-          hintUrl: hint,
-          maxWaitMs: 90_000,
-          onProgress: (message) =>
-            onProgress?.({
-              state: "provisioning",
-              sessionId: sessionIdEarly,
-              kernelRef: kernelRefEarly,
-              accelerator: requested,
-              message,
-            }),
-        });
-        if (retry) {
-          onProgress?.({
-            state: "online",
-            sessionId: retry.sessionId,
-            kernelRef: retry.kernelRef,
-            accelerator: retry.accelerator,
-            publicUrl: retry.publicUrl,
-            message: "Reused existing Kaggle session",
-          });
-          return retry;
-        }
-        throw new Error(
-          "EdgeRunner kernel is RUNNING on Kaggle but the tunnel URL could not be recovered from logs. " +
-            "Open the notebook on kaggle.com or wait and try Launch again — we will not start a second session."
-        );
+        // Fall through to SaveKernel with correct machineShape
       }
     } catch (e) {
       if (e instanceof Error && e.message.includes("will not start a second")) {
@@ -690,8 +796,9 @@ export async function launchKaggleSession(
               slug: kernelRef,
               title: STABLE_KERNEL_TITLE,
               source,
+              // enableGpu derived from machineShape inside saveKernel
               enableGpu: true,
-              machineShape: shape,
+              machineShape: shape, // official enum only (e.g. NvidiaTeslaT4)
               sessionTimeoutSeconds: maxLifetime,
               kernelDataSources: [],
             },
@@ -812,8 +919,24 @@ export async function launchKaggleSession(
           // Refine GPU type from nvidia-smi / worker lines when available
           const fromLogs = acceleratorFromLogs(logsTail);
           if (fromLogs) effectiveAcc = fromLogs;
+          // Hard fail if we asked for T4 but Kaggle actually gave P100
+          if (
+            wantsT4(accelerator) &&
+            fromLogs === "p100"
+          ) {
+            throw new Error(
+              `Kaggle assigned P100 even though machineShape=${acceptedShape || KAGGLE_SHAPE_T4} was requested. ` +
+                "T4 may be unavailable on your account right now — pick P100 explicitly or retry later. " +
+                "We will not pretend this is a T4 session."
+            );
+          }
           const url = extractTunnelUrl(logsTail) || extractTunnelUrl(chunk);
           if (url) {
+            // Prefer log-detected GPU; if still unknown, trust requested shape
+            if (!fromLogs && acceptedShape) {
+              effectiveAcc =
+                acceleratorFromMachineShape(acceptedShape) || accelerator;
+            }
             onProgress?.({
               state: "online",
               sessionId,
@@ -823,7 +946,7 @@ export async function launchKaggleSession(
               kernelStatus: lastStatus,
               logsTail,
               message: acceptedShape
-                ? `Tunnel ready · ${acceptedShape}`
+                ? `Tunnel ready · ${acceptedShape}${fromLogs ? ` · nvidia-smi=${fromLogs}` : ""}`
                 : "Tunnel ready",
             });
             return {

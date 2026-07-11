@@ -127,10 +127,9 @@ def write_kernel_bundle(
         "nvidiateslat4x2",
         "nvidiateslap100",
     )
-    # Official SaveKernel / kernel-metadata machine_shape values:
-    #   NvidiaTeslaT4 | NvidiaTeslaP100 | Tpu1VmV38
-    # Dual T4 is not in the public API enum; use single T4 for t4x2/gpu
-    # so we never land on bare enable_gpu → P100 default.
+    # Official SaveKernel machine_shape only: NvidiaTeslaT4 | NvidiaTeslaP100
+    # (Dual T4 is not in the public enum.) Never omit shape with enable_gpu —
+    # that defaults to P100.
     machine_shape_map = {
         "t4x2": "NvidiaTeslaT4",
         "gpu": "NvidiaTeslaT4",

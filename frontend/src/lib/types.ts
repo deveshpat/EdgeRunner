@@ -5,49 +5,53 @@ export type Message = {
   ts?: number;
 };
 
-/** cpu | generic gpu | dual T4 (preferred) | single T4 | P100 */
+/** cpu | generic gpu | dual T4 (maps to T4 API) | single T4 | P100 */
 export type Accelerator = "cpu" | "gpu" | "t4x2" | "t4" | "p100";
 
 /**
- * Official SaveKernel `machineShape` values (kagglesdk ApiSaveKernelRequest):
+ * Official SaveKernel machineShape values (kagglesdk ApiSaveKernelRequest):
  *   NvidiaTeslaT4 | NvidiaTeslaP100 | Tpu1VmV38
  *
- * Dual T4 is NOT in the public enum. Bare enableGpu without machineShape
- * defaults to P100 on many accounts — never use that as a silent fallback
- * when the user asked for T4.
+ * Undocumented dual-T4 names are ignored or rejected → Kaggle falls back to
+ * enableGpu defaults (P100). Only send official enums.
  */
+export const KAGGLE_SHAPE_T4 = "NvidiaTeslaT4";
+export const KAGGLE_SHAPE_P100 = "NvidiaTeslaP100";
+
+/** Primary official shape for an accelerator choice. */
 export function kaggleMachineShape(acc: Accelerator): string | undefined {
   switch (acc) {
     case "t4x2":
     case "t4":
     case "gpu":
-      return "NvidiaTeslaT4";
+      return KAGGLE_SHAPE_T4;
     case "p100":
-      return "NvidiaTeslaP100";
+      return KAGGLE_SHAPE_P100;
     default:
       return undefined;
   }
 }
 
 /**
- * Shapes to try in order for SaveKernel.
- * Do NOT append a "no shape" attempt for T4 selections — that becomes P100.
+ * Shapes to try in order. T4 requests never include P100 and never omit shape
+ * (omitting shape + enableGpu → P100 on most accounts).
  */
 export function kaggleMachineShapesToTry(acc: Accelerator): string[] {
   switch (acc) {
     case "t4x2":
-      // Prefer dual if Kaggle accepts undocumented names; else official single T4
-      return ["NvidiaTeslaT4x2", "NvidiaTeslaT4X2", "NvidiaTeslaT4"];
     case "t4":
-      return ["NvidiaTeslaT4"];
-    case "p100":
-      return ["NvidiaTeslaP100"];
     case "gpu":
-      // Generic "gpu": T4 first (not P100)
-      return ["NvidiaTeslaT4x2", "NvidiaTeslaT4", "NvidiaTeslaP100"];
+      return [KAGGLE_SHAPE_T4];
+    case "p100":
+      return [KAGGLE_SHAPE_P100];
     default:
       return [];
   }
+}
+
+/** True when user asked for any T4-class GPU (not P100, not CPU). */
+export function wantsT4(acc: Accelerator): boolean {
+  return acc === "t4" || acc === "t4x2" || acc === "gpu";
 }
 
 export function acceleratorFromMachineShape(
@@ -67,9 +71,25 @@ export function acceleratorFromLogs(logs: string): Accelerator | undefined {
   if (/Tesla\s*T4\s*x\s*2|T4\s*x2|2\s*x\s*Tesla\s*T4|NVIDIA.*T4.*T4/i.test(t)) {
     return "t4x2";
   }
-  if (/Tesla\s*T4|NVIDIA.*T4|GPU.*T4/i.test(t)) return "t4";
-  if (/Tesla\s*P100|NVIDIA.*P100|GPU.*P100/i.test(t)) return "p100";
+  if (/Tesla\s*T4|NVIDIA\s*T4|GPU.*T4|NvidiaTeslaT4/i.test(t)) return "t4";
+  if (/Tesla\s*P100|NVIDIA\s*P100|GPU.*P100|NvidiaTeslaP100/i.test(t))
+    return "p100";
   return undefined;
+}
+
+/** Whether an attached session's GPU matches what the user selected. */
+export function acceleratorMatchesRequest(
+  requested: Accelerator,
+  actual: Accelerator | undefined
+): boolean {
+  if (requested === "cpu") return actual === "cpu" || actual === undefined;
+  if (requested === "p100") return actual === "p100";
+  // t4 / t4x2 / gpu → accept any T4-class, reject P100
+  if (wantsT4(requested)) {
+    if (!actual) return false; // unknown — don't assume OK when user wants T4
+    return actual === "t4" || actual === "t4x2" || actual === "gpu";
+  }
+  return true;
 }
 
 export function isGpuAccelerator(acc: Accelerator): boolean {
