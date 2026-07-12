@@ -24,7 +24,7 @@ export function LogoMark({ className = "" }: { className?: string }) {
 
 /** Boxed init logo — OpenCode / Claude Code style home mark */
 export function LogoBox({
-  subtitle = "coding agent harness",
+  subtitle = "☤ hermes-powered coding agent",
   pulse = false,
   tag,
 }: {

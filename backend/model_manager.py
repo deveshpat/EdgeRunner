@@ -307,7 +307,19 @@ def fetch_trending_models(hw_total_gb, limit=12):
             capability = 100 - (i * 4)
 
             headroom = hw_total_gb - required_ram
-            safe_ctx = 8192 if headroom > 6 else (4096 if headroom > 3 else 2048)
+            # Agent loops (Hermes) need real context: big system prompt +
+            # tool schemas + tool results. Scale n_ctx with headroom — KV
+            # cache for a 9B GQA model is roughly 150 KB/token.
+            if headroom > 18:
+                safe_ctx = 32768
+            elif headroom > 10:
+                safe_ctx = 16384
+            elif headroom > 6:
+                safe_ctx = 8192
+            elif headroom > 3:
+                safe_ctx = 4096
+            else:
+                safe_ctx = 2048
 
             candidate_models.append(
                 {

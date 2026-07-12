@@ -2171,7 +2171,7 @@ export default function EdgeRunnerUI() {
         {messages.length === 0 && (
           <div className="er-empty space-y-2">
             <p className="text-[var(--fg-bright)]">
-              <span className="er-prompt-char">›</span> EdgeRunner agent ready
+              <span className="er-prompt-char">❯</span> EdgeRunner ☤ agent ready
             </p>
             <p>
               agent=<span className="cmd">{uiPrefs.agentMode}</span> ·{" "}
@@ -2200,7 +2200,7 @@ export default function EdgeRunnerUI() {
           if (m.role === "user") {
             return (
               <div key={i} className="er-line">
-                <span className="er-gutter user">›</span>
+                <span className="er-gutter user">❯</span>
                 <div className="er-body user">
                   {uiPrefs.showTimestamps && m.ts ? (
                     <span className="text-[10px] text-[var(--dim)] mr-2">
@@ -2214,7 +2214,7 @@ export default function EdgeRunnerUI() {
           }
           return (
             <div key={i} className="er-line">
-              <span className="er-gutter agent">‹</span>
+              <span className="er-gutter agent">┊</span>
               <div className="er-body agent">
                 {uiPrefs.showThinking &&
                   m.thoughts &&
@@ -2280,7 +2280,7 @@ export default function EdgeRunnerUI() {
         <div className="relative max-w-4xl mx-auto">
           <div className="er-prompt-row">
           <span className="er-prompt-char" title={`agent: ${uiPrefs.agentMode}`}>
-            {uiPrefs.agentMode === "plan" ? "?" : "›"}
+            {uiPrefs.agentMode === "plan" ? "?" : "❯"}
           </span>
           <div className="flex-1 relative min-w-0">
             {cmdSuggest.length > 0 && (
@@ -2341,7 +2341,7 @@ export default function EdgeRunnerUI() {
               placeholder={
                 backendUrl
                   ? modelReady
-                    ? `/${uiPrefs.agentMode} · /help · type / for commands`
+                    ? "type your message or /help for commands"
                     : "backend up — model still loading…"
                   : "launch a session first…"
               }

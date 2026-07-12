@@ -233,23 +233,34 @@ def _sse_chunks(model: str, content: str, tool_calls: list):
     yield "data: [DONE]\n\n"
 
 
-@router.get("/v1/models")
-async def v1_models():
+def _model_entry() -> dict:
     from er_agent import get_model_meta
 
     meta = get_model_meta()
     name = meta.get("name") or "edgerunner-local"
+    n_ctx = int(meta.get("n_ctx") or 8192)
     return {
-        "object": "list",
-        "data": [
-            {
-                "id": name,
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": "edgerunner",
-            }
-        ],
+        "id": name,
+        "object": "model",
+        "created": int(time.time()),
+        "owned_by": "edgerunner",
+        # Context metadata — Hermes's local-server probe reads these
+        # (agent/model_metadata.py _query_local_context_length_uncached)
+        "context_length": n_ctx,
+        "max_model_len": n_ctx,
+        "max_completion_tokens": MAX_COMPLETION_TOKENS,
     }
+
+
+@router.get("/v1/models")
+async def v1_models():
+    return {"object": "list", "data": [_model_entry()]}
+
+
+@router.get("/v1/models/{model_id:path}")
+async def v1_model_detail(model_id: str):
+    _ = model_id
+    return _model_entry()
 
 
 @router.post("/v1/chat/completions")

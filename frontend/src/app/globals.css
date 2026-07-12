@@ -2,42 +2,46 @@
 
 /* ═══════════════════════════════════════════════════════════════════════════
    EdgeRunner — CLI harness UI
-   High-contrast terminal palette (OpenCode / Claude Code / Grok Build vibe)
+   Hermes Agent palette (ported from hermes-agent ui-tui/src/theme.ts
+   DARK_THEME — gold/amber on dark navy, MIT, Nous Research)
    ═══════════════════════════════════════════════════════════════════════════ */
 
 :root {
-  /* Surfaces — readable dark terminal, not muddy purple */
-  --bg: #0c0e12;
-  --bg-panel: #12151c;
-  --bg-elevated: #1a1f2a;
-  --bg-input: #0f1218;
-  --bg-code: #080a0e;
-  --border: #2a3140;
-  --border-soft: #1e2430;
-  --border-focus: #3d9eff;
+  /* Surfaces — Hermes dark navy (statusBg / completionBg family) */
+  --bg: #101020;
+  --bg-panel: #1a1a2e;
+  --bg-elevated: #232340;
+  --bg-input: #15152a;
+  --bg-code: #0c0c18;
+  --border: #3a3a55;
+  --border-soft: #26263c;
+  --border-focus: #ffd700;
 
-  /* Text */
-  --fg: #e8ecf2;
+  /* Text — cornsilk on navy (Hermes text / muted / label) */
+  --fg: #fff8dc;
   --fg-bright: #ffffff;
-  --muted: #9aa3b2;
-  --dim: #6b7380;
+  --muted: #cc9b1f;
+  --dim: #8a7a45;
 
-  /* Accents — used sparingly for hierarchy */
-  --accent: #3d9eff; /* primary action / links */
-  --accent-dim: #1a4a7a;
-  --accent-glow: rgba(61, 158, 255, 0.35);
-  --cyan: #2ee6a6; /* success / agent reply */
-  --cyan-dim: #0d5c42;
-  --cyan-glow: rgba(46, 230, 166, 0.3);
-  --warn: #f0c14b; /* prompt / attention */
-  --warn-dim: #7a5f12;
-  --danger: #ff5c7a;
-  --success: #2ee6a6;
-  --violet: #a78bfa;
-  --prompt: #f0c14b;
-  --user: #e8ecf2;
-  --agent: #2ee6a6;
-  --sys: #6b7380;
+  /* Accents — Hermes gold / amber / bronze */
+  --accent: #ffd700; /* primary — Hermes gold */
+  --accent-dim: #7a5f12;
+  --accent-glow: rgba(255, 215, 0, 0.32);
+  --cyan: #8fbc8f; /* success / statusGood */
+  --cyan-dim: #2d4a2d;
+  --cyan-glow: rgba(143, 188, 143, 0.3);
+  --warn: #ffa726;
+  --warn-dim: #7a5512;
+  --danger: #ef5350;
+  --success: #4caf50;
+  --violet: #ffbf00; /* amber (Hermes accent) */
+  --prompt: #ffd700;
+  --user: #fff8dc;
+  --agent: #fff8dc;
+  --sys: #cc9b1f;
+  --bronze: #cd7f32;
+  --label: #daa520;
+  --shell-dollar: #4dabf7;
 
   --radius: 8px;
   --radius-sm: 4px;
