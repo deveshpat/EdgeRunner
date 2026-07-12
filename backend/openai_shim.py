@@ -156,6 +156,66 @@ def _get_llama():
     return get_raw_llama()
 
 
+def _normalize_native_tool_calls(message: dict) -> tuple[str, list]:
+    """Read llama.cpp's structured tool_calls into OpenAI shape."""
+    content = message.get("content") or ""
+    calls: list[dict] = []
+    for tc in message.get("tool_calls") or []:
+        fn = (tc or {}).get("function") or {}
+        name = fn.get("name")
+        if not name:
+            continue
+        args = fn.get("arguments")
+        if not isinstance(args, str):
+            args = json.dumps(args or {}, ensure_ascii=False)
+        calls.append(
+            {
+                "id": tc.get("id") or f"call_{uuid.uuid4().hex[:24]}",
+                "type": "function",
+                "function": {"name": str(name), "arguments": args},
+            }
+        )
+    return content, calls
+
+
+def _generate_native_tools(
+    messages: list,
+    tools: list,
+    *,
+    max_tokens: int,
+    temperature: float,
+) -> Optional[tuple[str, list]]:
+    """
+    Preferred path: let the GGUF's own chat template format + emit tool
+    calls (Hermes-3, Qwen, etc. ship tool-calling templates). Returns
+    (content, tool_calls) or None to signal "fall back to XML dialect".
+    """
+    llama = _get_llama()
+    with _MODEL_LOCK:
+        try:
+            result = llama.create_chat_completion(
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                max_tokens=max_tokens,
+                temperature=temperature,
+                repeat_penalty=1.15,
+            )
+        except Exception as e:
+            print(f"native tool-calling unavailable ({e}); XML fallback", flush=True)
+            return None
+    message = (result.get("choices") or [{}])[0].get("message", {}) or {}
+    content, calls = _normalize_native_tool_calls(message)
+    # If the template produced neither a tool call nor content, the model
+    # likely emitted XML-in-content — let the XML parser have a turn.
+    if not calls and not content.strip():
+        return None
+    # If content still carries raw <tool_call> XML, parse it out too.
+    if not calls and "<tool_call>" in content:
+        content, calls = parse_tool_calls(content)
+    return content, calls
+
+
 _REP_WINDOW = 600
 _REP_TAIL = 80
 
@@ -336,25 +396,48 @@ async def v1_chat_completions(request: Request):
     top_p = body.get("top_p")
     top_p = float(top_p) if top_p is not None else None
 
-    converted = convert_messages(messages, tools)
     loop = asyncio.get_running_loop()
-    try:
-        raw = await loop.run_in_executor(
-            None,
-            lambda: _generate(
-                converted,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                top_p=top_p,
-            ),
-        )
-    except Exception as e:
-        return JSONResponse(
-            {"error": {"message": f"generation failed: {e}"}},
-            status_code=500,
-        )
 
-    content, tool_calls = parse_tool_calls(raw)
+    # Preferred: native tool calling via the GGUF's own chat template.
+    # Small local models hallucinate tool use when tools are injected as
+    # XML into the prompt; the native template is far more reliable.
+    content: str = ""
+    tool_calls: list = []
+    native_ok = False
+    if tools:
+        try:
+            native = await loop.run_in_executor(
+                None,
+                lambda: _generate_native_tools(
+                    messages, tools, max_tokens=max_tokens, temperature=temperature
+                ),
+            )
+        except Exception as e:
+            print(f"native tool path errored ({e}); XML fallback", flush=True)
+            native = None
+        if native is not None:
+            content, tool_calls = native
+            native_ok = True
+
+    if not native_ok:
+        # XML-dialect fallback (no tools, or native path declined)
+        converted = convert_messages(messages, tools)
+        try:
+            raw = await loop.run_in_executor(
+                None,
+                lambda: _generate(
+                    converted,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                ),
+            )
+        except Exception as e:
+            return JSONResponse(
+                {"error": {"message": f"generation failed: {e}"}},
+                status_code=500,
+            )
+        content, tool_calls = parse_tool_calls(raw)
 
     if stream:
         return StreamingResponse(

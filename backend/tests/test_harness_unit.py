@@ -435,3 +435,42 @@ def test_engine_falls_back_to_native_when_hermes_missing(monkeypatch):
     result = er_agent.run_user_message("hello there", engine="hermes")
     assert called.get("chat") is True
     assert result["response"] == "ok"
+
+
+# ── native tool-calling normalization (shim) ─────────────────────────────────
+
+from openai_shim import _normalize_native_tool_calls
+
+
+def test_native_tool_calls_normalized():
+    msg = {
+        "content": "",
+        "tool_calls": [
+            {"id": "abc", "function": {"name": "write", "arguments": {"path": "a.py"}}}
+        ],
+    }
+    content, calls = _normalize_native_tool_calls(msg)
+    assert content == ""
+    assert calls[0]["function"]["name"] == "write"
+    # arguments must be a JSON string in OpenAI shape
+    assert json.loads(calls[0]["function"]["arguments"]) == {"path": "a.py"}
+    assert calls[0]["id"] == "abc"
+
+
+def test_native_tool_calls_string_args_preserved():
+    msg = {
+        "content": "done",
+        "tool_calls": [
+            {"function": {"name": "run", "arguments": '{"cmd": "ls"}'}}
+        ],
+    }
+    content, calls = _normalize_native_tool_calls(msg)
+    assert content == "done"
+    assert calls[0]["function"]["arguments"] == '{"cmd": "ls"}'
+    assert calls[0]["id"].startswith("call_")
+
+
+def test_native_tool_calls_empty_when_none():
+    content, calls = _normalize_native_tool_calls({"content": "hi"})
+    assert content == "hi"
+    assert calls == []
