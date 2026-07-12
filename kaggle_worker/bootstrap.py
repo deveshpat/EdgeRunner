@@ -573,15 +573,108 @@ def _install_local_llama_wheel(path: Path, env: dict) -> bool:
     return False
 
 
+def _is_gpu_session() -> bool:
+    return str(ACCELERATOR).lower() in ("gpu", "nvidia", "cuda")
+
+
+def _llama_gpu_ok(env: dict | None = None) -> bool:
+    """True when the installed llama_cpp build can offload to CUDA."""
+    e = (env or os.environ).copy()
+    try:
+        r = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import llama_cpp\n"
+                "print(bool(llama_cpp.llama_supports_gpu_offload()))\n",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=e,
+        )
+        return r.returncode == 0 and "True" in (r.stdout or "")
+    except Exception:
+        return False
+
+
+def _stage_gpu_llama(env: dict) -> list[Path]:
+    """
+    Download the Kaggle-built CUDA wheels tarball (edgerunner-wheels-{tag}-gpu.tar.gz)
+    and stage its llama wheel(s). Kaggle-built wheels may carry a bare
+    linux_x86_64 tag — that is fine, they were built on this exact image.
+    """
+    tag = _py_tag()
+    name = f"edgerunner-wheels-{tag}-gpu.tar.gz"
+    assets = _list_release_assets("wheels-v1")
+    by_name = {n: u for n, u in assets}
+    url = by_name.get(name) or f"{_wheels_base()}/{name}"
+
+    dest = WORK / "cache" / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if not (dest.exists() and dest.stat().st_size > 1_000_000):
+        log(f"  downloading GPU wheels bundle {name}…")
+        if not _fetch_url(url, dest, timeout=300):
+            log(f"  no GPU wheels bundle in release ({name}) — will fall back")
+            return []
+
+    extract = WORK / "wheels_gpu_bundle"
+    if extract.exists():
+        import shutil
+
+        shutil.rmtree(extract, ignore_errors=True)
+    extract.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.check_call(["tar", "-xzf", str(dest), "-C", str(extract)])
+    except subprocess.CalledProcessError as e:
+        log(f"  gpu bundle tar extract failed: {e}")
+        return []
+
+    staged: list[Path] = []
+    gpu_wheels_dir = WORK / "wheels_gpu"
+    gpu_wheels_dir.mkdir(parents=True, exist_ok=True)
+    for w in extract.rglob("llama_cpp_python-*.whl"):
+        n = w.name
+        if _py_tag() not in n and "py3-none" not in n:
+            continue
+        try:
+            import shutil
+
+            target = gpu_wheels_dir / n
+            shutil.copy2(w, target)
+            staged.append(target)
+            log(f"  staged CUDA llama wheel: {n}")
+        except Exception as ex:
+            log(f"  stage gpu llama skip: {ex}")
+    return staged
+
+
 def _install_working_llama(env: dict) -> bool:
-    """manylinux prebuilt only (seconds). Source compile is last resort."""
+    """CUDA wheel first on GPU sessions; manylinux CPU prebuilt otherwise."""
+    gpu = _is_gpu_session()
     ok, detail = _verify_llama_import(env)
-    if ok:
+    if ok and (not gpu or _llama_gpu_ok(env)):
         log(f"  ✅ llama_cpp already ok ({detail})")
         return True
+    if ok and gpu:
+        log("  llama_cpp imports but cannot offload to CUDA — trying GPU wheel…")
 
     wheels_dir = WORK / "wheels"
     wheels_dir.mkdir(parents=True, exist_ok=True)
+
+    if gpu:
+        # Previously staged (persisted output) or freshly downloaded CUDA wheels
+        gpu_candidates = sorted((WORK / "wheels_gpu").glob("llama_cpp_python-*.whl"))
+        if not gpu_candidates:
+            gpu_candidates = _stage_gpu_llama(env)
+        for w in gpu_candidates:
+            if _install_local_llama_wheel(w, env):
+                if _llama_gpu_ok(env):
+                    log(f"  ✅ CUDA llama wheel active: {w.name}")
+                    return True
+                log(f"  {w.name} installed but reports no CUDA — continuing")
+        if not gpu_candidates:
+            log("  ⚠️ no CUDA wheel available — CPU fallback (slow inference)")
 
     for w in sorted(wheels_dir.glob("llama_cpp_python-*.whl")):
         if "manylinux" in w.name.lower() and (
@@ -611,8 +704,9 @@ def _install_working_llama(env: dict) -> bool:
 def _compile_llama_from_source(env: dict) -> bool:
     """Build llama-cpp-python on this machine (Kaggle) — correct glibc. Slow."""
     e = env.copy()
-    if str(ACCELERATOR).lower() in ("gpu", "nvidia", "cuda"):
-        e["CMAKE_ARGS"] = "-DGGML_CUDA=on"
+    if _is_gpu_session():
+        # 60 = P100, 75 = T4 — restricting arches roughly halves compile time
+        e["CMAKE_ARGS"] = "-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=60;75"
         e["FORCE_CMAKE"] = "1"
         log("  compiling llama-cpp-python from source (CUDA)…")
     else:

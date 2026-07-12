@@ -109,9 +109,18 @@ def main() -> int:
         f"platform={platform.platform()}\n",
         encoding="utf-8",
     )
+    # Tar the wheelhouse in the exact name bootstrap.py looks for:
+    #   edgerunner-wheels-{tag}-{cpu|gpu}.tar.gz
+    tarball = OUT.parent / f"edgerunner-wheels-{py}-{suffix}.tar.gz"
+    subprocess.check_call(
+        ["tar", "-czf", str(tarball), "-C", str(OUT.parent), OUT.name]
+    )
+    log(f"\nTarball: {tarball} ({tarball.stat().st_size // 1_000_000}MB)")
     log(
         "\nNext: download this folder and run:\n"
         "  ./scripts/publish_wheels.sh /path/to/wheels\n"
+        f"or upload the tarball directly:\n"
+        f"  gh release upload wheels-v1 {tarball.name}\n"
     )
     return 0
 

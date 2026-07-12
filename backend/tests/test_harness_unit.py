@@ -277,3 +277,24 @@ def test_parse_unknown_slash_never_reaches_model():
     resolved = resolve_slash("/sett")
     # resolve_slash returns None/no-op for unknown; the frontend now blocks it
     assert resolved is None or getattr(resolved, "kind", None) != "prompt"
+
+
+def test_question_after_coding_history_routes_to_chat():
+    history = [
+        {"role": "user", "content": "write a python function fizzbuzz(n) with tests"},
+        {"role": "assistant", "content": "### Solution\n```python\ndef fizzbuzz(n): ...\n```"},
+    ]
+    use, _ = should_use_harness(
+        "Can you give me an overview of the EdgeRunner project?", history=history
+    )
+    assert use is False
+
+
+def test_explicit_continue_after_coding_history_still_harness():
+    history = [
+        {"role": "user", "content": "write a python function fizzbuzz(n) with tests"},
+        {"role": "assistant", "content": "Traceback (most recent call last): FAILED"},
+    ]
+    use, task = should_use_harness("continue", history=history)
+    assert use is True
+    assert "fizzbuzz" in task

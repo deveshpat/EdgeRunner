@@ -94,6 +94,18 @@ def history_implies_coding(history: Optional[list]) -> bool:
     return False
 
 
+_QUESTION_START = re.compile(
+    r"^(can|could|would|will|what|why|how|who|when|where|which|does|do|is|are|"
+    r"tell me|explain|describe|give me|summarize|summarise|overview)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_question(text: str) -> bool:
+    t = (text or "").strip()
+    return bool(_QUESTION_START.match(t)) or t.endswith("?")
+
+
 def is_continue_request(text: str) -> bool:
     t = (text or "").strip()
     if not t:
@@ -120,7 +132,12 @@ def resolve_coding_task(user_text: str, history: Optional[list] = None) -> Optio
         return t
 
     if is_continue_request(t) or (
-        len(t) < 80 and history_implies_coding(history) and not looks_like_coding_task(t)
+        len(t) < 80
+        and history_implies_coding(history)
+        and not looks_like_coding_task(t)
+        # Short questions after a coding task ("can you explain…?") are chat,
+        # not an implicit continuation of the previous harness run.
+        and not looks_like_question(t)
     ):
         if not history_implies_coding(history):
             # continue with no coding history → not harness
