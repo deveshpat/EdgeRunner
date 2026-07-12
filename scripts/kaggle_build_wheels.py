@@ -55,6 +55,24 @@ def main() -> int:
         cuda_args = "-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=60;75"
         if nvcc:
             cuda_args += f" -DCMAKE_CUDA_COMPILER={nvcc}"
+        # Kaggle lacks the libcuda.so linker symlink → CMake can't resolve
+        # CUDA::cuda_driver. Point it at the stub (or the real driver lib).
+        import glob
+
+        driver = None
+        for pat in (
+            "/usr/local/cuda/lib64/stubs/libcuda.so",
+            "/usr/lib/x86_64-linux-gnu/libcuda.so",
+            "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+        ):
+            hits = sorted(glob.glob(pat))
+            if hits:
+                driver = hits[0]
+                break
+        log(f"libcuda for linking: {driver or 'MISSING'}")
+        if driver:
+            cuda_args += f" -DCUDA_cuda_driver_LIBRARY={driver}"
+        cuda_args += " -DCMAKE_LIBRARY_PATH=/usr/local/cuda/lib64/stubs"
         env["CMAKE_ARGS"] = cuda_args
         env["FORCE_CMAKE"] = "1"
         suffix = "gpu"
