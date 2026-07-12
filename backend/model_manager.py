@@ -308,12 +308,14 @@ def fetch_trending_models(hw_total_gb, limit=12):
 
             headroom = hw_total_gb - required_ram
             # Agent loops (Hermes) need real context: big system prompt +
-            # tool schemas + tool results. Scale n_ctx with headroom — KV
-            # cache for a 9B GQA model is roughly 150 KB/token.
+            # tool schemas + tool results — and Hermes Agent hard-requires
+            # a 64K window (MINIMUM_CONTEXT_LENGTH). KV cache for a 9B GQA
+            # model is roughly 150 KB/token (~9.6 GB at 64K, splits across
+            # GPUs), so t4x2-class headroom takes 65536 comfortably.
             if headroom > 18:
-                safe_ctx = 32768
+                safe_ctx = 65536
             elif headroom > 10:
-                safe_ctx = 16384
+                safe_ctx = 32768
             elif headroom > 6:
                 safe_ctx = 8192
             elif headroom > 3:
