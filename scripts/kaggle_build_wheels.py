@@ -42,8 +42,20 @@ def main() -> int:
     env = os.environ.copy()
     env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
     if WANT_GPU:
-        # CUDA 12.x on modern Kaggle images
-        env["CMAKE_ARGS"] = "-DGGML_CUDA=on"
+        nvcc = shutil.which("nvcc")
+        if not nvcc:
+            for cand in sorted(Path("/usr/local").glob("cuda*/bin/nvcc")):
+                nvcc = str(cand)
+                break
+        log(f"nvcc: {nvcc or 'MISSING'}")
+        subprocess.call(["bash", "-lc", "ls /usr/local/ | head; cmake --version | head -1"])
+        if nvcc and str(Path(nvcc).parent) not in env.get("PATH", ""):
+            env["PATH"] = f"{Path(nvcc).parent}:{env.get('PATH','')}"
+        # CUDA 12.x on modern Kaggle images; 75 = T4, 60 = P100
+        cuda_args = "-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=60;75"
+        if nvcc:
+            cuda_args += f" -DCMAKE_CUDA_COMPILER={nvcc}"
+        env["CMAKE_ARGS"] = cuda_args
         env["FORCE_CMAKE"] = "1"
         suffix = "gpu"
     else:
@@ -59,6 +71,7 @@ def main() -> int:
             "-m",
             "pip",
             "wheel",
+            "-v",
             f"llama-cpp-python=={LLAMA_VER}",
             "-w",
             str(OUT),
