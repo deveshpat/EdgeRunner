@@ -507,15 +507,7 @@ async def chat_endpoint(request: ChatRequest, raw: Request):
 
     async def ndjson_stream():
         # Immediate first byte — avoids Cloudflare TTFB / client "connection error"
-        yield (
-            json.dumps(
-                {
-                    "type": "status",
-                    "message": "Working… (casual chat is fast; coding uses the multi-step harness)",
-                }
-            )
-            + "\n"
-        )
+        yield json.dumps({"type": "status", "message": "working…"}) + "\n"
         last_ping = time.monotonic()
         done_payload = None
         while True:
