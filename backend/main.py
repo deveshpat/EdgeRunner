@@ -14,7 +14,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
-from agent import (
+from er_agent import (
     get_model_meta,
     is_model_ready,
     load_model,
@@ -89,6 +89,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# OpenAI-compatible /v1 endpoints over the in-process model — this is what
+# the Hermes Agent engine (hermes_engine.py) talks to.
+from openai_shim import router as _openai_router  # noqa: E402
+
+app.include_router(_openai_router)
 
 
 @app.get("/")
@@ -360,6 +366,7 @@ def _chat_work(
     progress_q: queue.Queue,
     run_id: str = "",
     system_extra: str = "",
+    engine: str = "",
 ):
     """Runs on the chat thread pool; pushes progress + final result onto progress_q."""
     from harness.generate import set_cancel_check, set_token_callback
@@ -387,6 +394,7 @@ def _chat_work(
             history=history_msgs,
             force_harness=force_harness,
             system_extra=system_extra,
+            engine=engine,
         )
         payload = {
             "type": "done",
@@ -474,6 +482,7 @@ async def chat_endpoint(request: ChatRequest, raw: Request):
         progress_q,
         run_id,
         (request.system or "").strip(),
+        (request.engine or "").strip(),
     )
 
     if want_json_only:

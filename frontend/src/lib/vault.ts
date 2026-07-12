@@ -479,6 +479,8 @@ export type StoredPrefs = {
   memoryNotes?: string[];
   /** /system — user's custom system-prompt addition */
   systemPrompt?: string;
+  /** /engine — hermes (real Hermes Agent loop) or native harness */
+  engine?: "hermes" | "native";
 };
 
 export function loadPrefs(): StoredPrefs {

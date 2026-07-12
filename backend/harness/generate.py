@@ -26,6 +26,10 @@ def set_token_callback(cb: Optional[Callable[[str], None]]) -> None:
     _token_cb = cb
 
 
+def get_token_callback() -> Optional[Callable[[str], None]]:
+    return _token_cb
+
+
 def set_cancel_check(cb: Optional[Callable[[], bool]]) -> None:
     global _cancel_check
     _cancel_check = cb

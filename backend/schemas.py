@@ -15,6 +15,8 @@ class ChatRequest(BaseModel):
     agent: Optional[str] = None
     # User memory / custom system additions (from /memory and /system)
     system: Optional[str] = None
+    # Engine choice: "hermes" (default, real Hermes Agent loop) or "native"
+    engine: Optional[str] = None
 
 
 class ChatResponse(BaseModel):

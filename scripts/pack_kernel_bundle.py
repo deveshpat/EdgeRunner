@@ -52,7 +52,7 @@ def main() -> int:
         print(f"pack failed: {e}", file=sys.stderr)
         return 1
 
-    if "backend/main.py" not in files or "backend/agent.py" not in files:
+    if "backend/main.py" not in files or "backend/er_agent.py" not in files:
         print("missing critical backend entrypoints", file=sys.stderr)
         return 1
 

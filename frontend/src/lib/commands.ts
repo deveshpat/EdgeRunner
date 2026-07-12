@@ -113,6 +113,11 @@ export const BUILTIN_COMMANDS: SlashCommand[] = [
     kind: "local",
   },
   {
+    name: "engine",
+    description: "Switch agent engine: /engine hermes | native",
+    kind: "local",
+  },
+  {
     name: "loop",
     description: "Run a task until done: /loop [n] <task> (default 3 rounds)",
     kind: "local",

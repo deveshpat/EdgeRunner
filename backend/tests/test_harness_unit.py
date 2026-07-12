@@ -337,3 +337,101 @@ def test_chat_request_accepts_system_field():
         system="always answer in haiku",
     )
     assert req.system == "always answer in haiku"
+
+
+# ── Hermes engine integration (OpenAI shim dialect) ──────────────────────────
+
+import json
+
+from openai_shim import convert_messages, render_tools_block
+from openai_shim import parse_tool_calls as shim_parse_tool_calls
+
+
+def test_shim_parses_tool_call_block():
+    text = 'Sure.\n<tool_call>\n{"name": "terminal", "arguments": {"command": "ls"}}\n</tool_call>'
+    content, calls = shim_parse_tool_calls(text)
+    assert content == "Sure."
+    assert len(calls) == 1
+    assert calls[0]["function"]["name"] == "terminal"
+    assert json.loads(calls[0]["function"]["arguments"]) == {"command": "ls"}
+
+
+def test_shim_parses_single_quoted_tool_call():
+    text = "<tool_call>\n{'name': 'todo', 'arguments': {'action': 'list'}}\n</tool_call>"
+    content, calls = shim_parse_tool_calls(text)
+    assert content == ""
+    assert calls[0]["function"]["name"] == "todo"
+
+
+def test_shim_leaves_plain_text_alone():
+    content, calls = shim_parse_tool_calls("Just a normal answer.")
+    assert content == "Just a normal answer."
+    assert calls == []
+
+
+def test_shim_injects_hermes_tools_into_system():
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "terminal", "parameters": {"type": "object"}},
+        }
+    ]
+    msgs = convert_messages(
+        [{"role": "system", "content": "base"}, {"role": "user", "content": "hi"}],
+        tools,
+    )
+    assert msgs[0]["role"] == "system"
+    assert "<tools>" in msgs[0]["content"]
+    assert '"terminal"' in msgs[0]["content"]
+    assert "<tool_call>" in msgs[0]["content"]  # dialect instructions present
+
+
+def test_shim_converts_tool_history_to_plain_roles():
+    msgs = convert_messages(
+        [
+            {"role": "user", "content": "run ls"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "terminal", "arguments": '{"command": "ls"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "content": "file_a\nfile_b", "tool_call_id": "call_1"},
+        ],
+        None,
+    )
+    roles = [m["role"] for m in msgs]
+    assert roles == ["user", "assistant", "user"]
+    assert "<tool_call>" in msgs[1]["content"]
+    assert "<tool_response>" in msgs[2]["content"]
+
+
+def test_render_tools_block_one_per_line():
+    block = render_tools_block(
+        [
+            {"type": "function", "function": {"name": "a"}},
+            {"type": "function", "function": {"name": "b"}},
+        ]
+    )
+    assert block.count("\n") == 1
+
+
+def test_engine_falls_back_to_native_when_hermes_missing(monkeypatch):
+    import er_agent
+
+    called = {}
+
+    def fake_simple_chat(text, history=None, system_extra=""):
+        called["chat"] = True
+        return {"mode": "chat", "response": "ok", "thought_process": []}
+
+    monkeypatch.setattr(er_agent, "simple_chat", fake_simple_chat)
+    # hermes-agent is not installed in the test venv → must fall back
+    result = er_agent.run_user_message("hello there", engine="hermes")
+    assert called.get("chat") is True
+    assert result["response"] == "ok"

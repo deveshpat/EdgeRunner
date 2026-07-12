@@ -1074,6 +1074,27 @@ export default function EdgeRunnerUI() {
         })();
         return true;
       }
+      case "engine": {
+        const e = (args || "").trim().toLowerCase();
+        if (e === "hermes" || e === "native") {
+          void savePrefs({ engine: e });
+          setMessages((m) => [
+            ...m,
+            sysLine(
+              e === "hermes"
+                ? "engine → hermes (Nous Research Hermes Agent loop)"
+                : "engine → native (EdgeRunner harness)"
+            ),
+          ]);
+        } else {
+          const cur = loadPrefs().engine || "hermes";
+          setMessages((m) => [
+            ...m,
+            sysLine(`engine=${cur} · use /engine hermes | /engine native`),
+          ]);
+        }
+        return true;
+      }
       case "loop": {
         const lm = (args || "").match(/^(\d+)?\s*([\s\S]*)$/);
         const rounds = Math.min(Math.max(parseInt(lm?.[1] || "3", 10) || 3, 1), 8);
@@ -1563,6 +1584,7 @@ export default function EdgeRunnerUI() {
           messages: historyForApi,
           agent: uiPrefs.agentMode,
           system: systemField,
+          engine: prefsNow.engine,
         }),
         referrerPolicy: "no-referrer",
         signal: controller.signal,

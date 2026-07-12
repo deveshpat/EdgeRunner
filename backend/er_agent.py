@@ -7,6 +7,7 @@ Coding loop lives in `harness/` (SOTA-inspired plan→test→implement→sandbox
 from __future__ import annotations
 
 import gc
+import os
 import threading
 from typing import Optional
 
@@ -204,6 +205,15 @@ def _llm():
     return _local_llm
 
 
+def get_raw_llama():
+    """Underlying llama_cpp.Llama (for the OpenAI shim). Loads if needed."""
+    llm = _llm()
+    client = getattr(llm, "client", None)
+    if client is None:
+        raise RuntimeError("model loaded but raw llama.cpp client unavailable")
+    return client
+
+
 # Register for harness modules
 register_llm_getter(_llm)
 
@@ -218,6 +228,12 @@ def set_progress_callback(cb) -> None:
     _progress_cb = cb
     set_harness_progress(cb)
     set_routing_progress(cb)
+    try:
+        from hermes_engine import set_progress as _hermes_set_progress
+
+        _hermes_set_progress(cb)
+    except Exception:
+        pass
 
 
 def run_user_message(
@@ -225,8 +241,30 @@ def run_user_message(
     history: Optional[list] = None,
     force_harness: bool = False,
     system_extra: str = "",
+    engine: str = "",
 ) -> dict:
-    """Route casual chat vs coding harness (history-aware for 'continue…')."""
+    """Route to the Hermes engine (default) or the native chat/harness split."""
+    chosen = (
+        engine or os.environ.get("EDGERUNNER_ENGINE") or "hermes"
+    ).strip().lower()
+
+    if chosen == "hermes":
+        try:
+            from hermes_engine import hermes_available, run_hermes_message
+
+            if hermes_available():
+                return run_hermes_message(
+                    user_text, history=history, system_extra=system_extra
+                )
+            print("hermes engine not installed — native harness", flush=True)
+        except Exception as e:
+            print(f"hermes engine failed ({e}) — native harness", flush=True)
+            if _progress_cb is not None:
+                try:
+                    _progress_cb(f"hermes engine failed — native harness ({e})")
+                except Exception:
+                    pass
+
     use, task = should_use_harness(user_text, history=history, force=force_harness)
     if use:
         if system_extra:

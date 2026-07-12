@@ -796,6 +796,7 @@ def pip_install() -> None:
     log(f"  python={sys.version.split()[0]} tag={_py_tag()} accel={ACCELERATOR}")
 
     if _deps_already_ok():
+        _install_hermes(env)
         log(f"✅ deps already installed — skipped pip ({time.time() - t_all:.1f}s)")
         return
 
@@ -819,7 +820,46 @@ def pip_install() -> None:
         if not ok:
             raise RuntimeError(f"{mod} unusable after install: {detail[:300]}")
 
+    _install_hermes(env)
+
     log(f"✅ pip install complete in {time.time() - t_all:.1f}s")
+
+
+# Hermes Agent (github.com/NousResearch/hermes-agent, MIT) — the exact
+# agent loop EdgeRunner drives via backend/hermes_engine.py. Pinned commit
+# for reproducibility (audited 2026-07-12). Best-effort: the worker falls
+# back to the native harness when this is missing.
+HERMES_AGENT_PIN = "7b5ba2054721dde998ed47fd4a0f031955278e99"
+
+
+def _install_hermes(env: dict) -> None:
+    ok, detail = _verify_import("run_agent")
+    if ok:
+        log(f"  reuse ok: hermes-agent ({detail[:60]})")
+        return
+    log("  installing hermes-agent (pinned)…")
+    t0 = time.time()
+    try:
+        subprocess.check_call(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "-q",
+                "--prefer-binary",
+                f"hermes-agent @ git+https://github.com/NousResearch/hermes-agent@{HERMES_AGENT_PIN}",
+            ],
+            env=env,
+            timeout=600,
+        )
+        ok, detail = _verify_import("run_agent")
+        if ok:
+            log(f"  ✅ hermes-agent installed in {time.time() - t0:.1f}s")
+        else:
+            log(f"  ⚠️ hermes-agent import failed after install: {detail[:200]}")
+    except Exception as e:
+        log(f"  ⚠️ hermes-agent install failed (native harness fallback): {e}")
 
 
 def install_cloudflared() -> Path:
