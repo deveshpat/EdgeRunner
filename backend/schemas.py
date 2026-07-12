@@ -13,6 +13,8 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = "default"
     # OpenCode-style agent hint from UI (build | plan); routing may still override
     agent: Optional[str] = None
+    # User memory / custom system additions (from /memory and /system)
+    system: Optional[str] = None
 
 
 class ChatResponse(BaseModel):

@@ -343,14 +343,26 @@ async def chat_last():
         return dict(_LAST_RUN)
 
 
+# User-requested cancel of the in-flight run (/stop → POST /chat/cancel)
+_CANCEL_EVENT = threading.Event()
+
+
+@app.post("/chat/cancel")
+async def chat_cancel():
+    _CANCEL_EVENT.set()
+    return {"ok": True, "message": "Cancel requested — the run stops at the next step"}
+
+
 def _chat_work(
     user_text: str,
     history_msgs: list,
     force_harness: bool,
     progress_q: queue.Queue,
     run_id: str = "",
+    system_extra: str = "",
 ):
     """Runs on the chat thread pool; pushes progress + final result onto progress_q."""
+    from harness.generate import set_cancel_check, set_token_callback
 
     def on_progress(msg: str) -> None:
         watchdog.heartbeat()
@@ -359,10 +371,22 @@ def _chat_work(
         except Exception:
             pass
 
+    def on_token(text: str) -> None:
+        try:
+            progress_q.put_nowait({"type": "token", "text": text})
+        except Exception:
+            pass
+
+    _CANCEL_EVENT.clear()
     set_progress_callback(on_progress)
+    set_token_callback(on_token)
+    set_cancel_check(_CANCEL_EVENT.is_set)
     try:
         result = run_user_message(
-            user_text, history=history_msgs, force_harness=force_harness
+            user_text,
+            history=history_msgs,
+            force_harness=force_harness,
+            system_extra=system_extra,
         )
         payload = {
             "type": "done",
@@ -385,6 +409,8 @@ def _chat_work(
         progress_q.put(payload)
     finally:
         set_progress_callback(None)
+        set_token_callback(None)
+        set_cancel_check(None)
         progress_q.put(None)  # sentinel
 
 
@@ -447,6 +473,7 @@ async def chat_endpoint(request: ChatRequest, raw: Request):
         force,
         progress_q,
         run_id,
+        (request.system or "").strip(),
     )
 
     if want_json_only:

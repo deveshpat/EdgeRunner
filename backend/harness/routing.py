@@ -196,19 +196,12 @@ def should_use_harness(
     return False, (user_text or "").strip()
 
 
-def _invoke_text(llm, prompt: str, *, max_tokens: int) -> str:
-    from langchain_core.messages import HumanMessage
-
-    try:
-        bound = llm.bind(max_tokens=max_tokens) if hasattr(llm, "bind") else llm
-        response = bound.invoke([HumanMessage(content=prompt)])
-    except Exception:
-        response = llm.invoke([HumanMessage(content=prompt)])
-    return getattr(response, "content", None) or str(response)
-
-
-def simple_chat(user_text: str, history: Optional[list] = None) -> dict:
-    from harness.llm_bridge import get_llm
+def simple_chat(
+    user_text: str,
+    history: Optional[list] = None,
+    system_extra: str = "",
+) -> dict:
+    from harness.generate import generate_text
     from harness.thinking import split_think
 
     _progress("💬 [Chat] Generating reply…")
@@ -219,9 +212,11 @@ def simple_chat(user_text: str, history: Optional[list] = None) -> dict:
         if role and content:
             hist_snip += f"{role}: {str(content)[:500]}\n"
 
-    prompt = f"{system_chat()}\n\n{hist_snip}user: {user_text}\nassistant:"
-    llm = get_llm()
-    raw = _invoke_text(llm, prompt, max_tokens=768)
+    system = system_chat()
+    if system_extra:
+        system += f"\n\nUser instructions (always follow):\n{system_extra[:1500]}"
+    prompt = f"{system}\n\n{hist_snip}user: {user_text}\nassistant:"
+    raw = generate_text(prompt, max_tokens=768, rounds=2)
     visible, thoughts = split_think(raw)
 
     if not visible:
@@ -233,7 +228,7 @@ def simple_chat(user_text: str, history: Optional[list] = None) -> dict:
             "Now give ONLY the final answer to the user — concise, complete "
             "sentences, no <think> tags:"
         )
-        raw2 = _invoke_text(llm, follow, max_tokens=512)
+        raw2 = generate_text(follow, max_tokens=512, rounds=1)
         v2, t2 = split_think(raw2)
         visible = v2 or raw2.strip()
         thoughts = "\n\n".join(x for x in (thoughts, t2) if x)

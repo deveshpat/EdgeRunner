@@ -53,8 +53,10 @@ import {
 import {
   clearSecret,
   createVault,
+  getLastChatId,
   getLocalSyncUpdatedAt,
   isUnlocked,
+  listChats,
   loadChat,
   loadPrefs,
   loadSecret,
@@ -68,8 +70,10 @@ import {
   unlockWithPassphrase,
   vaultExists,
   wipeVault,
+  type ChatSummary,
   type VaultMode,
 } from "@/lib/storage";
+import { splitThink } from "@/lib/thinking";
 import type {
   Accelerator,
   ConnectionMode,
@@ -176,6 +180,9 @@ export default function EdgeRunnerUI() {
   const abortRef = useRef<AbortController | null>(null);
   const chatIdRef = useRef(CHAT_KEY);
   const intentionalStopRef = useRef(false);
+  const chatAbortRef = useRef<AbortController | null>(null);
+  const stopRequestedRef = useRef(false);
+  const sessionListRef = useRef<ChatSummary[]>([]);
 
   const patchUi = useCallback((patch: Partial<UiPrefs>) => {
     setUiPrefs(saveUiPrefs(patch));
@@ -415,7 +422,8 @@ export default function EdgeRunnerUI() {
         if (secret.apiKey) setApiKey(secret.apiKey);
         setHasStoredCreds(!!(secret.apiToken || secret.apiKey));
       }
-      const rec = await loadChat(CHAT_KEY);
+      const lastId = (await getLastChatId()) || CHAT_KEY;
+      const rec = await loadChat(lastId);
       if (rec?.messages?.length && !cancelled) {
         setMessages(rec.messages);
         chatIdRef.current = rec.id;
@@ -945,14 +953,56 @@ export default function EdgeRunnerUI() {
   };
 
   const clearChat = () => {
+    // /new archives the current session instead of destroying it.
     undoStackRef.current.push(messages);
     redoStackRef.current = [];
-    setMessages([sysLine("session cleared · /help for commands")]);
-    void saveChat({
-      id: chatIdRef.current,
-      messages: [],
-      updated_at: Date.now(),
-    });
+    const hadContent = messages.some((m) => m.role !== "system");
+    if (hadContent) {
+      void saveChat({
+        id: chatIdRef.current,
+        messages,
+        updated_at: Date.now(),
+        backend_url: backendUrl || undefined,
+      });
+    }
+    chatIdRef.current = `s_${Date.now().toString(36)}`;
+    setMessages([
+      sysLine(
+        hadContent
+          ? "new session · previous one saved — /sessions to list & resume"
+          : "new session · /help for commands"
+      ),
+    ]);
+  };
+
+  const resumeSession = async (idx: number) => {
+    const target = sessionListRef.current[idx - 1];
+    if (!target) {
+      setMessages((m) => [
+        ...m,
+        sysLine("no such session — run /sessions to list them first"),
+      ]);
+      return;
+    }
+    // Save the current transcript before switching
+    if (messages.some((m) => m.role !== "system")) {
+      await saveChat({
+        id: chatIdRef.current,
+        messages,
+        updated_at: Date.now(),
+        backend_url: backendUrl || undefined,
+      });
+    }
+    const rec = await loadChat(target.id);
+    if (!rec) {
+      setMessages((m) => [...m, sysLine("could not load that session")]);
+      return;
+    }
+    chatIdRef.current = rec.id;
+    setMessages([
+      ...rec.messages,
+      sysLine(`resumed session · ${target.title}`),
+    ]);
   };
 
   /** OpenCode-style slash commands handled locally (or rewritten before send). */
@@ -986,23 +1036,135 @@ export default function EdgeRunnerUI() {
         return true;
       case "sessions":
       case "resume":
-      case "continue":
+      case "continue": {
+        const n = parseInt((args || "").trim(), 10);
+        if (Number.isFinite(n) && n > 0) {
+          void resumeSession(n);
+          return true;
+        }
+        void (async () => {
+          const sessions = await listChats();
+          sessionListRef.current = sessions;
+          const listing = sessions.length
+            ? sessions
+                .map(
+                  (s, i) =>
+                    `  ${i + 1}. ${s.title} · ${s.count} msgs · ${new Date(
+                      s.updated_at
+                    ).toLocaleString()}${s.id === chatIdRef.current ? " (current)" : ""}`
+                )
+                .join("\n")
+            : "  (none saved yet)";
+          setMessages((m) => [
+            ...m,
+            sysLine(
+              [
+                `session · phase=${phase}`,
+                backendUrl ? `url=${backendUrl}` : "url=(none)",
+                modelReady
+                  ? `model=${modelName || "ready"}`
+                  : "model=loading/offline",
+                `agent=${uiPrefs.agentMode}`,
+              ]
+                .filter(Boolean)
+                .join(" · ") +
+                `\n\nsaved sessions (/sessions <n> to resume):\n${listing}`
+            ),
+          ]);
+        })();
+        return true;
+      }
+      case "loop": {
+        const lm = (args || "").match(/^(\d+)?\s*([\s\S]*)$/);
+        const rounds = Math.min(Math.max(parseInt(lm?.[1] || "3", 10) || 3, 1), 8);
+        const task = (lm?.[2] || "").trim();
+        if (!task) {
+          setMessages((m) => [...m, sysLine("usage: /loop [n] <task>")]);
+          return true;
+        }
+        void runLoop(rounds, task);
+        return true;
+      }
+      case "retry": {
+        const lastUser = [...messages]
+          .reverse()
+          .find((x) => x.role === "user" && !x.content.startsWith("/"));
+        if (!lastUser) {
+          setMessages((m) => [...m, sysLine("nothing to retry")]);
+          return true;
+        }
+        void sendToBackend(lastUser.content, lastUser.content);
+        return true;
+      }
+      case "stop":
+      case "abort":
+      case "cancel": {
+        stopRequestedRef.current = true;
+        chatAbortRef.current?.abort();
+        if (backendUrl) {
+          void fetch(`${backendUrl.replace(/\/$/, "")}/chat/cancel`, {
+            method: "POST",
+            referrerPolicy: "no-referrer",
+          }).catch(() => {});
+        }
         setMessages((m) => [
           ...m,
-          sysLine(
-            [
-              `session · phase=${phase}`,
-              backendUrl ? `url=${backendUrl}` : "url=(none)",
-              modelReady ? `model=${modelName || "ready"}` : "model=loading/offline",
-              `agent=${uiPrefs.agentMode}`,
-              `view=${uiPrefs.uiView}`,
-              session?.accelerator ? `accel=${session.accelerator}` : "",
-            ]
-              .filter(Boolean)
-              .join(" · ")
-          ),
+          sysLine("stop requested — run cancels at the next step"),
         ]);
         return true;
+      }
+      case "memory": {
+        const prefsNow = loadPrefs();
+        const notes = prefsNow.memoryNotes || [];
+        const sub = (args || "").trim();
+        if (sub.startsWith("add ")) {
+          const note = sub.slice(4).trim();
+          void savePrefs({ memoryNotes: [...notes, note] });
+          setMessages((m) => [
+            ...m,
+            sysLine(`memory + "${note.slice(0, 60)}" · ${notes.length + 1} notes`),
+          ]);
+        } else if (sub === "clear") {
+          void savePrefs({ memoryNotes: [] });
+          setMessages((m) => [...m, sysLine("memory cleared")]);
+        } else {
+          setMessages((m) => [
+            ...m,
+            sysLine(
+              notes.length
+                ? `memory (sent with every request):\n${notes
+                    .map((n, i) => `  ${i + 1}. ${n}`)
+                    .join("\n")}`
+                : "memory empty · /memory add <text>"
+            ),
+          ]);
+        }
+        return true;
+      }
+      case "system": {
+        const sub = (args || "").trim();
+        const prefsNow = loadPrefs();
+        if (!sub || sub === "show") {
+          setMessages((m) => [
+            ...m,
+            sysLine(
+              prefsNow.systemPrompt
+                ? `system prompt addition:\n${prefsNow.systemPrompt}`
+                : "no custom system prompt · /system <text>"
+            ),
+          ]);
+        } else if (sub === "clear") {
+          void savePrefs({ systemPrompt: undefined });
+          setMessages((m) => [...m, sysLine("custom system prompt cleared")]);
+        } else {
+          void savePrefs({ systemPrompt: sub });
+          setMessages((m) => [
+            ...m,
+            sysLine(`system prompt set · ${sub.length} chars`),
+          ]);
+        }
+        return true;
+      }
       case "export": {
         const md = exportMarkdown(messages);
         const blob = new Blob([md], { type: "text/markdown" });
@@ -1309,10 +1471,13 @@ export default function EdgeRunnerUI() {
     await sendToBackend(rawInput, rawInput);
   };
 
-  const sendToBackend = async (content: string, displayContent?: string) => {
+  const sendToBackend = async (
+    content: string,
+    displayContent?: string
+  ): Promise<string> => {
     if (!backendUrl) {
       setShowSettings(true);
-      return;
+      return "";
     }
 
     const userMsg: Message = {
@@ -1345,6 +1510,8 @@ export default function EdgeRunnerUI() {
 
     const base = backendUrl.replace(/\/$/, "");
     const sendStartedAt = Date.now();
+    // Raw streamed tokens for the in-flight step (survives stream drops)
+    let rawDraft = "";
     const updateLastAssistant = (patch: Partial<Message>) => {
       setMessages((prev) => {
         const next = [...prev];
@@ -1371,6 +1538,21 @@ export default function EdgeRunnerUI() {
         if (last.role === "user") last.content = wireContent;
       }
 
+      // /system + /memory ride along on every request
+      const prefsNow = loadPrefs();
+      const memoryBlock = (prefsNow.memoryNotes || []).length
+        ? `User memory:\n${(prefsNow.memoryNotes || [])
+            .map((n) => `- ${n}`)
+            .join("\n")}`
+        : "";
+      const systemField =
+        [prefsNow.systemPrompt, memoryBlock].filter(Boolean).join("\n\n") ||
+        undefined;
+
+      stopRequestedRef.current = false;
+      const controller = new AbortController();
+      chatAbortRef.current = controller;
+
       const response = await fetch(`${base}/chat`, {
         method: "POST",
         headers: {
@@ -1380,8 +1562,10 @@ export default function EdgeRunnerUI() {
         body: JSON.stringify({
           messages: historyForApi,
           agent: uiPrefs.agentMode,
+          system: systemField,
         }),
         referrerPolicy: "no-referrer",
+        signal: controller.signal,
       });
 
       if (!response.ok) throw new Error(`Backend returned ${response.status}`);
@@ -1404,12 +1588,14 @@ export default function EdgeRunnerUI() {
           buf += decoder.decode(value, { stream: true });
           const lines = buf.split("\n");
           buf = lines.pop() ?? "";
+          let tokensDirty = false;
           for (const line of lines) {
             const trimmed = line.trim();
             if (!trimmed) continue;
             let evt: {
               type?: string;
               message?: string;
+              text?: string;
               response?: string;
               thought_process?: string[];
             };
@@ -1418,25 +1604,40 @@ export default function EdgeRunnerUI() {
             } catch {
               continue;
             }
-            if (evt.type === "status" && evt.message) {
+            if (evt.type === "token" && typeof evt.text === "string") {
+              rawDraft += evt.text;
+              tokensDirty = true;
+            } else if (evt.type === "status" && evt.message) {
+              // New phase/step → its generation starts a fresh draft
+              rawDraft = "";
               thoughts.push(evt.message);
               updateLastAssistant({
                 content: evt.message,
                 thoughts: [...thoughts],
               });
             } else if (evt.type === "ping") {
-              updateLastAssistant({
-                content: thoughts.length
-                  ? `${thoughts[thoughts.length - 1]} · …`
-                  : "…",
-                thoughts: [...thoughts],
-              });
+              if (!rawDraft) {
+                updateLastAssistant({
+                  content: thoughts.length
+                    ? `${thoughts[thoughts.length - 1]} · …`
+                    : "…",
+                  thoughts: [...thoughts],
+                });
+              }
             } else if (evt.type === "done") {
               final = {
                 response: evt.response,
                 thought_process: evt.thought_process ?? thoughts,
               };
             }
+          }
+          // One render per network chunk, not per token
+          if (tokensDirty && !final) {
+            const { visible, reasoning } = splitThink(rawDraft);
+            updateLastAssistant({
+              content: visible || "…",
+              thoughts: reasoning ? [...thoughts, reasoning] : [...thoughts],
+            });
           }
         }
         if (!final?.response) throw new Error("Stream ended without a reply");
@@ -1453,9 +1654,21 @@ export default function EdgeRunnerUI() {
         thoughts: data.thought_process,
         ts: Date.now(),
       });
+      return data.response || "";
     } catch (err) {
       const detail =
         err instanceof Error && err.message ? ` (${err.message})` : "";
+      const partial = splitThink(rawDraft).visible;
+
+      // User pressed /stop — no recovery dance, keep whatever streamed
+      if (stopRequestedRef.current) {
+        updateLastAssistant({
+          content:
+            (partial ? `${partial}\n\n` : "") + "⛔ stopped by user",
+          ts: Date.now(),
+        });
+        return "";
+      }
 
       // Cloudflare quick tunnels drop long streams while the worker keeps
       // computing. Probe health with retries, then recover the finished run
@@ -1509,7 +1722,7 @@ export default function EdgeRunnerUI() {
                     thoughts: last.result.thought_process,
                     ts: Date.now(),
                   });
-                  recovered = true;
+                  return last.result.response;
                 }
                 break; // finished (ours rendered) or stale run — stop polling
               }
@@ -1522,16 +1735,49 @@ export default function EdgeRunnerUI() {
       }
 
       if (!recovered) {
+        // Keep the streamed partial so "continue where you left off" works
+        const note = stillUp
+          ? `reply interrupted${detail}. backend still online — say "continue" to resume`
+          : "connection error — worker unreachable after retries. settings → relaunch";
         updateLastAssistant({
-          content: stillUp
-            ? `reply interrupted${detail}. backend still online — try again or /code for harness`
-            : "connection error — worker unreachable after retries. settings → relaunch",
+          content: partial ? `${partial}\n\n_[${note}]_` : note,
           ts: Date.now(),
         });
       }
+      return "";
     } finally {
+      chatAbortRef.current = null;
       setIsLoading(false);
       inputRef.current?.focus();
+    }
+  };
+
+  /** /loop [n] <task> — re-drive the harness until it reports complete. */
+  const runLoop = async (rounds: number, task: string) => {
+    setMessages((m) => [
+      ...m,
+      sysLine(`loop · up to ${rounds} rounds until complete`),
+    ]);
+    let last = await sendToBackend(task, task);
+    for (let i = 2; i <= rounds; i++) {
+      if (stopRequestedRef.current) break;
+      if (!last) break; // hard failure — don't burn rounds
+      const unfinished = /⚠️ incomplete|interrupted|stream dropped/i.test(last);
+      if (!unfinished) {
+        setMessages((m) => [...m, sysLine(`loop · finished in round ${i - 1}`)]);
+        return;
+      }
+      setMessages((m) => [...m, sysLine(`loop · round ${i}/${rounds}`)]);
+      last = await sendToBackend(
+        "continue exactly where you left off and finish the task",
+        `(loop round ${i})`
+      );
+    }
+    if (last && /⚠️ incomplete/i.test(last)) {
+      setMessages((m) => [
+        ...m,
+        sysLine("loop · rounds exhausted — still incomplete"),
+      ]);
     }
   };
 

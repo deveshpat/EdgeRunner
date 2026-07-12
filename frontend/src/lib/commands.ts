@@ -113,6 +113,32 @@ export const BUILTIN_COMMANDS: SlashCommand[] = [
     kind: "local",
   },
   {
+    name: "loop",
+    description: "Run a task until done: /loop [n] <task> (default 3 rounds)",
+    kind: "local",
+  },
+  {
+    name: "retry",
+    description: "Resend the last user message",
+    kind: "local",
+  },
+  {
+    name: "stop",
+    aliases: ["abort", "cancel"],
+    description: "Cancel the in-flight run (server-side too)",
+    kind: "local",
+  },
+  {
+    name: "memory",
+    description: "Persistent notes: /memory add <text> | list | clear",
+    kind: "local",
+  },
+  {
+    name: "system",
+    description: "Custom system prompt: /system <text> | show | clear",
+    kind: "local",
+  },
+  {
     name: "build",
     description: "Switch to Build agent (full tools) and optional task",
     kind: "force_harness",

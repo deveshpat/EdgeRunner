@@ -117,6 +117,68 @@ async function idbDel(k: string): Promise<void> {
   db.close();
 }
 
+async function idbKeys(): Promise<string[]> {
+  const db = await openDb();
+  const keys = await new Promise<string[]>((resolve, reject) => {
+    const tx = db.transaction(STORE, "readonly");
+    const req = tx.objectStore(STORE).getAllKeys();
+    req.onsuccess = () =>
+      resolve((req.result as IDBValidKey[]).map((k) => String(k)));
+    req.onerror = () => reject(req.error);
+  });
+  db.close();
+  return keys;
+}
+
+export type ChatSummary = {
+  id: string;
+  title: string;
+  updated_at: number;
+  count: number;
+};
+
+/** List saved chat sessions (metadata only), newest first. */
+export async function listChats(): Promise<ChatSummary[]> {
+  if (!memory && !(await tryAutoUnlock())) return [];
+  if (!memory) return [];
+  const keys = (await idbKeys()).filter(
+    (k) => k.startsWith("chat:") && k !== "chat:lastId"
+  );
+  const out: ChatSummary[] = [];
+  for (const k of keys) {
+    const blob = await idbGet<EncryptedBlob>(k);
+    if (!blob) continue;
+    try {
+      const rec = await decryptJson<ChatRecord>(memory.key, blob);
+      const firstUser = rec.messages?.find(
+        (m) => m.role === "user" && (m.content || "").trim()
+      );
+      out.push({
+        id: rec.id,
+        title:
+          rec.title ||
+          (firstUser?.content || "").slice(0, 48) ||
+          rec.id,
+        updated_at: rec.updated_at || 0,
+        count: rec.messages?.length || 0,
+      });
+    } catch {
+      /* undecryptable record — skip */
+    }
+  }
+  out.sort((a, b) => b.updated_at - a.updated_at);
+  return out;
+}
+
+export async function deleteChat(id: string): Promise<void> {
+  await idbDel(`chat:${id}`);
+}
+
+/** Id of the most recently saved chat session (survives reloads). */
+export async function getLastChatId(): Promise<string | null> {
+  return (await idbGet<string>("chat:lastId")) || null;
+}
+
 export function isUnlocked(): boolean {
   return memory !== null;
 }
@@ -413,6 +475,10 @@ export type StoredPrefs = {
   showThinking?: boolean;
   showToolDetails?: boolean;
   showTimestamps?: boolean;
+  /** /memory — persistent notes sent with every request */
+  memoryNotes?: string[];
+  /** /system — user's custom system-prompt addition */
+  systemPrompt?: string;
 };
 
 export function loadPrefs(): StoredPrefs {

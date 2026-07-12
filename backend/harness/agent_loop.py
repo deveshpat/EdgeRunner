@@ -118,21 +118,16 @@ def _llm_text(prompt: str, *, max_tokens: int = 1200) -> str:
     import threading
     import time
 
-    from langchain_core.messages import HumanMessage
-    from harness.llm_bridge import get_llm
+    from harness.generate import generate_text
     from harness.thinking import split_think
 
     global LAST_REASONING
-    llm = get_llm()
     result: dict = {}
 
     def _work() -> None:
-        try:
-            bound = llm.bind(max_tokens=max_tokens) if hasattr(llm, "bind") else llm
-            response = bound.invoke([HumanMessage(content=prompt)])
-        except Exception:
-            response = llm.invoke([HumanMessage(content=prompt)])
-        result["text"] = (getattr(response, "content", None) or str(response)).strip()
+        # generate_text streams tokens to the client and auto-continues
+        # when the reply hits the cap or ends visibly unfinished.
+        result["text"] = generate_text(prompt, max_tokens=max_tokens, rounds=2)
 
     t = threading.Thread(target=_work, daemon=True)
     start = time.monotonic()
@@ -362,7 +357,13 @@ def run_coding_agent(
             "Implement solution.py then run_python tests_auto.py.\n"
         )
 
+    from harness.generate import cancelled as _cancelled
+
     for step in range(1, steps + 1):
+        if _cancelled():
+            _progress("⛔ run cancelled by user")
+            final_text = "Run cancelled by user. Partial work is in the workspace."
+            break
         tools.ctx.step = step
         focus = PHASE_FOCUS.get(phase, "") if not plan else "Produce the plan, then done."
         _progress(f"🔁 step {step}/{steps}" + (f" · {phase}" if not plan else " · plan"))

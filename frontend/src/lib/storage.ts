@@ -5,12 +5,16 @@
 
 export {
   type ChatRecord,
+  type ChatSummary,
   type KaggleSecret,
   type StoredPrefs,
   type VaultMode,
   clearSecret,
   createVault,
+  deleteChat,
+  getLastChatId,
   getLocalSyncUpdatedAt,
+  listChats,
   isUnlocked,
   loadChat,
   loadPrefs,

@@ -298,3 +298,42 @@ def test_explicit_continue_after_coding_history_still_harness():
     use, task = should_use_harness("continue", history=history)
     assert use is True
     assert "fizzbuzz" in task
+
+
+# ── generation completeness (anti-truncation) ────────────────────────────────
+
+from harness.generate import looks_unfinished
+
+
+def test_unfinished_unclosed_think():
+    assert looks_unfinished("<think>still reasoning about the")
+
+
+def test_unfinished_unclosed_tool():
+    assert looks_unfinished('<tool name="write">\n{"path": "a.py"')
+
+
+def test_unfinished_unclosed_fence():
+    assert looks_unfinished("Here is code:\n```python\ndef f():")
+
+
+def test_unfinished_mid_sentence():
+    assert looks_unfinished("The answer is that we should refactor the")
+
+
+def test_finished_clean_reply():
+    assert not looks_unfinished("The function reverses a string. Tests pass.")
+
+
+def test_finished_closed_fence():
+    assert not looks_unfinished("```python\ndef f():\n    return 1\n```")
+
+
+def test_chat_request_accepts_system_field():
+    from schemas import ChatRequest
+
+    req = ChatRequest(
+        messages=[{"role": "user", "content": "hi"}],
+        system="always answer in haiku",
+    )
+    assert req.system == "always answer in haiku"

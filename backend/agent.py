@@ -221,13 +221,18 @@ def set_progress_callback(cb) -> None:
 
 
 def run_user_message(
-    user_text: str, history: Optional[list] = None, force_harness: bool = False
+    user_text: str,
+    history: Optional[list] = None,
+    force_harness: bool = False,
+    system_extra: str = "",
 ) -> dict:
     """Route casual chat vs coding harness (history-aware for 'continue…')."""
     use, task = should_use_harness(user_text, history=history, force=force_harness)
     if use:
+        if system_extra:
+            task = f"{task}\n\n## User instructions (always follow)\n{system_extra[:1500]}"
         return run_coding_harness(task)
-    return simple_chat(user_text, history=history)
+    return simple_chat(user_text, history=history, system_extra=system_extra)
 
 
 # Re-exports for tests / external callers
