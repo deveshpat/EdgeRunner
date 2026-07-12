@@ -179,34 +179,57 @@ def should_use_harness(
     return False, (user_text or "").strip()
 
 
-def simple_chat(user_text: str, history: Optional[list] = None) -> dict:
+def _invoke_text(llm, prompt: str, *, max_tokens: int) -> str:
     from langchain_core.messages import HumanMessage
+
+    try:
+        bound = llm.bind(max_tokens=max_tokens) if hasattr(llm, "bind") else llm
+        response = bound.invoke([HumanMessage(content=prompt)])
+    except Exception:
+        response = llm.invoke([HumanMessage(content=prompt)])
+    return getattr(response, "content", None) or str(response)
+
+
+def simple_chat(user_text: str, history: Optional[list] = None) -> dict:
     from harness.llm_bridge import get_llm
+    from harness.thinking import split_think
 
     _progress("💬 [Chat] Generating reply…")
     hist = history or []
     hist_snip = ""
-    for m in hist[-4:]:
+    for m in hist[-8:]:
         role, content = _msg_fields(m)
         if role and content:
-            hist_snip += f"{role}: {str(content)[:400]}\n"
+            hist_snip += f"{role}: {str(content)[:500]}\n"
 
     prompt = f"{system_chat()}\n\n{hist_snip}user: {user_text}\nassistant:"
     llm = get_llm()
-    try:
-        bound = llm.bind(max_tokens=256) if hasattr(llm, "bind") else llm
-        response = bound.invoke([HumanMessage(content=prompt)])
-    except Exception:
-        response = llm.invoke([HumanMessage(content=prompt)])
+    raw = _invoke_text(llm, prompt, max_tokens=768)
+    visible, thoughts = split_think(raw)
 
-    content = getattr(response, "content", None) or str(response)
+    if not visible:
+        # Thinking model spent every token inside <think> (or truncated there).
+        # Close the block ourselves and ask for the answer only.
+        _progress("💬 [Chat] Reply was all reasoning — asking for the final answer…")
+        follow = (
+            f"{prompt}{raw}\n</think>\n\n"
+            "Now give ONLY the final answer to the user — concise, complete "
+            "sentences, no <think> tags:"
+        )
+        raw2 = _invoke_text(llm, follow, max_tokens=512)
+        v2, t2 = split_think(raw2)
+        visible = v2 or raw2.strip()
+        thoughts = "\n\n".join(x for x in (thoughts, t2) if x)
+
     _progress("💬 [Chat] Done.")
     return {
         "mode": "chat",
-        "response": content.strip(),
-        "thought_process": [
-            "Direct chat reply (coding harness skipped for this message)."
-        ],
+        "response": visible.strip(),
+        "thought_process": (
+            [thoughts]
+            if thoughts
+            else ["Direct chat reply (coding harness skipped for this message)."]
+        ),
         "code": "",
         "terminal_output": "",
     }

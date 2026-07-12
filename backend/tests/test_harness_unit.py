@@ -219,3 +219,61 @@ if __name__ == "__main__":
     test_resolve_slash_code()
     test_continue_routing()
     print("ok")
+
+
+# ── thinking-model output hygiene ────────────────────────────────────────────
+
+from harness.thinking import split_think, strip_think
+
+
+def test_split_think_closed_block():
+    visible, reasoning = split_think("<think>let me plan</think>The answer is 4.")
+    assert visible == "The answer is 4."
+    assert "let me plan" in reasoning
+
+
+def test_split_think_unclosed_truncated():
+    visible, reasoning = split_think("<think>I was cut off mid reason")
+    assert visible == ""
+    assert "cut off" in reasoning
+
+
+def test_split_think_stray_close_tag():
+    visible, reasoning = split_think("hidden reasoning here</think>Visible reply.")
+    assert visible == "Visible reply."
+    assert "hidden reasoning" in reasoning
+
+
+def test_split_think_no_tags_passthrough():
+    visible, reasoning = split_think("Plain answer, no tags.")
+    assert visible == "Plain answer, no tags."
+    assert reasoning == ""
+
+
+def test_split_think_multiple_blocks():
+    visible, _ = split_think("<think>a</think>one <think>b</think>two")
+    assert "one" in visible and "two" in visible
+    assert "<think>" not in visible
+
+
+def test_strip_think_helper():
+    assert strip_think("<think>x</think>y") == "y"
+
+
+def test_clean_output_handles_unclosed_think():
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from main import clean_output
+
+    # Unclosed think block → nothing visible; keep raw text rather than empty
+    out = clean_output("<think>only reasoning, truncated")
+    assert out  # never returns empty for non-empty input
+    assert clean_output("<think>r</think>final") == "final"
+
+
+def test_parse_unknown_slash_never_reaches_model():
+    # Backend counterpart: /commands resolver should not treat /sett as chat
+    from harness.commands import resolve_slash
+
+    resolved = resolve_slash("/sett")
+    # resolve_slash returns None/no-op for unknown; the frontend now blocks it
+    assert resolved is None or getattr(resolved, "kind", None) != "prompt"

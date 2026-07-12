@@ -162,6 +162,22 @@ def load_model(
             }
             _set_status("ready", _model_meta["name"], loading=False)
             print("✅ SOTA Engine Loaded!", flush=True)
+            try:
+                import os
+                from llama_cpp import llama_supports_gpu_offload
+
+                gpu_ok = bool(llama_supports_gpu_offload())
+                accel = os.environ.get("KP_ACCELERATOR", "cpu")
+                _model_meta["gpu_offload"] = gpu_ok
+                print(f"llama.cpp gpu_offload={gpu_ok} accel={accel}", flush=True)
+                if not gpu_ok and accel != "cpu":
+                    print(
+                        "⚠️ GPU session but this llama.cpp wheel has no CUDA — "
+                        "inference will run on CPU and be very slow.",
+                        flush=True,
+                    )
+            except Exception:
+                pass
         except Exception as e:
             _local_llm = None
             _model_meta = {

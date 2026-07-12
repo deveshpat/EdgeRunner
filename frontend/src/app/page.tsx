@@ -1280,6 +1280,20 @@ export default function EdgeRunnerUI() {
       return;
     }
 
+    if (parsed.kind === "unknown") {
+      // Typo/partial like "/sett" — never send to the model
+      const hint = parsed.suggestions.length
+        ? `did you mean ${parsed.suggestions.map((c) => "/" + c.name).join(" · ")}?`
+        : "/help for the list";
+      setInput("");
+      setMessages((prev) => [
+        ...prev,
+        { role: "user", content: rawInput, ts: Date.now() },
+        sysLine(`unknown command: /${parsed.name} — ${hint}`),
+      ]);
+      return;
+    }
+
     if (!backendUrl) {
       setMessages((prev) => [
         ...prev,
@@ -1330,6 +1344,7 @@ export default function EdgeRunnerUI() {
     ]);
 
     const base = backendUrl.replace(/\/$/, "");
+    const sendStartedAt = Date.now();
     const updateLastAssistant = (patch: Partial<Message>) => {
       setMessages((prev) => {
         const next = [...prev];
@@ -1439,25 +1454,81 @@ export default function EdgeRunnerUI() {
         ts: Date.now(),
       });
     } catch (err) {
-      let stillUp = false;
-      try {
-        const h = await fetch(`${base}/health`, {
-          signal: AbortSignal.timeout(5000),
-          cache: "no-store",
-          referrerPolicy: "no-referrer",
-        });
-        stillUp = h.ok;
-      } catch {
-        stillUp = false;
-      }
       const detail =
         err instanceof Error && err.message ? ` (${err.message})` : "";
-      updateLastAssistant({
-        content: stillUp
-          ? `reply interrupted${detail}. backend still online — try again or /code for harness`
-          : "connection error — session may be gone. settings → relaunch",
-        ts: Date.now(),
-      });
+
+      // Cloudflare quick tunnels drop long streams while the worker keeps
+      // computing. Probe health with retries, then recover the finished run
+      // from /chat/last instead of declaring the session dead.
+      let stillUp = false;
+      for (let i = 0; i < 3 && !stillUp; i++) {
+        try {
+          const h = await fetch(`${base}/health`, {
+            signal: AbortSignal.timeout(5000),
+            cache: "no-store",
+            referrerPolicy: "no-referrer",
+          });
+          stillUp = h.ok;
+        } catch {
+          /* retry */
+        }
+        if (!stillUp) await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+      }
+
+      let recovered = false;
+      if (stillUp) {
+        updateLastAssistant({
+          content: `stream dropped${detail} — worker still running, recovering result…`,
+        });
+        const sentAtSec = sendStartedAt / 1000;
+        const deadline = Date.now() + 8 * 60_000;
+        while (Date.now() < deadline) {
+          try {
+            const r = await fetch(`${base}/chat/last`, {
+              signal: AbortSignal.timeout(8000),
+              cache: "no-store",
+              referrerPolicy: "no-referrer",
+            });
+            if (r.status === 404) break; // older worker without /chat/last
+            if (r.ok) {
+              const last = (await r.json()) as {
+                running?: boolean;
+                started_at?: number | null;
+                result?: {
+                  response?: string;
+                  thought_process?: string[];
+                } | null;
+              };
+              const ours =
+                typeof last.started_at === "number" &&
+                last.started_at >= sentAtSec - 120;
+              if (!last.running) {
+                if (ours && last.result?.response) {
+                  updateLastAssistant({
+                    content: last.result.response,
+                    thoughts: last.result.thought_process,
+                    ts: Date.now(),
+                  });
+                  recovered = true;
+                }
+                break; // finished (ours rendered) or stale run — stop polling
+              }
+            }
+          } catch {
+            /* tunnel blip — keep polling */
+          }
+          await new Promise((r) => setTimeout(r, 3500));
+        }
+      }
+
+      if (!recovered) {
+        updateLastAssistant({
+          content: stillUp
+            ? `reply interrupted${detail}. backend still online — try again or /code for harness`
+            : "connection error — worker unreachable after retries. settings → relaunch",
+          ts: Date.now(),
+        });
+      }
     } finally {
       setIsLoading(false);
       inputRef.current?.focus();

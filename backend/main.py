@@ -5,6 +5,7 @@ import queue
 import re
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -45,7 +46,10 @@ _MODEL_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="edgerunner-m
 def clean_output(text: str) -> str:
     if not text:
         return ""
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    from harness.thinking import split_think
+
+    visible, _ = split_think(text)
+    text = visible or text
     text = text.split("If the draft answers")[0]
     text = text.split("output exactly")[0]
     return text.strip()
@@ -301,7 +305,51 @@ async def models_unload():
     return {"ok": True, "model": meta}
 
 
-def _chat_work(user_text: str, history_msgs: list, force_harness: bool, progress_q: queue.Queue):
+# Last chat run, kept so clients can recover the result after a dropped
+# stream (Cloudflare quick tunnels cut long responses; the worker finishes
+# the run anyway). Single-user worker → one slot is enough.
+_LAST_RUN_LOCK = threading.Lock()
+_LAST_RUN: dict = {
+    "id": None,
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "result": None,
+}
+
+
+def _last_run_start(run_id: str) -> None:
+    with _LAST_RUN_LOCK:
+        _LAST_RUN.update(
+            id=run_id,
+            running=True,
+            started_at=time.time(),
+            finished_at=None,
+            result=None,
+        )
+
+
+def _last_run_finish(run_id: str, payload: dict) -> None:
+    with _LAST_RUN_LOCK:
+        if _LAST_RUN["id"] == run_id:
+            _LAST_RUN.update(running=False, finished_at=time.time(), result=payload)
+
+
+@app.get("/chat/last")
+async def chat_last():
+    """Recovery endpoint: latest run's state + result (for dropped streams)."""
+    watchdog.heartbeat()
+    with _LAST_RUN_LOCK:
+        return dict(_LAST_RUN)
+
+
+def _chat_work(
+    user_text: str,
+    history_msgs: list,
+    force_harness: bool,
+    progress_q: queue.Queue,
+    run_id: str = "",
+):
     """Runs on the chat thread pool; pushes progress + final result onto progress_q."""
 
     def on_progress(msg: str) -> None:
@@ -316,23 +364,25 @@ def _chat_work(user_text: str, history_msgs: list, force_harness: bool, progress
         result = run_user_message(
             user_text, history=history_msgs, force_harness=force_harness
         )
-        progress_q.put(
-            {
-                "type": "done",
-                "response": clean_output(result.get("response") or ""),
-                "thought_process": result.get("thought_process") or [],
-                "mode": result.get("mode") or "chat",
-            }
-        )
+        payload = {
+            "type": "done",
+            "run_id": run_id,
+            "response": clean_output(result.get("response") or ""),
+            "thought_process": result.get("thought_process") or [],
+            "mode": result.get("mode") or "chat",
+        }
     except Exception as e:
-        progress_q.put(
-            {
-                "type": "done",
-                "response": f"⚠️ Agent error: {e}",
-                "thought_process": [str(e)],
-                "mode": "error",
-            }
-        )
+        payload = {
+            "type": "done",
+            "run_id": run_id,
+            "response": f"⚠️ Agent error: {e}",
+            "thought_process": [str(e)],
+            "mode": "error",
+        }
+    try:
+        if run_id:
+            _last_run_finish(run_id, payload)
+        progress_q.put(payload)
     finally:
         set_progress_callback(None)
         progress_q.put(None)  # sentinel
@@ -386,6 +436,8 @@ async def chat_endpoint(request: ChatRequest, raw: Request):
     )
 
     progress_q: queue.Queue = queue.Queue()
+    run_id = uuid.uuid4().hex
+    _last_run_start(run_id)
     loop = asyncio.get_running_loop()
     fut = loop.run_in_executor(
         _CHAT_POOL,
@@ -394,6 +446,7 @@ async def chat_endpoint(request: ChatRequest, raw: Request):
         history,
         force,
         progress_q,
+        run_id,
     )
 
     if want_json_only:

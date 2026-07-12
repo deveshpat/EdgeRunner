@@ -204,6 +204,12 @@ export function findCommand(name: string): SlashCommand | undefined {
 export type ParsedSlash =
   | { kind: "none"; text: string }
   | {
+      kind: "unknown";
+      name: string;
+      raw: string;
+      suggestions: SlashCommand[];
+    }
+  | {
       kind: "command";
       command: SlashCommand;
       args: string;
@@ -217,11 +223,22 @@ export function parseSlash(input: string): ParsedSlash {
 
   // /command rest…
   const m = text.match(/^\/([a-zA-Z0-9_?-]+)(?:\s+([\s\S]*))?$/);
-  if (!m) return { kind: "none", text: input };
+  if (!m) {
+    // "/", "/ …" — malformed command, never send to the model
+    return { kind: "unknown", name: text.slice(1), raw: text, suggestions: [] };
+  }
   const name = m[1].toLowerCase();
   const args = (m[2] || "").trim();
   const command = findCommand(name);
-  if (!command) return { kind: "none", text: input };
+  if (!command) {
+    // Typo / partial like "/sett" — hint locally instead of sending to the model
+    return {
+      kind: "unknown",
+      name,
+      raw: text,
+      suggestions: filterCommands(name).slice(0, 3),
+    };
+  }
   return { kind: "command", command, args, raw: text };
 }
 

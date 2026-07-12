@@ -101,17 +101,60 @@ def _progress(msg: str) -> None:
             pass
 
 
+# Seconds between "still generating…" liveness notes during one LLM call.
+LLM_SLOW_NOTE_S = int(os.environ.get("EDGERUNNER_LLM_SLOW_NOTE_S", "30"))
+
+# Reasoning stripped from the last _llm_text call (for the trace panel).
+LAST_REASONING = ""
+
+
 def _llm_text(prompt: str, *, max_tokens: int = 1200) -> str:
+    """
+    Invoke the model off-thread and emit liveness notes while it generates,
+    so slow steps show elapsed progress instead of a silent stuck spinner.
+    The invoke is never abandoned (llama.cpp is not safe to call concurrently).
+    Returns the reply with <think> reasoning stripped (kept in LAST_REASONING).
+    """
+    import threading
+    import time
+
     from langchain_core.messages import HumanMessage
     from harness.llm_bridge import get_llm
+    from harness.thinking import split_think
 
+    global LAST_REASONING
     llm = get_llm()
-    try:
-        bound = llm.bind(max_tokens=max_tokens) if hasattr(llm, "bind") else llm
-        response = bound.invoke([HumanMessage(content=prompt)])
-    except Exception:
-        response = llm.invoke([HumanMessage(content=prompt)])
-    return (getattr(response, "content", None) or str(response)).strip()
+    result: dict = {}
+
+    def _work() -> None:
+        try:
+            bound = llm.bind(max_tokens=max_tokens) if hasattr(llm, "bind") else llm
+            response = bound.invoke([HumanMessage(content=prompt)])
+        except Exception:
+            response = llm.invoke([HumanMessage(content=prompt)])
+        result["text"] = (getattr(response, "content", None) or str(response)).strip()
+
+    t = threading.Thread(target=_work, daemon=True)
+    start = time.monotonic()
+    t.start()
+    next_note = LLM_SLOW_NOTE_S
+    while t.is_alive():
+        t.join(timeout=5.0)
+        elapsed = int(time.monotonic() - start)
+        if t.is_alive() and elapsed >= next_note:
+            _progress(f"⏳ generating… {elapsed}s")
+            next_note += LLM_SLOW_NOTE_S
+
+    raw = result.get("text", "")
+    visible, reasoning = split_think(raw)
+    LAST_REASONING = reasoning
+    if not visible:
+        return raw
+    # If the model wrapped its tool calls inside <think>, keep the raw reply
+    # so the tool parser still sees them.
+    if "<tool" in raw and "<tool" not in visible:
+        return raw
+    return visible
 
 
 def _wants_plan_mode(task: str) -> bool:
@@ -343,6 +386,8 @@ def run_coding_agent(
         prompt = messages_blob + phase_hdr + stuck_nudge + "assistant:"
         reply = _llm_text(prompt, max_tokens=1400)
         last_reply = reply
+        if LAST_REASONING:
+            thought.append(f"🧠 reasoning (step {step}):\n{LAST_REASONING[:1200]}")
         thought.append(f"**Step {step} ({phase}):**\n{reply[:2000]}")
         transcript.append(f"assistant:\n{reply}")
 
