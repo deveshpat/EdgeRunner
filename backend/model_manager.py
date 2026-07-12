@@ -379,6 +379,16 @@ def _fallback_model(hw_total_gb: float = 16.0) -> dict:
     # Ordered largest-first among known good single-file instruct GGUFs
     catalog = [
         {
+            # Native <tool_call> training — the best pairing for the
+            # Hermes Agent engine (128K-trained; 64K here for KV budget)
+            "repo_id": "NousResearch/Hermes-3-Llama-3.1-8B-GGUF",
+            "name": "Hermes-3-Llama-3.1-8B-GGUF",
+            "filename": "Hermes-3-Llama-3.1-8B.Q4_K_M.gguf",
+            "file_size_gb": 4.9,
+            "required_ram_gb": 7.4,
+            "safe_ctx": 65536,
+        },
+        {
             "repo_id": "Qwen/Qwen2.5-7B-Instruct-GGUF",
             "name": "Qwen2.5-7B-Instruct-GGUF",
             "filename": "qwen2.5-7b-instruct-q4_k_m.gguf",
@@ -493,6 +503,18 @@ def list_model_options(limit: int = 16) -> dict:
     fallbacks = []
     for m in (
         _fallback_model(hw["total_gb"]),
+        {
+            "repo_id": "NousResearch/Hermes-3-Llama-3.1-8B-GGUF",
+            "name": "Hermes-3-Llama-3.1-8B-GGUF",
+            "filename": "Hermes-3-Llama-3.1-8B.Q4_K_M.gguf",
+            "file_size_gb": 4.9,
+            "required_ram_gb": 7.4,
+            "safe_ctx": 65536,
+            "sharded": False,
+            "shard_files": ["Hermes-3-Llama-3.1-8B.Q4_K_M.gguf"],
+            "fit_status": "✅ HERMES-NATIVE",
+            "total_score": 55,
+        },
         {
             "repo_id": "Qwen/Qwen2.5-7B-Instruct-GGUF",
             "name": "Qwen2.5-7B-Instruct-GGUF",
