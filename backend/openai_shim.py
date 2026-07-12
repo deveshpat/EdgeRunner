@@ -156,18 +156,66 @@ def _get_llama():
     return get_raw_llama()
 
 
-def _generate(messages: list, *, max_tokens: int, temperature: float) -> str:
+_REP_WINDOW = 600
+_REP_TAIL = 80
+
+
+def _generate(
+    messages: list,
+    *,
+    max_tokens: int,
+    temperature: float,
+    top_p: Optional[float] = None,
+) -> str:
+    """
+    Stream internally so a degenerating small model can be cut off the
+    moment it starts looping (same tail repeated 3+ times) instead of
+    burning the whole token budget on repetition.
+    """
     llama = _get_llama()
+    parts: list[str] = []
+    kwargs: dict[str, Any] = {
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "repeat_penalty": 1.15,
+        "stream": True,
+    }
+    if top_p is not None:
+        kwargs["top_p"] = top_p
     with _MODEL_LOCK:
-        result = llama.create_chat_completion(
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
-    return (
-        (result.get("choices") or [{}])[0].get("message", {}).get("content")
-        or ""
-    )
+        try:
+            window = ""
+            for chunk in llama.create_chat_completion(**kwargs):
+                delta = (
+                    (chunk.get("choices") or [{}])[0]
+                    .get("delta", {})
+                    .get("content")
+                    or ""
+                )
+                if not delta:
+                    continue
+                parts.append(delta)
+                window = (window + delta)[-_REP_WINDOW:]
+                if len(window) >= _REP_WINDOW:
+                    tail = window[-_REP_TAIL:]
+                    if window.count(tail) >= 3:
+                        parts.append("\n")
+                        break  # repetition loop — stop wasting compute
+        except Exception:
+            if not parts:
+                result = llama.create_chat_completion(
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                return (
+                    (result.get("choices") or [{}])[0]
+                    .get("message", {})
+                    .get("content")
+                    or ""
+                )
+    return "".join(parts)
 
 
 def _completion_payload(model: str, content: str, tool_calls: list) -> dict:
@@ -282,13 +330,23 @@ async def v1_chat_completions(request: Request):
         int(body.get("max_tokens") or MAX_COMPLETION_TOKENS),
         MAX_COMPLETION_TOKENS,
     )
-    temperature = float(body.get("temperature") or 0.2)
+    # 0.7 default: low temps make small models repetition-loop on the large
+    # Hermes system prompt; honor the caller's explicit value when present.
+    temperature = float(body.get("temperature") or 0.7)
+    top_p = body.get("top_p")
+    top_p = float(top_p) if top_p is not None else None
 
     converted = convert_messages(messages, tools)
     loop = asyncio.get_running_loop()
     try:
         raw = await loop.run_in_executor(
-            None, lambda: _generate(converted, max_tokens=max_tokens, temperature=temperature)
+            None,
+            lambda: _generate(
+                converted,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+            ),
         )
     except Exception as e:
         return JSONResponse(
