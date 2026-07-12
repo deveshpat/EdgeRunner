@@ -58,21 +58,39 @@ def main() -> int:
         # Kaggle lacks the libcuda.so linker symlink → CMake can't resolve
         # CUDA::cuda_driver. Point it at the stub (or the real driver lib).
         import glob
+        import tempfile
 
         driver = None
         for pat in (
             "/usr/local/cuda/lib64/stubs/libcuda.so",
-            "/usr/lib/x86_64-linux-gnu/libcuda.so",
-            "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+            "/usr/local/cuda*/lib64/stubs/libcuda.so",
+            "/usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so",
+            "/usr/local/cuda*/targets/x86_64-linux/lib/stubs/libcuda.so",
         ):
             hits = sorted(glob.glob(pat))
             if hits:
                 driver = hits[0]
                 break
+        if not driver:
+            r = subprocess.run(
+                ["bash", "-lc", "find /usr /opt -name 'libcuda.so*' 2>/dev/null | sort | head -10"],
+                capture_output=True,
+                text=True,
+            )
+            log("find libcuda results:\n" + (r.stdout or "(none)"))
+            hits = [x for x in (r.stdout or "").split() if x]
+            exact = [x for x in hits if x.endswith("libcuda.so")]
+            if exact:
+                driver = exact[0]
+            elif hits:
+                # Only versioned libcuda.so.1 present — shim a .so symlink
+                link = Path(tempfile.mkdtemp(prefix="cudastub")) / "libcuda.so"
+                link.symlink_to(hits[0])
+                driver = str(link)
         log(f"libcuda for linking: {driver or 'MISSING'}")
         if driver:
             cuda_args += f" -DCUDA_cuda_driver_LIBRARY={driver}"
-        cuda_args += " -DCMAKE_LIBRARY_PATH=/usr/local/cuda/lib64/stubs"
+            cuda_args += f" -DCMAKE_LIBRARY_PATH={Path(driver).parent}"
         env["CMAKE_ARGS"] = cuda_args
         env["FORCE_CMAKE"] = "1"
         suffix = "gpu"
