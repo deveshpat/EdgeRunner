@@ -23,6 +23,7 @@ from typing import Optional
 
 from harness.language import extract_fenced_code
 from harness.tools.registry import ToolRegistry, parse_tool_calls
+from harness.workspace import shared_workspace_dir
 
 _progress_cb = None
 
@@ -78,6 +79,11 @@ Tool format (required):
 <tool name="write">
 {"path": "solution.py", "content": "def reverse_string(s):\\n    return s[::-1]\\n"}
 </tool>
+
+CRITICAL: Do not write to placeholder files (solution.py, main.py, test.py)
+unless the task is a standalone algorithm exercise. For repo/codebase tasks,
+act directly on real filenames you discover via read/grep/glob — never invent
+a file.
 """
 
 PLAN_SYSTEM = """You are EdgeRunner in plan mode (readonly analysis).
@@ -321,7 +327,7 @@ def run_coding_agent(
     """
     plan = plan_mode if plan_mode is not None else _wants_plan_mode(task)
     steps = max_steps or (MAX_STEPS_PLAN if plan else MAX_STEPS_BUILD)
-    tools = ToolRegistry()
+    tools = ToolRegistry(cwd=shared_workspace_dir())
     system = PLAN_SYSTEM if plan else BUILD_SYSTEM
     tool_block = tools.list_for_prompt(plan_mode=plan)
 
@@ -395,7 +401,11 @@ def run_coding_agent(
         calls = parse_tool_calls(reply)
 
         if not calls and not plan:
-            code = extract_fenced_code(reply, preferred="python")
+            code = (
+                extract_fenced_code(reply, preferred="python")
+                if _is_pure_coding_exercise(task)
+                else ""
+            )
             if code and step <= 4:
                 _progress("📝 materializing solution.py from code fence")
                 tools.call("write", {"path": "solution.py", "content": code})
