@@ -20,6 +20,7 @@ ROOT = pathlib.Path("/kaggle/working/edgerunner")
 # browser (which reads a bounded window) would never reach it.
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")  # fast Rust downloader
 
 
 def log(m):
@@ -54,7 +55,8 @@ def pip(*args):
 
 
 def install_deps():
-    pip("fastapi", "uvicorn[standard]", "httpx", "pydantic", "huggingface_hub")
+    pip("fastapi", "uvicorn[standard]", "httpx", "pydantic",
+        "huggingface_hub", "hf_transfer")
     # llama-cpp-python ships prebuilt wheels ONLY via this index (PyPI is an
     # sdist that compiles GGML from source — minutes). Force a wheel so we
     # never compile: --only-binary fails fast if no wheel matches instead of
@@ -68,10 +70,37 @@ def install_deps():
 
 
 def download_model():
+    import threading
     from huggingface_hub import hf_hub_download
 
-    path = hf_hub_download(repo_id=CONFIG["model_repo"], filename=CONFIG["model_file"])
-    log(f"model at {path}")
+    cache = pathlib.Path.home() / ".cache" / "huggingface"
+    stop = threading.Event()
+
+    def watch():
+        # Heartbeat so a slow download is visibly progressing, not hung.
+        while not stop.wait(10):
+            try:
+                mb = sum(f.stat().st_size for f in cache.rglob("*") if f.is_file())
+                log(f"  …downloaded {mb // (1024 * 1024)} MB")
+            except Exception:
+                pass
+
+    log(f"downloading {CONFIG['model_repo']}/{CONFIG['model_file']} …")
+    threading.Thread(target=watch, daemon=True).start()
+    t0 = time.time()
+    try:
+        path = hf_hub_download(
+            repo_id=CONFIG["model_repo"], filename=CONFIG["model_file"]
+        )
+    except Exception as e:
+        log(f"fast download failed ({e}); retrying without hf_transfer")
+        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+        path = hf_hub_download(
+            repo_id=CONFIG["model_repo"], filename=CONFIG["model_file"]
+        )
+    finally:
+        stop.set()
+    log(f"model ready in {int(time.time() - t0)}s: {path}")
     return path
 
 
@@ -133,7 +162,7 @@ def start_tunnel():
         m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", txt)
         if m:
             log(f"EDGERUNNER_URL={m.group(0)}")
-            return proc
+            return proc, m.group(0)
     raise RuntimeError("cloudflared did not produce a URL")
 
 
@@ -144,14 +173,20 @@ def main():
     model = download_model()
     llama = start_llama(model)
     api = start_api()
-    tunnel = start_tunnel()
-    log("ready — supervising session")
+    tunnel, tunnel_url = start_tunnel()
+    log(f"ready — serving at {tunnel_url}")
     # The FastAPI watchdog calls os._exit() in ITS process on shutdown/idle,
     # which only kills the API subprocess. The bootstrap must notice and tear
     # down llama + tunnel + itself, or the Kaggle session lingers (quota burn).
+    ticks = 0
     try:
         while True:
             time.sleep(3)
+            ticks += 1
+            # Re-emit the URL every ~21s so a reconnecting client always finds
+            # it near the log tail (and the log shows the session is alive).
+            if ticks % 7 == 0:
+                log(f"EDGERUNNER_URL={tunnel_url}")
             if api.poll() is not None:
                 log("API/watchdog exited — ending session")
                 break
