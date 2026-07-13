@@ -171,13 +171,12 @@ export default function Home() {
             {/* Kaggle power button */}
             <button
               onClick={() => {
-                const configured = kaggle.status?.configured;
-                if (!configured || !kaggle.reachable) {
+                if (!kaggle.configured) {
                   setShowSettings(true);
                 } else if (
-                  kaggle.state === "online" ||
-                  kaggle.state === "pushing" ||
-                  kaggle.state === "provisioning"
+                  ["online", "packing", "pushing", "provisioning"].includes(
+                    kaggle.state,
+                  )
                 ) {
                   kaggle.stop();
                 } else {

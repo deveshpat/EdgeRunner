@@ -12,6 +12,9 @@ node_modules/
 .next/
 out/
 *.tsbuildinfo
+
+# Generated at build time from backend/ (prebuild script)
+frontend/public/kernel-bundle.json
 .turbo/
 npm-debug.log*
 yarn-error.log*

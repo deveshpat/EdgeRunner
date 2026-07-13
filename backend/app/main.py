@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
-from app.routers import catalog, chat, kaggle, session
+from app.routers import catalog, chat, session
 
 
 def _truthy(value: str | None) -> bool:
@@ -45,7 +45,6 @@ app.add_middleware(
 app.include_router(catalog.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
 app.include_router(session.router, prefix="/api")  # worker: heartbeat/shutdown
-app.include_router(kaggle.router, prefix="/api")  # orchestrator: start/stop Kaggle
 
 
 @app.get("/api/health")

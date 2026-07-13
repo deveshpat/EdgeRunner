@@ -4,127 +4,263 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getApiBase, setApiBase } from "./api";
 import {
-  configureKaggle,
-  getKaggleStatus,
-  startKaggle,
-  stopKaggle,
-  type KaggleState,
-  type KaggleStatus,
-} from "./kaggle";
+  extractTunnelUrl,
+  isActive,
+  kernelLogs,
+  kernelStatus,
+  probeBackend,
+  saveKernel,
+  validateAuth,
+  type KaggleAuth,
+} from "./kaggleApi";
+import { loadWorkerTemplate, renderWorker, type WorkerConfig } from "./kernelBundle";
+import { clearCreds, loadCreds, saveCreds as vaultSave } from "./vault";
 
-const ACTIVE = new Set<KaggleState>(["pushing", "provisioning"]);
+export type KaggleState =
+  | "idle"
+  | "packing"
+  | "pushing"
+  | "provisioning"
+  | "online"
+  | "stopped"
+  | "failed";
 
 export interface UseKaggle {
-  status: KaggleStatus | null;
-  reachable: boolean; // is the orchestrator responding?
+  hydrated: boolean;
+  configured: boolean;
+  username: string | null;
   state: KaggleState;
   publicUrl: string | null;
+  logs: string;
   busy: boolean;
   error: string | null;
-  configure: (username: string, key: string) => Promise<boolean>;
+  saveCreds: (username: string, key: string) => Promise<boolean>;
+  forget: () => Promise<void>;
   start: (accelerator: string) => Promise<void>;
   stop: () => Promise<void>;
 }
 
+const MODEL_REPO = "Qwen/Qwen2.5-3B-Instruct-GGUF";
+const MODEL_FILE = "qwen2.5-3b-instruct-q4_k_m.gguf";
+const IDLE_TIMEOUT = 120;
+const MAX_LIFETIME = 3600;
+const STARTUP_GRACE = 900;
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    signal.addEventListener("abort", () => {
+      clearTimeout(t);
+      resolve();
+    });
+  });
+}
+
 export function useKaggle(): UseKaggle {
-  const [status, setStatus] = useState<KaggleStatus | null>(null);
-  const [reachable, setReachable] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
+  const [username, setUsername] = useState<string | null>(null);
+  const [state, setState] = useState<KaggleState>("idle");
+  const [publicUrl, setPublicUrl] = useState<string | null>(null);
+  const [logs, setLogs] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const session = status?.session;
-  const state: KaggleState = session?.state ?? "idle";
-  const publicUrl = session?.public_url ?? null;
+  const authRef = useRef<KaggleAuth | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const accelRef = useRef("cpu");
 
-  // Reflect the current backend into the shared API base.
-  useEffect(() => {
-    setApiBase(state === "online" ? publicUrl : null);
-  }, [state, publicUrl]);
-
-  const refresh = useCallback(async () => {
-    try {
-      const s = await getKaggleStatus();
-      setStatus(s);
-      setReachable(true);
-    } catch {
-      setReachable(false);
+  const stopHeartbeat = useCallback(() => {
+    if (heartbeatRef.current) {
+      clearInterval(heartbeatRef.current);
+      heartbeatRef.current = null;
     }
   }, []);
 
-  // Initial + interval polling (faster while a session is spinning up).
-  useEffect(() => {
-    refresh();
-    const fast = ACTIVE.has(state);
-    const id = setInterval(refresh, fast ? 4000 : 15000);
-    return () => clearInterval(id);
-  }, [refresh, state]);
+  const goOnline = useCallback(
+    (url: string) => {
+      setPublicUrl(url);
+      setState("online");
+      setApiBase(url);
+      stopHeartbeat();
+      const beat = () =>
+        fetch(`${getApiBase()}/api/session/heartbeat`, { method: "POST" }).catch(
+          () => {},
+        );
+      beat();
+      heartbeatRef.current = setInterval(beat, 25_000);
+    },
+    [stopHeartbeat],
+  );
 
-  // Heartbeat the worker while online so its watchdog keeps it alive.
+  // Scrape logs/status until the tunnel URL appears (shared by start + attach).
+  const provision = useCallback(
+    async (auth: KaggleAuth, signal: AbortSignal) => {
+      setState("provisioning");
+      const deadline = Date.now() + 900_000;
+      while (Date.now() < deadline && !signal.aborted) {
+        const status = await kernelStatus(auth, signal).catch(() => "");
+        const log = await kernelLogs(auth, { signal, maxMs: 10_000 }).catch(() => "");
+        if (log) setLogs(log.slice(-8000));
+        const url = extractTunnelUrl(log);
+        if (url && (await probeBackend(url))) {
+          goOnline(url);
+          return;
+        }
+        if (status.includes("ERROR") || status.includes("CANCEL")) {
+          setState("failed");
+          setError(`Kaggle kernel ${status || "failed"}`);
+          return;
+        }
+        if (status.includes("COMPLETE") && !url) {
+          setState("failed");
+          setError("Kernel finished without publishing a URL (see logs).");
+          return;
+        }
+        await sleep(6000, signal);
+      }
+      if (!signal.aborted) {
+        setState("failed");
+        setError("Timed out waiting for the tunnel URL.");
+      }
+    },
+    [goOnline],
+  );
+
+  // Hydrate creds and attempt to attach to an already-running session.
   useEffect(() => {
-    if (state !== "online") return;
-    const beat = () => {
-      fetch(`${getApiBase()}/api/session/heartbeat`, { method: "POST" }).catch(
-        () => {},
-      );
+    let cancelled = false;
+    (async () => {
+      const creds = await loadCreds();
+      if (cancelled) return;
+      if (creds) {
+        authRef.current = { username: creds.username, apiKey: creds.apiKey };
+        setUsername(creds.username);
+        // If a session is already running (started elsewhere), adopt it.
+        const status = await kernelStatus(authRef.current).catch(() => "");
+        if (!cancelled && isActive(status)) {
+          const controller = new AbortController();
+          abortRef.current = controller;
+          void provision(authRef.current, controller.signal);
+        }
+      }
+      if (!cancelled) setHydrated(true);
+    })();
+    return () => {
+      cancelled = true;
     };
-    beat();
-    const id = setInterval(beat, 25000);
-    return () => clearInterval(id);
-  }, [state]);
+  }, [provision]);
 
-  const configure = useCallback(
-    async (username: string, key: string) => {
-      setBusy(true);
-      setError(null);
-      try {
-        setStatus(await configureKaggle(username, key));
-        setReachable(true);
-        return true;
-      } catch (e) {
-        setError((e as Error).message);
-        return false;
-      } finally {
-        setBusy(false);
-      }
-    },
-    [],
-  );
+  useEffect(() => stopHeartbeat, [stopHeartbeat]);
 
-  const start = useCallback(
-    async (accelerator: string) => {
-      setBusy(true);
-      setError(null);
-      try {
-        setStatus(await startKaggle({ accelerator }));
-      } catch (e) {
-        setError((e as Error).message);
-      } finally {
-        setBusy(false);
-      }
-    },
-    [],
-  );
-
-  const stop = useCallback(async () => {
+  const saveCreds = useCallback(async (u: string, key: string) => {
     setBusy(true);
     setError(null);
+    const auth: KaggleAuth = { username: u, apiKey: key };
     try {
-      setStatus(await stopKaggle());
+      await validateAuth(auth);
+      await vaultSave({ username: u, apiKey: key });
+      authRef.current = auth;
+      setUsername(u);
+      return true;
     } catch (e) {
       setError((e as Error).message);
+      return false;
     } finally {
       setBusy(false);
     }
   }, []);
 
+  const forget = useCallback(async () => {
+    abortRef.current?.abort();
+    stopHeartbeat();
+    await clearCreds();
+    authRef.current = null;
+    setUsername(null);
+    setState("idle");
+    setPublicUrl(null);
+    setLogs("");
+    setApiBase(null);
+  }, [stopHeartbeat]);
+
+  const start = useCallback(
+    async (accelerator: string) => {
+      const auth = authRef.current;
+      if (!auth) return;
+      accelRef.current = accelerator;
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      setBusy(true);
+      setError(null);
+      setLogs("");
+      try {
+        setState("packing");
+        const template = await loadWorkerTemplate();
+        const config: WorkerConfig = {
+          gpu: accelerator === "gpu",
+          cuda: "cu124",
+          model_repo: MODEL_REPO,
+          model_file: MODEL_FILE,
+          idle_timeout: IDLE_TIMEOUT,
+          max_lifetime: MAX_LIFETIME,
+          startup_grace: STARTUP_GRACE,
+        };
+        const source = renderWorker(template, config);
+
+        setState("pushing");
+        await saveKernel(
+          auth,
+          source,
+          { gpu: config.gpu, sessionTimeoutSeconds: MAX_LIFETIME },
+          controller.signal,
+        );
+        await provision(auth, controller.signal);
+      } catch (e) {
+        if (!controller.signal.aborted) {
+          setState("failed");
+          setError((e as Error).message);
+        }
+      } finally {
+        setBusy(false);
+      }
+    },
+    [provision],
+  );
+
+  const stop = useCallback(async () => {
+    abortRef.current?.abort();
+    stopHeartbeat();
+    setBusy(true);
+    const url = publicUrl;
+    if (url) {
+      // Ask the worker to self-terminate (it also dies on idle timeout).
+      try {
+        await fetch(`${url.replace(/\/$/, "")}/api/session/shutdown`, {
+          method: "POST",
+        });
+      } catch {
+        /* ignore */
+      }
+    }
+    setApiBase(null);
+    setPublicUrl(null);
+    setState("stopped");
+    setBusy(false);
+  }, [publicUrl, stopHeartbeat]);
+
   return {
-    status,
-    reachable,
+    hydrated,
+    configured: username !== null,
+    username,
     state,
     publicUrl,
+    logs,
     busy,
     error,
-    configure,
+    saveCreds,
+    forget,
     start,
     stop,
   };
