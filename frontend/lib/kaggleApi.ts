@@ -17,14 +17,16 @@ export interface KaggleAuth {
   apiKey: string;
 }
 
-function authHeaders(auth: KaggleAuth): HeadersInit {
+function authValue(auth: KaggleAuth): string {
   const secret = auth.apiKey.trim();
   // New-style API tokens (kaggle.com → Settings → API) are prefixed "KGAT_"
   // and authenticate as Bearer. Legacy 32-hex keys use Basic username:key.
-  if (secret.startsWith("KGAT")) {
-    return { Authorization: `Bearer ${secret}` };
-  }
-  return { Authorization: "Basic " + btoa(`${auth.username.trim()}:${secret}`) };
+  if (secret.startsWith("KGAT")) return `Bearer ${secret}`;
+  return "Basic " + btoa(`${auth.username.trim()}:${secret}`);
+}
+
+function authHeaders(auth: KaggleAuth): HeadersInit {
+  return { Authorization: authValue(auth) };
 }
 
 async function kagglePost<T = unknown>(
@@ -135,7 +137,7 @@ export function isActive(status: string): boolean {
 }
 
 const URL_RE =
-  /(?:EDGERUNNER_URL=)((?:https?:\/\/)[^\s]+)|(https:\/\/[a-z0-9-]+\.trycloudflare\.com)/;
+  /(?:EDGERUNNER_URL=)((?:https?:\/\/)[^\s"\\]+)|(https:\/\/[a-z0-9-]+\.trycloudflare\.com)/;
 
 export function extractTunnelUrl(logs: string): string | null {
   const m = URL_RE.exec(logs);
@@ -144,102 +146,74 @@ export function extractTunnelUrl(logs: string): string | null {
   return url ? url.replace(/[)'".,;]+$/, "") : null;
 }
 
-/** Fetch worker logs (SSE stream while running). Returns "" on timeout. */
-export async function kernelLogs(
+/** Fetch worker logs. Returns accumulated log text (or "" on failure).
+ *
+ * Kaggle's endpoint is always an SSE stream (text/event-stream, keep-alive).
+ * We read it with XMLHttpRequest + onprogress instead of fetch().body.getReader()
+ * because iOS Safari / some mobile browsers don't reliably expose a readable
+ * stream on fetch responses — which left the mobile UI stuck on "starting"
+ * while desktop worked. XHR's incremental responseText is reliable everywhere.
+ */
+export function kernelLogs(
   auth: KaggleAuth,
   opts?: { maxMs?: number; signal?: AbortSignal },
 ): Promise<string> {
   const maxMs = opts?.maxMs ?? 12_000;
   const url = `${API}/kernels/logs/stream/${encodeURIComponent(auth.username)}/${STABLE_SLUG}`;
-  const controller = new AbortController();
-  const onAbort = () => controller.abort();
-  opts?.signal?.addEventListener("abort", onAbort);
-  const timer = setTimeout(() => controller.abort(), maxMs);
-  try {
-    const res = await fetch(url, {
-      headers: { Accept: "text/event-stream, application/json, */*", ...authHeaders(auth) },
-      signal: controller.signal,
-    });
-    if (!res.ok) return "";
-    const ctype = (res.headers.get("Content-Type") || "").toLowerCase();
-    if (ctype.includes("text/event-stream") && res.body) {
-      return await readSseUntilUrl(res.body, maxMs);
-    }
-    return normalizeLogs(await res.text());
-  } catch (e) {
-    if ((e as Error).name === "AbortError") return "";
-    throw e;
-  } finally {
-    clearTimeout(timer);
-    opts?.signal?.removeEventListener("abort", onAbort);
-  }
-}
-
-async function readSseUntilUrl(body: ReadableStream<Uint8Array>, maxMs: number): Promise<string> {
-  const reader = body.getReader();
-  const dec = new TextDecoder();
-  const lines: string[] = [];
-  const deadline = Date.now() + maxMs;
-  let buf = "";
-  try {
-    while (Date.now() < deadline) {
-      const remaining = deadline - Date.now();
-      const result = await Promise.race([
-        reader.read(),
-        new Promise<{ done: true; value: undefined }>((r) =>
-          setTimeout(() => r({ done: true, value: undefined }), remaining),
-        ),
-      ]);
-      if (result.done || !result.value) break;
-      buf += dec.decode(result.value, { stream: true });
-      const parts = buf.split("\n");
-      buf = parts.pop() || "";
-      for (const raw of parts) {
-        const line = raw.trimEnd();
-        if (!line.startsWith("data:")) continue;
-        const payload = line.slice(5).trimStart();
-        if (payload === "END_OF_LOG") return lines.join("\n");
-        try {
-          const ev = JSON.parse(payload) as { data?: string; stream_name?: string };
-          const prefix = ev.stream_name === "stderr" ? "ERR " : "";
-          lines.push(prefix + String(ev.data ?? "").replace(/\n$/, ""));
-        } catch {
-          lines.push(payload);
-        }
-        if (extractTunnelUrl(lines.join("\n"))) return lines.join("\n");
+  return new Promise((resolve) => {
+    if (typeof XMLHttpRequest === "undefined") return resolve("");
+    const xhr = new XMLHttpRequest();
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      opts?.signal?.removeEventListener("abort", finish);
+      try {
+        xhr.abort();
+      } catch {
+        /* ignore */
       }
-    }
-  } finally {
+      resolve(parseSse(xhr.responseText || ""));
+    };
+    const timer = setTimeout(finish, maxMs);
+    opts?.signal?.addEventListener("abort", finish);
     try {
-      await reader.cancel();
+      xhr.open("GET", url, true);
+      xhr.setRequestHeader("Authorization", authValue(auth));
+      xhr.setRequestHeader("Accept", "text/event-stream, application/json, */*");
+      // Stop as soon as the tunnel URL shows up in the stream so far.
+      xhr.onprogress = () => {
+        if (extractTunnelUrl(xhr.responseText || "")) finish();
+      };
+      xhr.onload = finish;
+      xhr.onerror = finish;
+      xhr.ontimeout = finish;
+      xhr.timeout = maxMs + 3000;
+      xhr.send();
     } catch {
-      /* ignore */
+      finish();
     }
-  }
-  return lines.join("\n");
+  });
 }
 
-export function normalizeLogs(raw: string): string {
+/** Turn a raw SSE body ("data: {json}\n\n"…) into readable log text. */
+function parseSse(raw: string): string {
   if (!raw) return "";
-  const text = raw.trim();
-  try {
-    if (text.startsWith("[")) {
-      const data = JSON.parse(text);
-      if (Array.isArray(data)) {
-        return data
-          .map((ev) =>
-            ev && typeof ev === "object" && "data" in ev
-              ? (ev.stream_name === "stderr" ? "ERR " : "") +
-                String(ev.data ?? "").replace(/\n$/, "")
-              : String(ev),
-          )
-          .join("\n");
-      }
+  const out: string[] = [];
+  for (const line of raw.split("\n")) {
+    const s = line.trim();
+    if (!s.startsWith("data:")) continue;
+    const p = s.slice(5).trim();
+    if (p === "END_OF_LOG") break;
+    try {
+      const ev = JSON.parse(p) as { data?: string; stream_name?: string };
+      out.push((ev.stream_name === "stderr" ? "ERR " : "") + String(ev.data ?? "").replace(/\n$/, ""));
+    } catch {
+      out.push(p);
     }
-  } catch {
-    /* plain text */
   }
-  return text;
+  return out.join("\n");
 }
 
 /** Probe a candidate tunnel URL for a live EdgeRunner backend. */

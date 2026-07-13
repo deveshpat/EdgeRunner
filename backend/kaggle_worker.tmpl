@@ -15,6 +15,12 @@ FILES = json.loads(r"""__FILES__""")
 CONFIG = json.loads(r"""__CONFIG__""")
 ROOT = pathlib.Path("/kaggle/working/edgerunner")
 
+# Keep the kernel log tiny: Kaggle's log stream replays the whole history on
+# every connect, so progress bars would bury the EDGERUNNER_URL line and the
+# browser (which reads a bounded window) would never reach it.
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+
 
 def log(m):
     print(f"[edgerunner] {m}", flush=True)
