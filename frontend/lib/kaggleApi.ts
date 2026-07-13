@@ -55,14 +55,17 @@ async function kagglePost<T = unknown>(
   return data as T;
 }
 
-/** Cheap auth check — throws on bad credentials. */
+/** Cheap auth check — throws on bad credentials.
+ *
+ * Uses ListKernels (resource-agnostic): it succeeds for any authenticated user
+ * and 401s only on bad auth. Do NOT use GetKernelSessionStatus here — Kaggle
+ * returns 401 for a kernel that doesn't exist yet / isn't yours, which would
+ * reject valid credentials before the first launch. */
 export async function validateAuth(auth: KaggleAuth): Promise<void> {
-  // GetKernelSessionStatus on a nonexistent slug: 200/expected error if authed,
-  // 401 if not. We only care that it's not an auth failure.
   await kagglePost(
-    "/kernels.KernelsApiService/GetKernelSessionStatus",
+    "/kernels.KernelsApiService/ListKernels",
     auth,
-    { userName: auth.username, kernelSlug: STABLE_SLUG },
+    { userName: auth.username, pageSize: 1 },
   );
 }
 
