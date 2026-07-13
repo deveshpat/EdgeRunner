@@ -35,13 +35,13 @@ def _env_float(name: str, default: float) -> float:
 @dataclass
 class SessionWatchdog:
     idle_timeout: float = field(
-        default_factory=lambda: _env_float("EDGERUNNER_IDLE_TIMEOUT", 120.0)
+        default_factory=lambda: _env_float("EDGERUNNER_IDLE_TIMEOUT", 90.0)
     )
     max_lifetime: float = field(
         default_factory=lambda: _env_float("EDGERUNNER_MAX_LIFETIME", 3600.0)
     )
     startup_grace: float = field(
-        default_factory=lambda: _env_float("EDGERUNNER_STARTUP_GRACE", 600.0)
+        default_factory=lambda: _env_float("EDGERUNNER_STARTUP_GRACE", 90.0)
     )
     check_interval: float = 3.0
 

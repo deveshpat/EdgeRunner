@@ -21,15 +21,17 @@ import httpx
 from app import tools
 from app.config import settings
 from app.harnesses.base import Harness, StreamEvent
+from app.sampling import ensure_system_prompt, sampling_params, trim_history
 from app.schemas import ChatRequest
 
 MAX_ITERATIONS = 5
 
 SYSTEM_PROMPT = (
-    "You are EdgeRunner, a helpful agent. You have tools available. "
-    "When a question needs precise calculation, the current time, a random "
-    "number, text statistics, or a hash, call the appropriate tool rather than "
-    "guessing. Otherwise answer directly."
+    "You are EdgeRunner, a helpful agent running on a local model. You have "
+    "tools available (calculator, clock, random number, text stats, hashing). "
+    "Call a tool whenever the answer needs a precise computation, the current "
+    "time, randomness, or a hash — never guess those. Think step by step, then "
+    "give a clear final answer in Markdown. Do not fabricate tool results."
 )
 
 
@@ -42,8 +44,10 @@ class AgentHarness(Harness):
     )
 
     async def run(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:
-        messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
-        messages += [m.model_dump() for m in request.messages]
+        messages: list[dict] = ensure_system_prompt(
+            [m.model_dump() for m in request.messages], SYSTEM_PROMPT
+        )
+        messages = trim_history(messages)
 
         headers = {"Content-Type": "application/json"}
         if settings.llamacpp_api_key:
@@ -64,9 +68,9 @@ class AgentHarness(Harness):
                         "messages": messages,
                         "tools": tools.specs(),
                         "stream": True,
-                        "temperature": request.temperature
-                        if request.temperature is not None
-                        else 0.7,
+                        **sampling_params(
+                            request.temperature, request.top_p, request.max_tokens
+                        ),
                     }
 
                     async with client.stream(

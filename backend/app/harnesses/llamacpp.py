@@ -17,12 +17,13 @@ import httpx
 
 from app.config import settings
 from app.harnesses.base import Harness, StreamEvent
+from app.sampling import (
+    CHAT_SYSTEM_PROMPT,
+    ensure_system_prompt,
+    sampling_params,
+    trim_history,
+)
 from app.schemas import ChatRequest
-
-# llama-server's default sampling when the request omits a value.
-DEFAULT_TEMPERATURE = 0.7
-DEFAULT_TOP_P = 0.95
-DEFAULT_MAX_TOKENS = 1024
 
 
 class LlamaCppHarness(Harness):
@@ -31,17 +32,17 @@ class LlamaCppHarness(Harness):
     description = "Streams from a llama.cpp llama-server running a local GGUF model."
 
     def _payload(self, request: ChatRequest) -> dict:
+        messages = ensure_system_prompt(
+            [m.model_dump() for m in request.messages], CHAT_SYSTEM_PROMPT
+        )
+        messages = trim_history(messages)
         return {
             "model": request.model,
-            "messages": [m.model_dump() for m in request.messages],
+            "messages": messages,
             "stream": True,
-            "temperature": request.temperature
-            if request.temperature is not None
-            else DEFAULT_TEMPERATURE,
-            "top_p": request.top_p if request.top_p is not None else DEFAULT_TOP_P,
-            "max_tokens": request.max_tokens
-            if request.max_tokens is not None
-            else DEFAULT_MAX_TOKENS,
+            **sampling_params(
+                request.temperature, request.top_p, request.max_tokens
+            ),
         }
 
     async def run(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:

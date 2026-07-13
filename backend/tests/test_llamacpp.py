@@ -36,7 +36,10 @@ def test_payload_uses_request_and_defaults():
     assert payload["stream"] is True
     assert payload["temperature"] == 0.1  # from request
     assert payload["max_tokens"] > 0  # default applied
-    assert payload["messages"] == [{"role": "user", "content": "hi"}]
+    assert payload["repeat_penalty"] > 1  # anti-loop applied
+    # A default system prompt is prepended, then the user's message.
+    assert payload["messages"][0]["role"] == "system"
+    assert payload["messages"][-1] == {"role": "user", "content": "hi"}
 
 
 @pytest.mark.asyncio

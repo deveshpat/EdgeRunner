@@ -44,9 +44,12 @@ export interface UseKaggle {
 
 const MODEL_REPO = "Qwen/Qwen2.5-3B-Instruct-GGUF";
 const MODEL_FILE = "qwen2.5-3b-instruct-q4_k_m.gguf";
-const IDLE_TIMEOUT = 120;
+// Die 90s after the last heartbeat (or if no client ever connects), so an
+// orphaned/backgrounded session frees Kaggle quota fast. The frontend beats
+// every 25s, so 90s tolerates a few missed beats.
+const IDLE_TIMEOUT = 90;
 const MAX_LIFETIME = 3600;
-const STARTUP_GRACE = 900;
+const STARTUP_GRACE = 90;
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
