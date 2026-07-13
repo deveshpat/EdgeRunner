@@ -8,14 +8,30 @@ known ahead of time; tighten via ALLOWED_ORIGINS in production.
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
-from app.routers import catalog, chat
+from app.routers import catalog, chat, kaggle, session
 
-app = FastAPI(title="EdgeRunner", version=__version__)
+
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Only the Kaggle worker self-terminates; never the local orchestrator.
+    if _truthy(os.getenv("EDGERUNNER_WATCHDOG")):
+        from app.session import watchdog
+
+        watchdog.start()
+    yield
+
+
+app = FastAPI(title="EdgeRunner", version=__version__, lifespan=lifespan)
 
 _origins = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 app.add_middleware(
@@ -28,6 +44,8 @@ app.add_middleware(
 
 app.include_router(catalog.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
+app.include_router(session.router, prefix="/api")  # worker: heartbeat/shutdown
+app.include_router(kaggle.router, prefix="/api")  # orchestrator: start/stop Kaggle
 
 
 @app.get("/api/health")

@@ -1,7 +1,23 @@
 // API client for the EdgeRunner backend.
 
-export const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+// The orchestrator is the local control-plane backend (holds the Kaggle key,
+// starts/stops the worker). It's fixed. Chat/catalog go to the *active* base,
+// which is the orchestrator by default and switches to the Kaggle tunnel URL
+// once a session is online.
+const DEFAULT_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+export const ORCHESTRATOR_URL =
+  process.env.NEXT_PUBLIC_ORCHESTRATOR_URL ?? DEFAULT_BASE;
+
+let activeBase = DEFAULT_BASE;
+
+/** Point chat/catalog at a specific backend (e.g. the Kaggle tunnel), or reset. */
+export function setApiBase(url: string | null): void {
+  activeBase = url || DEFAULT_BASE;
+}
+
+export function getApiBase(): string {
+  return activeBase;
+}
 
 export interface Model {
   id: string;
@@ -52,7 +68,7 @@ export interface ToolEvent {
 }
 
 export async function fetchCatalog(): Promise<Catalog> {
-  const resp = await fetch(`${API_URL}/api/catalog`);
+  const resp = await fetch(`${getApiBase()}/api/catalog`);
   if (!resp.ok) throw new Error(`catalog: ${resp.status}`);
   return resp.json();
 }
@@ -74,7 +90,7 @@ export async function* streamChat(
   } & SamplingParams,
   signal?: AbortSignal,
 ): AsyncGenerator<StreamEvent> {
-  const resp = await fetch(`${API_URL}/api/chat`, {
+  const resp = await fetch(`${getApiBase()}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

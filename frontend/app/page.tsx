@@ -3,6 +3,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Composer } from "@/components/Composer";
+import {
+  KaggleControl,
+  STATE_COLOR,
+  STATE_LABEL,
+} from "@/components/KaggleControl";
 import { Logo } from "@/components/Logo";
 import { Message } from "@/components/Message";
 import { Picker } from "@/components/Picker";
@@ -16,6 +21,7 @@ import {
   type Settings,
 } from "@/lib/storage";
 import { useConversations } from "@/lib/useConversations";
+import { useKaggle } from "@/lib/useKaggle";
 
 export default function Home() {
   const [catalog, setCatalog] = useState<Catalog | null>(null);
@@ -26,6 +32,10 @@ export default function Home() {
   const [atBottom, setAtBottom] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
+  // Kaggle control plane (declared before catalog effects so its setApiBase
+  // effect runs first when the active backend changes).
+  const kaggle = useKaggle();
+
   const chat = useConversations(
     {
       model: catalog?.models[0]?.id ?? "",
@@ -35,13 +45,23 @@ export default function Home() {
   );
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Load catalog + settings on mount.
-  useEffect(() => {
+  const loadCatalog = useCallback(() => {
+    setCatalogError(null);
     fetchCatalog()
       .then(setCatalog)
       .catch((e) => setCatalogError(`Could not reach backend: ${e.message}`));
+  }, []);
+
+  // Load settings on mount.
+  useEffect(() => {
     setSettings(loadSettings());
   }, []);
+
+  // (Re)load the catalog whenever the active backend changes — i.e. when the
+  // Kaggle session comes online (tunnel) or goes back offline (local).
+  useEffect(() => {
+    loadCatalog();
+  }, [loadCatalog, kaggle.state, kaggle.publicUrl]);
 
   // Once hydrated and the catalog is loaded, make sure there is a session.
   useEffect(() => {
@@ -147,12 +167,40 @@ export default function Home() {
             >
               ⚙ settings
             </button>
+
+            {/* Kaggle power button */}
+            <button
+              onClick={() => {
+                const configured = kaggle.status?.configured;
+                if (!configured || !kaggle.reachable) {
+                  setShowSettings(true);
+                } else if (
+                  kaggle.state === "online" ||
+                  kaggle.state === "pushing" ||
+                  kaggle.state === "provisioning"
+                ) {
+                  kaggle.stop();
+                } else {
+                  kaggle.start("cpu");
+                }
+              }}
+              disabled={kaggle.busy}
+              className={`text-xs ${STATE_COLOR[kaggle.state]} hover:opacity-80
+                          disabled:opacity-40`}
+              title="Kaggle backend"
+            >
+              ⏻ kaggle: {STATE_LABEL[kaggle.state]}
+            </button>
+
             <span className="ml-auto text-xs text-term-dim">
               {catalog ? "● connected" : "○ connecting…"}
             </span>
           </div>
           {showSettings && (
-            <SettingsPanel settings={settings} onChange={updateSettings} />
+            <>
+              <SettingsPanel settings={settings} onChange={updateSettings} />
+              <KaggleControl kaggle={kaggle} />
+            </>
           )}
         </header>
 

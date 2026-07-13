@@ -8,6 +8,8 @@ dependencies = [
     "uvicorn[standard]>=0.29",
     "pydantic>=2.6",
     "httpx>=0.27",
+    # Orchestrator role only (local): used to push/monitor the Kaggle worker.
+    "kaggle>=1.6",
 ]
 
 [project.optional-dependencies]
