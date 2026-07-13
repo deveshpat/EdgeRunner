@@ -22,12 +22,12 @@ export function Picker({
   disabled,
 }: PickerProps) {
   return (
-    <label className="flex items-center gap-2 text-xs">
-      <span className="text-term-dim uppercase tracking-wider">{label}</span>
+    <label className="flex min-w-0 items-center gap-2 text-xs">
+      <span className="shrink-0 text-term-dim uppercase tracking-wider">{label}</span>
       <select
-        className="bg-term-panel border border-term-border text-term-fg rounded px-2 py-1
-                   focus:outline-none focus:border-term-green disabled:opacity-50
-                   cursor-pointer"
+        className="max-w-[45vw] min-w-0 truncate rounded border border-term-border
+                   bg-term-panel px-2 py-1 text-term-fg focus:border-term-green
+                   focus:outline-none disabled:opacity-50 cursor-pointer sm:max-w-[220px]"
         value={value}
         disabled={disabled}
         onChange={(e) => onChange(e.target.value)}

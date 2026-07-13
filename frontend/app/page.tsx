@@ -23,6 +23,13 @@ import {
 import { useConversations } from "@/lib/useConversations";
 import { useKaggle } from "@/lib/useKaggle";
 
+// llama-cpp-python reports a model id that can be a full filesystem path;
+// show just the file's base name without the .gguf extension.
+function prettyModelName(name: string): string {
+  const base = name.split("/").pop() ?? name;
+  return base.replace(/\.gguf$/i, "");
+}
+
 export default function Home() {
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [catalogError, setCatalogError] = useState<string | null>(null);
@@ -146,7 +153,10 @@ export default function Home() {
           <div className="mt-2 flex flex-wrap items-center gap-4">
             <Picker
               label="model"
-              options={catalog?.models ?? []}
+              options={(catalog?.models ?? []).map((m) => ({
+                ...m,
+                name: prettyModelName(m.name),
+              }))}
               value={model}
               onChange={chat.setModel}
               disabled={chat.busy}

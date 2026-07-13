@@ -76,10 +76,15 @@ def download_model():
 
 
 def start_llama(model_path):
+    # Alias so /v1/models reports a short id (e.g. "qwen2.5-3b-instruct-q4_k_m")
+    # instead of the full HF cache path.
+    alias = CONFIG["model_file"].rsplit(".", 1)[0]
     proc = subprocess.Popen(
         [sys.executable, "-m", "llama_cpp.server",
-         "--model", model_path, "--host", "127.0.0.1", "--port", "8080",
+         "--model", model_path, "--model_alias", alias,
+         "--host", "127.0.0.1", "--port", "8080",
          "--n_gpu_layers", "-1" if CONFIG.get("gpu") else "0"],
+        stdout=open(ROOT / "llama.log", "w"), stderr=subprocess.STDOUT,
         env=dict(os.environ))
     for _ in range(120):
         try:
@@ -104,7 +109,8 @@ def start_api():
     return subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app.main:app",
          "--host", "0.0.0.0", "--port", "8000"],
-        cwd=str(ROOT), env=env)
+        cwd=str(ROOT), env=env,
+        stdout=open(ROOT / "api.log", "w"), stderr=subprocess.STDOUT)
 
 
 def start_tunnel():
