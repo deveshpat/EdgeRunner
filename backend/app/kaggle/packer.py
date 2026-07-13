@@ -84,8 +84,15 @@ def pip(*args):
 
 
 def install_deps():
-    pip("fastapi", "uvicorn[standard]", "httpx", "pydantic",
-        "huggingface_hub", "llama-cpp-python[server]")
+    pip("fastapi", "uvicorn[standard]", "httpx", "pydantic", "huggingface_hub")
+    if CONFIG.get("gpu"):
+        # Prebuilt CUDA wheels — no on-Kaggle compile. Index hosts cuXXX builds.
+        cuda = CONFIG.get("cuda", "cu124")
+        idx = f"https://abetlen.github.io/llama-cpp-python/whl/{cuda}"
+        log(f"installing CUDA llama-cpp-python ({cuda}) from prebuilt wheels")
+        pip("llama-cpp-python[server]", "--extra-index-url", idx, "--prefer-binary")
+    else:
+        pip("llama-cpp-python[server]")
     log("python deps installed")
 
 

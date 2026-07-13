@@ -24,6 +24,7 @@ export interface KaggleSession {
 
 export interface KaggleStatus {
   configured: boolean;
+  username: string | null;
   session: KaggleSession;
 }
 

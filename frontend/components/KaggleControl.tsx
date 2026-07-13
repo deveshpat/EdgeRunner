@@ -28,9 +28,25 @@ export function KaggleControl({ kaggle }: { kaggle: UseKaggle }) {
   const [key, setKey] = useState("");
   const [accelerator, setAccelerator] = useState("cpu");
   const [showLogs, setShowLogs] = useState(false);
+  const [editing, setEditing] = useState(false);
 
   const { status, reachable, state, publicUrl, busy, error } = kaggle;
   const configured = status?.configured ?? false;
+  const showForm = !configured || editing;
+
+  function beginEdit() {
+    setUsername(status?.username ?? "");
+    setKey("");
+    setEditing(true);
+  }
+
+  async function connect() {
+    const ok = await kaggle.configure(username.trim(), key.trim());
+    if (ok) {
+      setKey("");
+      setEditing(false);
+    }
+  }
 
   return (
     <div className="mt-3 space-y-2 rounded border border-term-border bg-term-panel/40 p-3 text-xs">
@@ -47,7 +63,7 @@ export function KaggleControl({ kaggle }: { kaggle: UseKaggle }) {
         </p>
       )}
 
-      {!configured ? (
+      {showForm ? (
         <div className="space-y-2">
           <input
             className="w-full rounded border border-term-border bg-term-bg px-2 py-1
@@ -72,17 +88,43 @@ export function KaggleControl({ kaggle }: { kaggle: UseKaggle }) {
             Sent only to your local orchestrator and held in memory — never
             written to disk or sent anywhere external.
           </p>
-          <button
-            disabled={busy || !username || !key || !reachable}
-            onClick={() => kaggle.configure(username.trim(), key.trim())}
-            className="rounded border border-term-border px-2 py-1 text-term-green
-                       hover:border-term-green disabled:opacity-30"
-          >
-            connect
-          </button>
+          <div className="flex gap-2">
+            <button
+              disabled={busy || !username || !key || !reachable}
+              onClick={connect}
+              className="rounded border border-term-border px-2 py-1 text-term-green
+                         hover:border-term-green disabled:opacity-30"
+            >
+              {configured ? "save" : "connect"}
+            </button>
+            {configured && (
+              <button
+                disabled={busy}
+                onClick={() => setEditing(false)}
+                className="rounded border border-term-border px-2 py-1 text-term-dim
+                           hover:text-term-fg"
+              >
+                cancel
+              </button>
+            )}
+          </div>
         </div>
       ) : (
         <div className="space-y-2">
+          <div className="flex items-center gap-2 text-term-dim">
+            <span>
+              connected as{" "}
+              <span className="text-term-green">{status?.username}</span>
+            </span>
+            <button
+              disabled={busy || state === "online"}
+              onClick={beginEdit}
+              className="text-term-dim underline hover:text-term-green
+                         disabled:opacity-30 disabled:no-underline"
+            >
+              change
+            </button>
+          </div>
           <div className="flex items-center gap-2">
             <label className="text-term-dim">accelerator</label>
             <select

@@ -35,7 +35,11 @@ class StartRequest(BaseModel):
 
 
 def _payload() -> dict:
-    return {"configured": controller.configured, "session": asdict(controller.status())}
+    return {
+        "configured": controller.configured,
+        "username": controller.username,
+        "session": asdict(controller.status()),
+    }
 
 
 @router.get("/kaggle/status")

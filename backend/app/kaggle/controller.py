@@ -58,6 +58,10 @@ class KaggleController:
     def configured(self) -> bool:
         return self._creds is not None
 
+    @property
+    def username(self) -> Optional[str]:
+        return self._creds.username if self._creds else None
+
     # --- lifecycle ---------------------------------------------------------
 
     def start(
@@ -84,6 +88,7 @@ class KaggleController:
 
         config = {
             "gpu": accelerator.lower() in ("gpu", "nvidia", "t4", "p100"),
+            "cuda": "cu124",  # prebuilt-wheel CUDA tag for GPU sessions
             "model_repo": model_repo,
             "model_file": model_file,
             "idle_timeout": idle_timeout,
