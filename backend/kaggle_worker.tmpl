@@ -142,10 +142,30 @@ def main():
     log_accelerator()
     install_deps()
     model = download_model()
-    start_llama(model)
-    start_api()
+    llama = start_llama(model)
+    api = start_api()
     tunnel = start_tunnel()
-    tunnel.wait()
+    log("ready — supervising session")
+    # The FastAPI watchdog calls os._exit() in ITS process on shutdown/idle,
+    # which only kills the API subprocess. The bootstrap must notice and tear
+    # down llama + tunnel + itself, or the Kaggle session lingers (quota burn).
+    try:
+        while True:
+            time.sleep(3)
+            if api.poll() is not None:
+                log("API/watchdog exited — ending session")
+                break
+            if tunnel.poll() is not None:
+                log("tunnel exited — ending session")
+                break
+    finally:
+        for p in (tunnel, api, llama):
+            try:
+                p.kill()
+            except Exception:
+                pass
+        time.sleep(1)
+        os._exit(0)
 
 
 if __name__ == "__main__":
