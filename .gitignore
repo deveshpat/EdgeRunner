@@ -1,32 +1,26 @@
 # Python
 __pycache__/
 *.py[cod]
-*.egg-info/
 .venv/
 venv/
 .env
-.mypy_cache/
 .pytest_cache/
-*.gguf
-models/
-.kagglepilot/
-.edgerunner/
+*.egg-info/
 
 # Node / Next
 node_modules/
 .next/
 out/
-.turbo/
 *.tsbuildinfo
-next-env.d.ts
+.turbo/
+npm-debug.log*
+yarn-error.log*
 
-# OS / IDE
+# Editor / OS
 .DS_Store
 .idea/
 .vscode/
-*.swp
+*.local
 
-# Secrets — never commit
-kaggle.json
-access_token
-*.pem
+# Logs
+*.log

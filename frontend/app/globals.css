@@ -1,0 +1,230 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-term-bg text-term-fg font-mono antialiased;
+}
+
+/* Blinking terminal cursor used while streaming. */
+@keyframes blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.cursor-blink::after {
+  content: "▋";
+  @apply text-term-green;
+  animation: blink 1s step-end infinite;
+  margin-left: 1px;
+}
+
+/* --- Markdown -------------------------------------------------------- */
+.er-markdown {
+  display: block;
+}
+.er-markdown > :first-child {
+  margin-top: 0;
+}
+.er-markdown > :last-child {
+  margin-bottom: 0;
+}
+.er-markdown p {
+  margin: 0.4rem 0;
+}
+.er-markdown ul,
+.er-markdown ol {
+  margin: 0.4rem 0;
+  /* Room for markers so multi-digit numbers never clip. */
+  padding-left: 1.75rem;
+  list-style-position: outside;
+}
+.er-markdown ul {
+  list-style: disc;
+}
+.er-markdown ol {
+  list-style: decimal;
+}
+.er-markdown li {
+  margin: 0.15rem 0;
+}
+.er-markdown h1,
+.er-markdown h2,
+.er-markdown h3,
+.er-markdown h4 {
+  margin: 0.8rem 0 0.4rem;
+  font-weight: 700;
+  color: #eaffea;
+}
+.er-markdown h1 {
+  font-size: 1.15rem;
+}
+.er-markdown h2 {
+  font-size: 1.05rem;
+}
+.er-markdown a {
+  color: #3ecf5c;
+  text-decoration: underline;
+}
+.er-markdown blockquote {
+  margin: 0.5rem 0;
+  padding-left: 0.75rem;
+  border-left: 2px solid #1e2a1e;
+  color: #9fc39f;
+}
+.er-markdown table {
+  margin: 0.5rem 0;
+  border-collapse: collapse;
+}
+.er-markdown th,
+.er-markdown td {
+  border: 1px solid #1e2a1e;
+  padding: 0.25rem 0.5rem;
+}
+.er-markdown th {
+  color: #eaffea;
+}
+.er-inline-code {
+  background: #0f140f;
+  border: 1px solid #1e2a1e;
+  border-radius: 3px;
+  padding: 0.05rem 0.3rem;
+  font-size: 0.85em;
+  color: #e6b23e;
+}
+
+/* --- Code blocks ----------------------------------------------------- */
+.er-codeblock {
+  margin: 0.6rem 0;
+  border: 1px solid #1e2a1e;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #0b0f0b;
+}
+.er-codeblock-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.25rem 0.6rem;
+  background: #0f140f;
+  border-bottom: 1px solid #1e2a1e;
+}
+.er-codeblock-lang {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #4a5a4a;
+}
+.er-codeblock-copy {
+  font-size: 0.7rem;
+  color: #4a5a4a;
+}
+.er-codeblock-copy:hover {
+  color: #3ecf5c;
+}
+.er-codeblock pre {
+  margin: 0;
+  padding: 0.7rem;
+  overflow-x: auto;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+/* highlight.js tokens, terminal palette */
+.hljs-comment,
+.hljs-quote {
+  color: #4a5a4a;
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in,
+.hljs-name,
+.hljs-tag {
+  color: #3ecf5c;
+}
+.hljs-string,
+.hljs-attr,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-addition {
+  color: #e6b23e;
+}
+.hljs-number,
+.hljs-literal,
+.hljs-type,
+.hljs-params {
+  color: #86d9a0;
+}
+.hljs-title,
+.hljs-section,
+.hljs-function .hljs-title,
+.hljs-attribute {
+  color: #eaffea;
+}
+.hljs-variable,
+.hljs-template-variable,
+.hljs-meta {
+  color: #9fc39f;
+}
+.hljs-deletion {
+  color: #e6483e;
+}
+
+/* --- Range slider ---------------------------------------------------- */
+.er-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 3px;
+  background: #1e2a1e;
+  border-radius: 2px;
+  outline: none;
+}
+.er-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #3ecf5c;
+  cursor: pointer;
+}
+.er-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: none;
+  border-radius: 50%;
+  background: #3ecf5c;
+  cursor: pointer;
+}
+
+/* Thin terminal-style scrollbar. */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-term-border;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-term-dim;
+}
