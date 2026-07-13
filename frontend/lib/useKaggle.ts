@@ -34,9 +34,11 @@ export interface UseKaggle {
   logs: string;
   busy: boolean;
   error: string | null;
+  accelerator: string;
+  setAccelerator: (a: string) => void;
   saveCreds: (username: string, key: string) => Promise<boolean>;
   forget: () => Promise<void>;
-  start: (accelerator: string) => Promise<void>;
+  start: () => Promise<void>;
   stop: () => Promise<void>;
 }
 
@@ -64,11 +66,30 @@ export function useKaggle(): UseKaggle {
   const [logs, setLogs] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [accelerator, setAcceleratorState] = useState("cpu");
 
   const authRef = useRef<KaggleAuth | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const accelRef = useRef("cpu");
+
+  const setAccelerator = useCallback((a: string) => {
+    setAcceleratorState(a);
+    try {
+      localStorage.setItem("edgerunner.accelerator", a);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  // Restore the last-chosen accelerator on mount.
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("edgerunner.accelerator");
+      if (saved) setAcceleratorState(saved);
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   const stopHeartbeat = useCallback(() => {
     if (heartbeatRef.current) {
@@ -184,10 +205,9 @@ export function useKaggle(): UseKaggle {
   }, [stopHeartbeat]);
 
   const start = useCallback(
-    async (accelerator: string) => {
+    async () => {
       const auth = authRef.current;
       if (!auth) return;
-      accelRef.current = accelerator;
       abortRef.current?.abort();
       const controller = new AbortController();
       abortRef.current = controller;
@@ -196,6 +216,17 @@ export function useKaggle(): UseKaggle {
       setError(null);
       setLogs("");
       try {
+        // Reuse an already-running session for this account instead of
+        // launching a second kernel (one kernel per API key).
+        const existing = await kernelStatus(auth, controller.signal).catch(
+          () => "",
+        );
+        if (isActive(existing)) {
+          setLogs("Reconnecting to your running EdgeRunner session…");
+          await provision(auth, controller.signal);
+          return;
+        }
+
         setState("packing");
         const template = await loadWorkerTemplate();
         const config: WorkerConfig = {
@@ -226,7 +257,7 @@ export function useKaggle(): UseKaggle {
         setBusy(false);
       }
     },
-    [provision],
+    [provision, accelerator],
   );
 
   const stop = useCallback(async () => {
@@ -259,6 +290,8 @@ export function useKaggle(): UseKaggle {
     logs,
     busy,
     error,
+    accelerator,
+    setAccelerator,
     saveCreds,
     forget,
     start,

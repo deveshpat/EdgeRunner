@@ -29,9 +29,9 @@ const BUSY_STATES: KaggleState[] = ["packing", "pushing", "provisioning", "onlin
 export function KaggleControl({ kaggle }: { kaggle: UseKaggle }) {
   const [username, setUsername] = useState("");
   const [key, setKey] = useState("");
-  const [accelerator, setAccelerator] = useState("cpu");
   const [showLogs, setShowLogs] = useState(false);
   const [editing, setEditing] = useState(false);
+  const { accelerator, setAccelerator } = kaggle;
 
   const { configured, state, publicUrl, logs, busy, error } = kaggle;
   const showForm = !configured || editing;
@@ -154,7 +154,7 @@ export function KaggleControl({ kaggle }: { kaggle: UseKaggle }) {
             ) : (
               <button
                 disabled={busy}
-                onClick={() => kaggle.start(accelerator)}
+                onClick={() => kaggle.start()}
                 className="rounded border border-term-border px-2 py-1 text-term-green
                            hover:border-term-green disabled:opacity-30"
               >

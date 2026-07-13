@@ -180,7 +180,7 @@ export default function Home() {
                 ) {
                   kaggle.stop();
                 } else {
-                  kaggle.start("cpu");
+                  kaggle.start(); // uses the selected accelerator
                 }
               }}
               disabled={kaggle.busy}
