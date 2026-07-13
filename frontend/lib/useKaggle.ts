@@ -14,6 +14,7 @@ import {
   type KaggleAuth,
 } from "./kaggleApi";
 import { loadWorkerTemplate, renderWorker, type WorkerConfig } from "./kernelBundle";
+import { DEFAULT_MODEL_ID, modelById } from "./models";
 import { clearCreds, loadCreds, saveCreds as vaultSave } from "./vault";
 
 export type KaggleState =
@@ -36,14 +37,14 @@ export interface UseKaggle {
   error: string | null;
   accelerator: string;
   setAccelerator: (a: string) => void;
+  launchModel: string;
+  setLaunchModel: (id: string) => void;
   saveCreds: (username: string, key: string) => Promise<boolean>;
   forget: () => Promise<void>;
   start: () => Promise<void>;
   stop: () => Promise<void>;
 }
 
-const MODEL_REPO = "Qwen/Qwen2.5-3B-Instruct-GGUF";
-const MODEL_FILE = "qwen2.5-3b-instruct-q4_k_m.gguf";
 // Die 90s after the last heartbeat (or if no client ever connects), so an
 // orphaned/backgrounded session frees Kaggle quota fast. The frontend beats
 // every 25s, so 90s tolerates a few missed beats.
@@ -70,6 +71,7 @@ export function useKaggle(): UseKaggle {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [accelerator, setAcceleratorState] = useState("cpu");
+  const [launchModel, setLaunchModelState] = useState(DEFAULT_MODEL_ID);
 
   const authRef = useRef<KaggleAuth | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -84,9 +86,20 @@ export function useKaggle(): UseKaggle {
     }
   }, []);
 
-  // Restore the last-chosen accelerator on mount.
+  const setLaunchModel = useCallback((id: string) => {
+    setLaunchModelState(id);
+    try {
+      localStorage.setItem("edgerunner.launchModel", id);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  // Restore the last-chosen accelerator + model on mount.
   useEffect(() => {
     try {
+      const m = localStorage.getItem("edgerunner.launchModel");
+      if (m) setLaunchModelState(m);
       const saved = localStorage.getItem("edgerunner.accelerator");
       if (saved) setAcceleratorState(saved);
     } catch {
@@ -232,11 +245,12 @@ export function useKaggle(): UseKaggle {
 
         setState("packing");
         const template = await loadWorkerTemplate();
+        const model = modelById(launchModel);
         const config: WorkerConfig = {
           gpu: accelerator === "gpu",
           cuda: "cu124",
-          model_repo: MODEL_REPO,
-          model_file: MODEL_FILE,
+          model_repo: model.repo,
+          model_file: model.file,
           idle_timeout: IDLE_TIMEOUT,
           max_lifetime: MAX_LIFETIME,
           startup_grace: STARTUP_GRACE,
@@ -260,7 +274,7 @@ export function useKaggle(): UseKaggle {
         setBusy(false);
       }
     },
-    [provision, accelerator],
+    [provision, accelerator, launchModel],
   );
 
   const stop = useCallback(async () => {
@@ -295,6 +309,8 @@ export function useKaggle(): UseKaggle {
     error,
     accelerator,
     setAccelerator,
+    launchModel,
+    setLaunchModel,
     saveCreds,
     forget,
     start,

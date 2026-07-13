@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import { LAUNCH_MODELS, modelById } from "@/lib/models";
 import type { KaggleState, UseKaggle } from "@/lib/useKaggle";
 
 export const STATE_LABEL: Record<KaggleState, string> = {
@@ -129,6 +130,29 @@ export function KaggleControl({ kaggle }: { kaggle: UseKaggle }) {
               forget
             </button>
           </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-term-dim">model</label>
+            <select
+              value={kaggle.launchModel}
+              disabled={running || busy}
+              onChange={(e) => kaggle.setLaunchModel(e.target.value)}
+              className="max-w-[60vw] truncate rounded border border-term-border bg-term-bg
+                         px-2 py-1 text-term-fg focus:border-term-green focus:outline-none
+                         disabled:opacity-50 sm:max-w-none"
+            >
+              {LAUNCH_MODELS.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <p className="text-[10px] text-term-dim">{modelById(kaggle.launchModel).note}</p>
+          {modelById(kaggle.launchModel).gpu && accelerator !== "gpu" && (
+            <p className="text-[10px] text-term-amber">
+              ⚠ this model needs the GPU — set accelerator to GPU before starting.
+            </p>
+          )}
           <div className="flex items-center gap-2">
             <label className="text-term-dim">accelerator</label>
             <select
