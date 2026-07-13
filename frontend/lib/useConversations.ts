@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { streamChat, type SamplingParams, type ToolEvent } from "./api";
+import { BROWSER_AGENT_ID, runBrowserAgent } from "./browserAgent";
+import type { BrowserToolContext } from "./browserTools";
 import {
   Conversation,
   DisplayMessage,
@@ -63,6 +65,12 @@ export function useConversations(
 
   // Guards the one-time seed of an initial conversation.
   const seededRef = useRef(false);
+
+  // Fresh mirrors of state for the browser agent's tools (called mid-run).
+  const conversationsRef = useRef<Conversation[]>([]);
+  conversationsRef.current = conversations;
+  const activeIdRef = useRef<string | null>(null);
+  activeIdRef.current = activeId;
 
   // Hydrate from localStorage after mount (avoids SSR mismatch).
   useEffect(() => {
@@ -171,15 +179,44 @@ export function useConversations(
           role: m.role,
           content: m.content,
         }));
-        for await (const ev of streamChat(
-          {
-            model: convo.model,
-            harness: convo.harness,
-            messages: payload,
-            ...params,
-          },
-          controller.signal,
-        )) {
+        // The browser-agent harness runs the loop client-side (its tools act on
+        // this app); everything else goes to the server harness via /api/chat.
+        const ctx: BrowserToolContext = {
+          listSessions: () =>
+            conversationsRef.current.map((c) => ({ id: c.id, title: c.title })),
+          renameActive: (title) =>
+            setConversations((prev) =>
+              prev.map((c) =>
+                c.id === activeIdRef.current ? { ...c, title } : c,
+              ),
+            ),
+          readActive: () =>
+            (
+              conversationsRef.current.find((c) => c.id === activeIdRef.current)
+                ?.messages ?? []
+            ).map((m) => ({ role: m.role, content: m.content })),
+        };
+        const source =
+          convo.harness === BROWSER_AGENT_ID
+            ? runBrowserAgent({
+                model: convo.model,
+                messages: payload,
+                ctx,
+                temperature: params.temperature,
+                top_p: params.top_p,
+                max_tokens: params.max_tokens,
+                signal: controller.signal,
+              })
+            : streamChat(
+                {
+                  model: convo.model,
+                  harness: convo.harness,
+                  messages: payload,
+                  ...params,
+                },
+                controller.signal,
+              );
+        for await (const ev of source) {
           if (ev.type === "token") {
             acc += ev.data;
             tokenCount += 1;
@@ -220,7 +257,11 @@ export function useConversations(
               ? {
                   ...c,
                   messages: [...messages, assistant],
-                  title: titleFrom(messages),
+                  // Keep a custom/agent-set title; only auto-title the default.
+                  title:
+                    c.title && c.title !== "new session"
+                      ? c.title
+                      : titleFrom(messages),
                   updatedAt: Date.now(),
                 }
               : c,

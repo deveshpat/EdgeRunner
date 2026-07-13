@@ -163,7 +163,15 @@ export default function Home() {
             />
             <Picker
               label="harness"
-              options={catalog?.harnesses ?? []}
+              options={[
+                ...(catalog?.harnesses ?? []),
+                {
+                  id: "browser-agent",
+                  name: "Agent (browser)",
+                  description:
+                    "Runs in your browser; can execute JS and manage sessions.",
+                },
+              ]}
               value={harness}
               onChange={chat.setHarness}
               disabled={chat.busy}
