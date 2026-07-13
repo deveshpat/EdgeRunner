@@ -82,7 +82,8 @@ export async function saveKernel(
   signal?: AbortSignal,
 ): Promise<void> {
   const body: Record<string, unknown> = {
-    slug: STABLE_SLUG,
+    // SaveKernel requires the owner-qualified slug ("username/edgerunner").
+    slug: `${auth.username}/${STABLE_SLUG}`,
     newTitle: STABLE_TITLE,
     text: source,
     language: "python",
