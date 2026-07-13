@@ -34,13 +34,15 @@ def pip(*args):
 
 def install_deps():
     pip("fastapi", "uvicorn[standard]", "httpx", "pydantic", "huggingface_hub")
-    if CONFIG.get("gpu"):
-        cuda = CONFIG.get("cuda", "cu124")
-        idx = f"https://abetlen.github.io/llama-cpp-python/whl/{cuda}"
-        log(f"installing CUDA llama-cpp-python ({cuda}) from prebuilt wheels")
-        pip("llama-cpp-python[server]", "--extra-index-url", idx, "--prefer-binary")
-    else:
-        pip("llama-cpp-python[server]")
+    # llama-cpp-python ships prebuilt wheels ONLY via this index (PyPI is an
+    # sdist that compiles GGML from source — minutes). Force a wheel so we
+    # never compile: --only-binary fails fast if no wheel matches instead of
+    # silently building.
+    variant = CONFIG.get("cuda", "cu124") if CONFIG.get("gpu") else "cpu"
+    idx = f"https://abetlen.github.io/llama-cpp-python/whl/{variant}"
+    log(f"installing prebuilt llama-cpp-python wheel ({variant})")
+    pip("llama-cpp-python[server]", "--extra-index-url", idx,
+        "--only-binary", "llama-cpp-python")
     log("python deps installed")
 
 
