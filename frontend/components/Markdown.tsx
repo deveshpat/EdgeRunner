@@ -5,6 +5,8 @@ import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 
+import { CodeRunner, isRunnable } from "./CodeRunner";
+
 // Renders assistant/system markdown with a terminal aesthetic: GFM tables and
 // lists, styled links, and fenced code blocks with a language label + copy
 // button. Syntax highlighting classes come from rehype-highlight (styled in
@@ -53,6 +55,8 @@ function CodeBlock({ children }: { children: ReactNode }) {
     });
   }
 
+  const getCode = () => ref.current?.innerText ?? "";
+
   return (
     <div className="er-codeblock">
       <div className="er-codeblock-bar">
@@ -62,6 +66,7 @@ function CodeBlock({ children }: { children: ReactNode }) {
         </button>
       </div>
       <pre ref={ref}>{children}</pre>
+      {isRunnable(lang) && <CodeRunner getCode={getCode} lang={lang!} />}
     </div>
   );
 }

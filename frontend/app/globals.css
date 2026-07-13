@@ -145,6 +145,53 @@ body {
   line-height: 1.5;
 }
 
+/* --- Code runner ----------------------------------------------------- */
+.er-runner {
+  border-top: 1px solid #1e2a1e;
+}
+.er-run-btn {
+  font-size: 0.72rem;
+  padding: 0.3rem 0.7rem;
+  color: #3ecf5c;
+}
+.er-run-btn:hover {
+  background: #0f140f;
+}
+.er-run-btn:disabled {
+  opacity: 0.5;
+}
+.er-run-frame {
+  width: 100%;
+  height: 220px;
+  border: 0;
+  border-top: 1px solid #1e2a1e;
+  background: #fff;
+}
+.er-run-out {
+  border-top: 1px solid #1e2a1e;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.er-log-error {
+  color: #e6483e;
+}
+.er-log-warn {
+  color: #e6b23e;
+}
+.er-log-result {
+  color: #3ecf5c;
+}
+.er-log-log,
+.er-log-info,
+.er-log-debug {
+  color: #c8e6c8;
+}
+
 /* highlight.js tokens, terminal palette */
 .hljs-comment,
 .hljs-quote {
