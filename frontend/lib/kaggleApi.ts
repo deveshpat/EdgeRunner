@@ -216,14 +216,22 @@ function parseSse(raw: string): string {
   return out.join("\n");
 }
 
-/** Probe a candidate tunnel URL for a live EdgeRunner backend. */
+/** Probe a candidate tunnel URL for a live EdgeRunner backend.
+ *
+ * Uses a manual AbortController timeout, NOT AbortSignal.timeout(), which is
+ * unsupported on older mobile Safari (iOS < 16) — there it throws and the probe
+ * would always fail, leaving the mobile UI stuck on "starting". */
 export async function probeBackend(url: string): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6000);
   try {
     const res = await fetch(`${url.replace(/\/$/, "")}/api/health`, {
-      signal: AbortSignal.timeout(6000),
+      signal: controller.signal,
     });
     return res.ok;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }

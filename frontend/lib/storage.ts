@@ -93,10 +93,20 @@ export function saveSettings(settings: Settings): void {
   window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 }
 
+// crypto.randomUUID needs a secure context + iOS 15.4+; fall back otherwise.
+function uuid(): string {
+  try {
+    if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  } catch {
+    /* fall through */
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 export function newConversation(model: string, harness: string): Conversation {
   const now = Date.now();
   return {
-    id: crypto.randomUUID(),
+    id: uuid(),
     title: "new session",
     model,
     harness,
