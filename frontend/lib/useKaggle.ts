@@ -14,6 +14,7 @@ import {
   type KaggleAuth,
 } from "./kaggleApi";
 import { loadWorkerTemplate, renderWorker, type WorkerConfig } from "./kernelBundle";
+import { clearLiveSession, loadLiveSession, saveLiveSession } from "./liveSession";
 import { DEFAULT_MODEL_ID, modelById } from "./models";
 import { clearCreds, loadCreds, saveCreds as vaultSave } from "./vault";
 
@@ -76,6 +77,8 @@ export function useKaggle(): UseKaggle {
   const authRef = useRef<KaggleAuth | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stateRef = useRef(state);
+  stateRef.current = state;
 
   const setAccelerator = useCallback((a: string) => {
     setAcceleratorState(a);
@@ -119,6 +122,7 @@ export function useKaggle(): UseKaggle {
       setPublicUrl(url);
       setState("online");
       setApiBase(url);
+      saveLiveSession(url); // bookmark so a reload probes it directly
       stopHeartbeat();
       const beat = () =>
         fetch(`${getApiBase()}/api/session/heartbeat`, { method: "POST" }).catch(
@@ -164,21 +168,52 @@ export function useKaggle(): UseKaggle {
     [goOnline],
   );
 
-  // Hydrate creds and attempt to attach to an already-running session.
+  // Bounded log scrape → the tunnel URL, or null. Used by attach (short budget).
+  const discoverUrl = useCallback(
+    async (auth: KaggleAuth, signal: AbortSignal, budgetMs: number) => {
+      const deadline = Date.now() + budgetMs;
+      while (Date.now() < deadline && !signal.aborted) {
+        const log = await kernelLogs(auth, { signal, maxMs: 10_000 }).catch(() => "");
+        if (log) setLogs(log.slice(-8000));
+        const url = extractTunnelUrl(log);
+        if (url) return url;
+        await sleep(4000, signal);
+      }
+      return null;
+    },
+    [],
+  );
+
+  // Hydrate creds and attach to a running session — resolving to online or off
+  // quickly, never leaving the UI stuck on "starting".
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // 1) Fast path: probe the bookmarked URL directly (no log scraping).
+      const bookmark = loadLiveSession();
+      if (bookmark && (await probeBackend(bookmark))) {
+        if (!cancelled) goOnline(bookmark);
+      }
+
       const creds = await loadCreds();
       if (cancelled) return;
       if (creds) {
         authRef.current = { username: creds.username, apiKey: creds.apiKey };
         setUsername(creds.username);
-        // If a session is already running (started elsewhere), adopt it.
+      }
+
+      // 2) If not already online via bookmark, do ONE bounded discovery pass:
+      //    a running session → scrape+probe (~30s), else settle on "off".
+      if (!cancelled && stateRef.current !== "online" && authRef.current) {
         const status = await kernelStatus(authRef.current).catch(() => "");
         if (!cancelled && isActive(status)) {
           const controller = new AbortController();
           abortRef.current = controller;
-          void provision(authRef.current, controller.signal);
+          const url = await discoverUrl(authRef.current, controller.signal, 30_000);
+          if (!cancelled) {
+            if (url && (await probeBackend(url))) goOnline(url);
+            else setState("stopped"); // reachable? no → show "off", not "starting"
+          }
         }
       }
       if (!cancelled) setHydrated(true);
@@ -186,7 +221,7 @@ export function useKaggle(): UseKaggle {
     return () => {
       cancelled = true;
     };
-  }, [provision]);
+  }, [goOnline, discoverUrl]);
 
   useEffect(() => stopHeartbeat, [stopHeartbeat]);
 
@@ -212,6 +247,7 @@ export function useKaggle(): UseKaggle {
     abortRef.current?.abort();
     stopHeartbeat();
     await clearCreds();
+    clearLiveSession();
     authRef.current = null;
     setUsername(null);
     setState("idle");
@@ -292,6 +328,7 @@ export function useKaggle(): UseKaggle {
         /* ignore */
       }
     }
+    clearLiveSession();
     setApiBase(null);
     setPublicUrl(null);
     setState("stopped");

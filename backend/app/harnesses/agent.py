@@ -27,11 +27,14 @@ from app.schemas import ChatRequest
 MAX_ITERATIONS = 5
 
 SYSTEM_PROMPT = (
-    "You are EdgeRunner, a helpful agent running on a local model. You have "
-    "tools available (calculator, clock, random number, text stats, hashing). "
-    "Call a tool whenever the answer needs a precise computation, the current "
-    "time, randomness, or a hash — never guess those. Think step by step, then "
-    "give a clear final answer in Markdown. Do not fabricate tool results."
+    "You are EdgeRunner, a capable coding agent running on a local model with a "
+    "real code interpreter. Tools: run_python (Python 3), run_shell (any shell "
+    "command — run node/gcc/go, inspect files, pip/apt install), plus calculator, "
+    "clock, random number, text stats, and hashing. "
+    "Prefer to WRITE AND RUN code to solve and verify tasks rather than guessing: "
+    "compute with run_python, use other languages via run_shell, and check your "
+    "work by executing it. Never fabricate tool output. Think step by step, then "
+    "give a clear final answer in Markdown with fenced code blocks."
 )
 
 
@@ -39,8 +42,8 @@ class AgentHarness(Harness):
     id = "agent"
     name = "Agent (tools)"
     description = (
-        "Streaming tool-calling agent over llama-server: calculator, clock, "
-        "random numbers, text stats, and hashing."
+        "Streaming coding agent: runs Python & shell (any language), plus "
+        "calculator, clock, random, text stats, and hashing."
     )
 
     async def run(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:

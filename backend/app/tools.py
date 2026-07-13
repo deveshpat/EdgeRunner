@@ -14,6 +14,8 @@ import json
 import math
 import operator
 import random
+import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
@@ -145,6 +147,50 @@ def _hash_text(args: dict) -> str:
     return digest
 
 
+# --- code execution --------------------------------------------------------
+# Runs in the backend's environment. In production that's the isolated,
+# ephemeral Kaggle worker (its own Linux sandbox), which is the point: the
+# agent gets a real code interpreter with the whole toolchain available.
+
+CODE_TIMEOUT = 30
+_OUTPUT_CAP = 4000
+
+
+def _cap(text: str) -> str:
+    text = text.strip()
+    return text[:_OUTPUT_CAP] + "\n…(truncated)" if len(text) > _OUTPUT_CAP else text
+
+
+def _run(cmd: list[str] | str, shell: bool) -> str:
+    try:
+        r = subprocess.run(
+            cmd, shell=shell, capture_output=True, text=True, timeout=CODE_TIMEOUT
+        )
+    except subprocess.TimeoutExpired:
+        return f"error: timed out after {CODE_TIMEOUT}s"
+    except Exception as exc:  # noqa: BLE001
+        return f"error: {exc}"
+    out = r.stdout
+    if r.stderr:
+        out += ("\n" if out else "") + "[stderr]\n" + r.stderr
+    out = _cap(out)
+    return out or "(no output)"
+
+
+def _run_python(args: dict) -> str:
+    code = str(args.get("code", ""))
+    if not code.strip():
+        return "error: no code provided"
+    return _run([sys.executable, "-c", code], shell=False)
+
+
+def _run_shell(args: dict) -> str:
+    cmd = str(args.get("command", ""))
+    if not cmd.strip():
+        return "error: no command provided"
+    return _run(cmd, shell=True)
+
+
 # --- registry --------------------------------------------------------------
 
 TOOLS: dict[str, Tool] = {
@@ -216,6 +262,39 @@ TOOLS: dict[str, Tool] = {
                 "required": ["text"],
             },
             func=_hash_text,
+        ),
+        Tool(
+            name="run_python",
+            description=(
+                "Run Python 3 and return its stdout/stderr. Use for calculations, "
+                "data work, or to write and TEST code before answering. The full "
+                "standard library is available; install more with run_shell "
+                "('pip install ...')."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "Python source to execute."}
+                },
+                "required": ["code"],
+            },
+            func=_run_python,
+        ),
+        Tool(
+            name="run_shell",
+            description=(
+                "Run a shell command and return its output. Use to run other "
+                "languages (node, gcc, go, etc.), inspect files, or install "
+                "packages (pip/apt). Runs in an isolated, ephemeral sandbox."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Shell command to run."}
+                },
+                "required": ["command"],
+            },
+            func=_run_shell,
         ),
     ]
 }

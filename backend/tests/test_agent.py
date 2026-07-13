@@ -65,6 +65,25 @@ def test_hash_text_bad_algo():
     )
 
 
+def test_run_python():
+    out = tools.execute("run_python", json.dumps({"code": "print(6 * 7)"}))
+    assert out.strip() == "42"
+
+
+def test_run_python_captures_error():
+    out = tools.execute("run_python", json.dumps({"code": "raise ValueError('boom')"}))
+    assert "boom" in out
+
+
+def test_run_shell():
+    out = tools.execute("run_shell", json.dumps({"command": "echo hello-shell"}))
+    assert "hello-shell" in out
+
+
+def test_run_python_empty():
+    assert tools.execute("run_python", json.dumps({"code": ""})).startswith("error")
+
+
 def test_unknown_tool():
     assert tools.execute("nope", "{}").startswith("error: unknown tool")
 
