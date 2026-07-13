@@ -108,10 +108,14 @@ def start_llama(model_path):
     # Alias so /v1/models reports a short id (e.g. "qwen2.5-3b-instruct-q4_k_m")
     # instead of the full HF cache path.
     alias = CONFIG["model_file"].rsplit(".", 1)[0]
+    # llama_cpp.server defaults to n_ctx=2048, which starves multi-turn and
+    # agentic use. Give it real headroom + a larger batch for throughput.
     proc = subprocess.Popen(
         [sys.executable, "-m", "llama_cpp.server",
          "--model", model_path, "--model_alias", alias,
          "--host", "127.0.0.1", "--port", "8080",
+         "--n_ctx", str(CONFIG.get("n_ctx", 8192)),
+         "--n_batch", "512",
          "--n_gpu_layers", "-1" if CONFIG.get("gpu") else "0"],
         stdout=open(ROOT / "llama.log", "w"), stderr=subprocess.STDOUT,
         env=dict(os.environ))
