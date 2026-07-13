@@ -80,9 +80,10 @@ export function KaggleControl({ kaggle }: { kaggle: UseKaggle }) {
             onChange={(e) => setKey(e.target.value)}
           />
           <p className="text-[10px] text-term-dim">
-            Stored encrypted in this browser (IndexedDB) and sent only to Kaggle
-            over HTTPS. It never touches our servers or leaves your device. Get a
-            key at kaggle.com → Settings → API → Create New Token.
+            API token (KGAT_…) or legacy key from kaggle.com → Settings → API →
+            Create New Token. Stored encrypted in this browser (IndexedDB) and
+            sent only to Kaggle over HTTPS — it never touches our servers or
+            leaves your device.
           </p>
           <div className="flex gap-2">
             <button

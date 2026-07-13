@@ -235,9 +235,17 @@ export default function Home() {
               />
             )}
             {chat.error && <p className="py-2 text-term-red">! {chat.error}</p>}
-            {catalogError && (
-              <p className="py-2 text-term-red">! {catalogError}</p>
-            )}
+            {catalogError &&
+              (kaggle.state === "online" ? (
+                // Online but the tunnel isn't answering yet — a real problem.
+                <p className="py-2 text-term-red">! {catalogError}</p>
+              ) : (
+                // No backend yet — guide instead of alarm (common on mobile).
+                <p className="py-2 text-term-dim">
+                  No backend connected yet. Open ⚙ settings → Kaggle backend and
+                  hit start, or run a backend locally.
+                </p>
+              ))}
           </div>
 
           {!atBottom && (

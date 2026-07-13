@@ -18,7 +18,13 @@ export interface KaggleAuth {
 }
 
 function authHeaders(auth: KaggleAuth): HeadersInit {
-  return { Authorization: "Basic " + btoa(`${auth.username}:${auth.apiKey}`) };
+  const secret = auth.apiKey.trim();
+  // New-style API tokens (kaggle.com → Settings → API) are prefixed "KGAT_"
+  // and authenticate as Bearer. Legacy 32-hex keys use Basic username:key.
+  if (secret.startsWith("KGAT")) {
+    return { Authorization: `Bearer ${secret}` };
+  }
+  return { Authorization: "Basic " + btoa(`${auth.username.trim()}:${secret}`) };
 }
 
 async function kagglePost<T = unknown>(
