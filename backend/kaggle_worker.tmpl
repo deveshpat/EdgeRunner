@@ -82,21 +82,37 @@ def _fetch_wheelhouse():
     return None
 
 
+def _install_from_index():
+    """Fallback: PyPI for the pure-python deps + the abetlen prebuilt index for
+    llama-cpp-python (never compiles). Used when no wheelhouse matches this
+    Python, or the wheelhouse lacks a usable llama-cpp-python wheel."""
+    pip("fastapi", "uvicorn[standard]", "httpx", "pydantic")
+    variant = CONFIG.get("cuda", "cu124") if CONFIG.get("gpu") else "cpu"
+    idx = f"https://abetlen.github.io/llama-cpp-python/whl/{variant}"
+    pip("llama-cpp-python[server]", "--extra-index-url", idx,
+        "--only-binary", "llama-cpp-python")
+
+
 def install_deps():
     accel = _fetch_wheelhouse()
     if accel:
-        # Wheelhouse first (offline for everything it has); pip reaches PyPI only
-        # for the two small pure-python server deps. Never compile llama.
-        pip("--find-links", str(WHEELHOUSE), "--only-binary", "llama-cpp-python", *_PKGS)
-        CONFIG["_gpu_ok"] = accel == "gpu"
+        try:
+            # Wheelhouse first (offline for everything it has); pip reaches PyPI
+            # only for the two small pure-python server deps. Never compile llama.
+            pip("--find-links", str(WHEELHOUSE), "--only-binary",
+                "llama-cpp-python", *_PKGS)
+            CONFIG["_gpu_ok"] = accel == "gpu"
+            log("deps installed")
+            return
+        except subprocess.CalledProcessError as e:
+            # e.g. the gpu wheelhouse has no matching llama-cpp-python wheel.
+            log(f"wheelhouse install failed ({e}); falling back to PyPI/abetlen")
     else:
-        # No wheelhouse for this Python — fall back to PyPI + the abetlen index.
         log("no prebuilt wheelhouse for this Python; falling back to PyPI/abetlen")
-        pip("fastapi", "uvicorn[standard]", "httpx", "pydantic")
-        variant = CONFIG.get("cuda", "cu124") if CONFIG.get("gpu") else "cpu"
-        idx = f"https://abetlen.github.io/llama-cpp-python/whl/{variant}"
-        pip("llama-cpp-python[server]", "--extra-index-url", idx,
-            "--only-binary", "llama-cpp-python")
+    _install_from_index()
+    # The abetlen index resolves the accelerator by --extra-index-url variant,
+    # so GPU stays GPU on the fallback path too.
+    CONFIG["_gpu_ok"] = bool(CONFIG.get("gpu"))
     log("deps installed")
 
 

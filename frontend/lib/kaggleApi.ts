@@ -136,8 +136,14 @@ export function isActive(status: string): boolean {
   );
 }
 
+// The EDGERUNNER_URL= branch REQUIRES a trailing delimiter (lookahead) so we
+// never accept a URL that a mid-stream chunk boundary cut in half — otherwise
+// kernelLogs' onprogress would finish early on a truncated host and probe a
+// dead URL forever (Kaggle replays the whole log identically each poll, so it
+// truncates at the same byte every time and the UI hangs on "starting"). The
+// trycloudflare branch is inherently safe: it must end in the literal domain.
 const URL_RE =
-  /(?:EDGERUNNER_URL=)((?:https?:\/\/)[^\s"\\]+)|(https:\/\/[a-z0-9-]+\.trycloudflare\.com)/;
+  /(?:EDGERUNNER_URL=)(https?:\/\/[^\s"'\\]+?)(?=[\s"'\\])|(https:\/\/[a-z0-9-]+\.trycloudflare\.com)\b/;
 
 export function extractTunnelUrl(logs: string): string | null {
   const m = URL_RE.exec(logs);
