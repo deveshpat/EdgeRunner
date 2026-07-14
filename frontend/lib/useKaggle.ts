@@ -52,7 +52,10 @@ export interface UseKaggle {
 // every 25s, so 90s tolerates a few missed beats.
 const IDLE_TIMEOUT = 90;
 const MAX_LIFETIME = 3600;
-const STARTUP_GRACE = 90;
+// Generous startup window: boot + deps + tunnel self-verify (which can respawn
+// a born-dead tunnel) must all finish and the browser must connect before the
+// idle-watchdog reaps the kernel. Too short → "starting" forever then COMPLETE.
+const STARTUP_GRACE = 300;
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {

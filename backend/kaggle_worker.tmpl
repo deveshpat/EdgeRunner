@@ -142,6 +142,19 @@ def start_api():
     raise RuntimeError("FastAPI failed to start")
 
 
+def _public_ok(url):
+    """A real round-trip through the Cloudflare edge — the only proof the tunnel
+    is usable (a 530 "unregistered" tunnel keeps its process alive and still
+    prints a URL, so checking the process/log is not enough)."""
+    try:
+        req = urllib.request.Request(url.rstrip("/") + "/api/health",
+                                     headers={"User-Agent": _UA})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
 def start_tunnel():
     bin_path = ROOT / "cloudflared"
     if not bin_path.exists():
@@ -150,27 +163,44 @@ def start_tunnel():
             "cloudflared-linux-amd64", bin_path)
         bin_path.chmod(0o755)
     log_path = ROOT / "tunnel.log"
-    # Force the http2 (TCP) transport: the default QUIC transport (UDP :7844)
-    # is unreliable behind Kaggle's NAT — the tunnel registers and prints a URL
-    # but the data path fails, so requests get HTTP 530. http2 over TCP :443
-    # stays connected. One tunnel, printed once; the supervise loop tears the
-    # session down if cloudflared ever exits.
-    proc = subprocess.Popen(
-        [str(bin_path), "tunnel", "--no-autoupdate", "--protocol", "http2",
-         "--url", "http://localhost:8000"],
-        stdout=open(log_path, "w"), stderr=subprocess.STDOUT)
-    PROCS.append(proc)
-    for _ in range(40):
-        time.sleep(1)
+    # Force http2 (TCP): default QUIC (UDP :7844) is unreliable behind Kaggle's
+    # NAT. Even so a quick tunnel occasionally comes up "born dead" — it prints a
+    # URL but the edge never routes it (HTTP 530). So we verify the PUBLIC URL
+    # actually answers before emitting it, and respawn if not. This is bounded
+    # (max 3) and normally succeeds on the first try — no periodic reprint, no
+    # protocol thrash. The keepalive() thread then holds it against idle-drop.
+    for attempt in range(1, 4):
+        proc = subprocess.Popen(
+            [str(bin_path), "tunnel", "--no-autoupdate", "--protocol", "http2",
+             "--url", "http://localhost:8000"],
+            stdout=open(log_path, "w"), stderr=subprocess.STDOUT)
+        url = None
+        for _ in range(40):
+            time.sleep(1)
+            try:
+                txt = log_path.read_text()
+            except Exception:
+                txt = ""
+            m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", txt)
+            if m:
+                url = m.group(0)
+                break
+        if url:
+            # Wait up to ~30s for the edge to route it (fresh tunnels lag a few s).
+            for _ in range(15):
+                if _public_ok(url):
+                    log(f"EDGERUNNER_URL={url}")
+                    PROCS.append(proc)
+                    return proc, url
+                time.sleep(2)
+            log(f"tunnel {url} came up unreachable (530); respawning (attempt {attempt})")
+        else:
+            log(f"cloudflared produced no URL; respawning (attempt {attempt})")
         try:
-            txt = log_path.read_text()
+            proc.kill()
         except Exception:
-            txt = ""
-        m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", txt)
-        if m:
-            log(f"EDGERUNNER_URL={m.group(0)}")
-            return proc, m.group(0)
-    raise RuntimeError("cloudflared did not produce a URL")
+            pass
+    raise RuntimeError("cloudflared never produced a reachable tunnel")
 
 
 # Download the GGUF with a plain HTTPS GET of the HF resolve URL, NOT
