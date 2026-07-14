@@ -10,7 +10,10 @@ auto-launch: you start the notebook, you get a URL, you connect.
    turn **Internet ON** (required for the tunnel). Optionally set the
    **Accelerator** to **GPU T4** for faster generation.
 2. Copy the contents of [`run_on_kaggle.py`](./run_on_kaggle.py) into a single
-   cell and run it. (On a GPU session, set `GPU = True` at the top.)
+   cell. Set `HF_TOKEN` at the top to a Hugging Face **read** token
+   (https://huggingface.co/settings/tokens) — anonymous GGUF downloads from
+   Kaggle IPs are rate-limited to a 403, but an authenticated download streams
+   the full model in seconds. (On a GPU session, also set `GPU = True`.) Run it.
 3. Wait for the banner:
 
    ```

@@ -26,6 +26,12 @@ MODEL_FILE = "qwen2.5-1.5b-instruct-q4_k_m.gguf"  # set to None to skip the mode
 GPU = False  # set True on a GPU T4 session
 ROOT = "/kaggle/working/EdgeRunner"
 
+# Hugging Face access token (https://huggingface.co/settings/tokens, "read").
+# STRONGLY RECOMMENDED: anonymous GGUF downloads from Kaggle IPs are rate-limited
+# to a 403, while an authenticated direct download streams the full file in
+# seconds. Paste your token here (it stays in your private Kaggle session).
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
+
 # Prebuilt wheels live in this repo's release, so we never hit PyPI's slow
 # llama-cpp-python sdist (which compiles for minutes) or the flaky abetlen wheel
 # index. Each edgerunner-wheels-<pyver>-<accel>.tar.gz is a flat wheelhouse with
@@ -116,38 +122,59 @@ if not os.path.exists(ROOT):
 backend = f"{ROOT}/backend"
 
 # --- 3. model + llama-server (optional) ------------------------------------
+# Download the GGUF with a plain HTTPS GET of the HF resolve URL, NOT
+# huggingface_hub: on Kaggle, hf_hub_download's Xet transfer fails
+# ("SignatureError: invalid key pair id") and stalls at 0 bytes, while a direct
+# GET follows the redirect to the CDN and streams the full file in seconds.
+_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
+
+def download_gguf(repo, fname, dest):
+    url = f"https://huggingface.co/{repo}/resolve/main/{fname}?download=true"
+    for attempt in range(1, 5):
+        have = os.path.getsize(dest) if os.path.exists(dest) else 0
+        headers = {"User-Agent": _UA, "Accept": "*/*"}
+        if HF_TOKEN:
+            headers["Authorization"] = f"Bearer {HF_TOKEN}"  # beats the anon 403
+        if have:
+            headers["Range"] = f"bytes={have}-"  # resume
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=30) as r:
+                total = have + int(r.headers.get("Content-Length", 0) or 0)
+                mode = "ab" if have and r.status == 206 else "wb"
+                if mode == "wb":
+                    have = 0
+                last = time.time()
+                with open(dest, mode) as f:
+                    while True:
+                        chunk = r.read(1 << 20)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        have += len(chunk)
+                        if time.time() - last >= 5:
+                            pct = f" ({have * 100 // total}%)" if total else ""
+                            log(f"  …downloaded {have // (1024 * 1024)} MB{pct}")
+                            last = time.time()
+            if os.path.getsize(dest) > 0 and (not total or os.path.getsize(dest) >= total):
+                return dest
+            log(f"download incomplete on attempt {attempt}; retrying")
+        except Exception as e:
+            log(f"download attempt {attempt} failed ({e}); retrying")
+        time.sleep(3)
+    raise RuntimeError("model download failed")
+
+
 llama_base = None
 if MODEL_FILE:
-    import glob
-    import threading
-
-    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"  # avoid the 0-byte stall
-    from huggingface_hub import hf_hub_download
-
-    log(f"downloading model {MODEL_REPO}/{MODEL_FILE} "
-        f"(unauthenticated HF can be slow on CPU sessions) …")
-
-    # Live progress: log the size of the largest file in the HF cache every 5s
-    # so the download is visibly moving (hf_hub_download itself is quiet here).
-    cache = os.path.expanduser("~/.cache/huggingface")
-    stop = threading.Event()
-
-    def watch():
-        while not stop.wait(5):
-            try:
-                sizes = [os.path.getsize(p) for p in
-                         glob.glob(f"{cache}/**/*", recursive=True)
-                         if os.path.isfile(p)]
-                mb = (max(sizes) if sizes else 0) // (1024 * 1024)
-                log(f"  …model download in progress: {mb} MB")
-            except Exception:
-                pass
-
-    threading.Thread(target=watch, daemon=True).start()
+    log(f"downloading model {MODEL_REPO}/{MODEL_FILE} …")
     t = time.time()
-    model_path = hf_hub_download(repo_id=MODEL_REPO, filename=MODEL_FILE)
-    stop.set()
-    log(f"model downloaded in {int(time.time() - t)}s: {model_path}")
+    model_path = f"{ROOT}/{MODEL_FILE}"
+    download_gguf(MODEL_REPO, MODEL_FILE, model_path)
+    log(f"model downloaded in {int(time.time() - t)}s: {model_path} "
+        f"({os.path.getsize(model_path) // (1024 * 1024)} MB)")
 
     alias = MODEL_FILE.rsplit(".", 1)[0]
     log("starting llama-server …")
