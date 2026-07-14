@@ -25,9 +25,9 @@ ROOT = pathlib.Path("/kaggle/working/edgerunner")
 # progress bars would bury EDGERUNNER_URL. hf_transfer (the Rust downloader) is
 # left OFF — it could stall at 0 bytes without raising; plain hf_hub_download is
 # reliable.
-os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
-os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
+# os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+# os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+# os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
 
 # Child processes to tear down on exit (llama is started from a worker thread).
 PROCS = []
@@ -55,7 +55,7 @@ def pip(*args):
 # closure except two tiny pure-python server deps that pip fills from PyPI.
 WHEELS_RELEASE = "https://github.com/deveshpat/EdgeRunner/releases/download/wheels-v1"
 WHEELHOUSE = ROOT / "wheels"
-_PKGS = ["llama-cpp-python[server]==0.3.33", "fastapi", "uvicorn[standard]",
+_PKGS = ["llama-cpp-python[server]", "fastapi", "uvicorn[standard]",
          "httpx", "pydantic"]
 
 
