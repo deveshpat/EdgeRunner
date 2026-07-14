@@ -150,8 +150,14 @@ def start_tunnel():
             "cloudflared-linux-amd64", bin_path)
         bin_path.chmod(0o755)
     log_path = ROOT / "tunnel.log"
+    # Force the http2 (TCP) transport: the default QUIC transport (UDP :7844)
+    # is unreliable behind Kaggle's NAT — the tunnel registers and prints a URL
+    # but the data path fails, so requests get HTTP 530. http2 over TCP :443
+    # stays connected. One tunnel, printed once; the supervise loop tears the
+    # session down if cloudflared ever exits.
     proc = subprocess.Popen(
-        [str(bin_path), "tunnel", "--no-autoupdate", "--url", "http://localhost:8000"],
+        [str(bin_path), "tunnel", "--no-autoupdate", "--protocol", "http2",
+         "--url", "http://localhost:8000"],
         stdout=open(log_path, "w"), stderr=subprocess.STDOUT)
     PROCS.append(proc)
     for _ in range(40):
@@ -241,6 +247,27 @@ def start_llama(model_path):
     raise RuntimeError("llama server failed to start")
 
 
+def keepalive(url):
+    """Ping the PUBLIC url every 15s so the tunnel never goes idle.
+
+    cloudflared quick tunnels on Kaggle die from NAT idle-timeout: after ~30s
+    with no traffic the connection is torn down and the quick-tunnel token can't
+    re-register, so every later request returns HTTP 530. The browser heartbeats
+    only every 25s (and not at all before it connects), which is too sparse to
+    keep the path warm. This steady self-traffic keeps the edge connection alive
+    independent of any client.
+    """
+    target = url.rstrip("/") + "/api/health"
+    while True:
+        time.sleep(15)
+        try:
+            urllib.request.urlopen(
+                urllib.request.Request(target, headers={"User-Agent": _UA}),
+                timeout=8)
+        except Exception:
+            pass
+
+
 def load_model_in_background():
     try:
         start_llama(download_model())
@@ -264,18 +291,15 @@ def main():
     api = start_api()
     tunnel, url = start_tunnel()
     log(f"backend online at {url} — loading model in background")
+    threading.Thread(target=keepalive, args=(url,), daemon=True).start()
     threading.Thread(target=load_model_in_background, daemon=True).start()
 
     # Supervise: the FastAPI watchdog os._exit()s its own process on idle/
     # shutdown, so when the API subprocess dies we tear everything down (else
     # the Kaggle session lingers and burns quota).
-    ticks = 0
     try:
         while True:
             time.sleep(3)
-            ticks += 1
-            if ticks % 7 == 0:  # re-emit URL so reconnects find it near the tail
-                log(f"EDGERUNNER_URL={url}")
             if api.poll() is not None:
                 log("api exited — ending session")
                 break
