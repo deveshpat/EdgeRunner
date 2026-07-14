@@ -208,7 +208,11 @@ if not os.path.exists(CF):
     sh(f"wget -q -O {CF} https://github.com/cloudflare/cloudflared/releases/latest/"
        f"download/cloudflared-linux-amd64 && chmod +x {CF}")
 tun_log = "/kaggle/working/tunnel.log"
-subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", "http://localhost:8000"],
+# Force the http2 (TCP) transport: the default QUIC transport (UDP :7844) is
+# unreliable behind Kaggle's NAT — the tunnel registers and prints a URL but the
+# data path fails, so requests get HTTP 530. http2 over TCP :443 stays connected.
+subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--protocol", "http2",
+                  "--url", "http://localhost:8000"],
                  stdout=open(tun_log, "w"), stderr=subprocess.STDOUT)
 url = None
 for _ in range(40):
@@ -228,7 +232,15 @@ print(f"EDGERUNNER_URL={url}")
 print("Paste this URL into the EdgeRunner app (settings → connect).")
 print("=" * 60 + "\n", flush=True)
 
-# Keep the cell (and the tunnel) alive; re-print the URL periodically.
+# Keep the cell alive AND keep the tunnel warm: cloudflared quick tunnels on
+# Kaggle die from a NAT idle-timeout (~30s with no traffic → HTTP 530). Pinging
+# the PUBLIC url every 15s keeps the edge connection alive regardless of whether
+# the web app is actively talking to it.
+_ka = url.rstrip("/") + "/api/health"
 while True:
-    time.sleep(30)
-    print(f"EDGERUNNER_URL={url}", flush=True)
+    time.sleep(15)
+    try:
+        urllib.request.urlopen(
+            urllib.request.Request(_ka, headers={"User-Agent": _UA}), timeout=8)
+    except Exception:
+        pass
