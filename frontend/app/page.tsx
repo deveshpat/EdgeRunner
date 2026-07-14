@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { BackendControl } from "@/components/BackendControl";
 import { Composer } from "@/components/Composer";
 import {
   KaggleControl,
@@ -20,6 +21,7 @@ import {
   saveSettings,
   type Settings,
 } from "@/lib/storage";
+import { useBackend } from "@/lib/useBackend";
 import { useConversations } from "@/lib/useConversations";
 import { useKaggle } from "@/lib/useKaggle";
 
@@ -42,6 +44,10 @@ export default function Home() {
   // Kaggle control plane (declared before catalog effects so its setApiBase
   // effect runs first when the active backend changes).
   const kaggle = useKaggle();
+  // Alternative to the one-click Kaggle launch: run the backend yourself and
+  // paste the tunnel URL. Either path sets the shared API base.
+  const backend = useBackend();
+  const backendOnline = kaggle.state === "online" || backend.status === "online";
 
   const chat = useConversations(
     {
@@ -74,13 +80,13 @@ export default function Home() {
   // Kaggle session comes online (tunnel) or goes back offline (local).
   useEffect(() => {
     loadCatalog();
-  }, [loadCatalog, kaggle.state, kaggle.publicUrl]);
+  }, [loadCatalog, kaggle.state, kaggle.publicUrl, backend.status, backend.url]);
 
   // The worker brings the API + tunnel up BEFORE the model finishes loading, so
   // the first catalog is placeholders. While online, poll until the real
   // (llama-loaded) model appears, then stop.
   useEffect(() => {
-    if (kaggle.state !== "online") return;
+    if (!backendOnline) return;
     const isPlaceholder =
       !catalog || catalog.models.some((m) => m.description.startsWith("Placeholder"));
     if (!isPlaceholder) return;
@@ -90,7 +96,7 @@ export default function Home() {
       clearInterval(poll);
       clearTimeout(stop);
     };
-  }, [kaggle.state, catalog, loadCatalog]);
+  }, [backendOnline, catalog, loadCatalog]);
 
   // Keep the active conversation pointed at a model the backend actually serves
   // (the placeholder id won't match llama's alias once the model loads).
@@ -250,6 +256,10 @@ export default function Home() {
             <>
               <SettingsPanel settings={settings} onChange={updateSettings} />
               <KaggleControl kaggle={kaggle} />
+              <div className="mt-3 text-center text-[10px] uppercase tracking-wider text-term-dim">
+                — or connect your own backend —
+              </div>
+              <BackendControl backend={backend} />
             </>
           )}
         </header>
@@ -287,14 +297,14 @@ export default function Home() {
             )}
             {chat.error && <p className="py-2 text-term-red">! {chat.error}</p>}
             {catalogError &&
-              (kaggle.state === "online" ? (
+              (backendOnline ? (
                 // Online but the tunnel isn't answering yet — a real problem.
                 <p className="py-2 text-term-red">! {catalogError}</p>
               ) : (
                 // No backend yet — guide instead of alarm (common on mobile).
                 <p className="py-2 text-term-dim">
-                  No backend connected yet. Open ⚙ settings → Kaggle backend and
-                  hit start, or run a backend locally.
+                  No backend connected yet. Open ⚙ settings → hit start on the
+                  Kaggle backend, or paste your own backend URL.
                 </p>
               ))}
           </div>
