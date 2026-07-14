@@ -27,6 +27,11 @@ session) takes the backend offline; just re-run it to get a fresh URL.
 
 ## Notes
 
+- **Fast install:** dependencies (including the compiled `llama-cpp-python`)
+  come from this repo's [`wheels-v1` release](https://github.com/deveshpat/EdgeRunner/releases/tag/wheels-v1)
+  as a prebuilt wheelhouse — no PyPI sdist compile, no flaky wheel index. The
+  script auto-picks the tarball matching Kaggle's Python version (and GPU vs
+  CPU); if none matches it falls back to PyPI.
 - **Just testing the connection?** Set `MODEL_FILE = None` in the script. The
   backend comes up instantly and the **Echo (mock)** harness works; real chat
   (llama.cpp) needs a model.

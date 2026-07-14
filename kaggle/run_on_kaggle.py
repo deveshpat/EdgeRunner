@@ -17,7 +17,7 @@ web app just points at the URL. No Kaggle API keys, no auto-launch.
 To only TEST the connection (no model), set MODEL_FILE = None below — the app
 connects and the Echo (mock) harness works; llama.cpp chat needs a model.
 """
-import os, re, subprocess, sys, time, urllib.request
+import os, re, subprocess, sys, tarfile, time, urllib.request
 
 # --- config ---------------------------------------------------------------
 REPO = "https://github.com/deveshpat/EdgeRunner"
@@ -25,6 +25,16 @@ MODEL_REPO = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
 MODEL_FILE = "qwen2.5-1.5b-instruct-q4_k_m.gguf"  # set to None to skip the model
 GPU = False  # set True on a GPU T4 session
 ROOT = "/kaggle/working/EdgeRunner"
+
+# Prebuilt wheels live in this repo's release, so we never hit PyPI's slow
+# llama-cpp-python sdist (which compiles for minutes) or the flaky abetlen wheel
+# index. Each edgerunner-wheels-<pyver>-<accel>.tar.gz is a flat wheelhouse with
+# the whole closure (llama-cpp-python, numpy, fastapi, uvicorn, huggingface_hub…)
+# except two tiny pure-python server deps (sse-starlette, starlette-context)
+# that pip fills from PyPI.
+WHEELS_RELEASE = "https://github.com/deveshpat/EdgeRunner/releases/download/wheels-v1"
+WHEELHOUSE = "/kaggle/working/wheels"
+LLAMA_VERSION = "0.3.33"
 
 
 def sh(cmd):
@@ -41,13 +51,53 @@ def wait(url, tries, delay):
     return False
 
 
+def fetch_wheelhouse():
+    """Download + extract the wheelhouse matching this Python + accelerator.
+
+    Returns the accelerator actually obtained ('gpu'/'cpu'), or None if no
+    matching wheelhouse exists for this Python version.
+    """
+    pyver = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    os.makedirs(WHEELHOUSE, exist_ok=True)
+    # Prefer GPU when asked, but fall back to the CPU wheelhouse (the GPU build
+    # is cp312 only) so a mismatched Python still gets a working install.
+    for accel in (["gpu", "cpu"] if GPU else ["cpu"]):
+        name = f"edgerunner-wheels-{pyver}-{accel}.tar.gz"
+        tgz = f"/kaggle/working/{name}"
+        try:
+            print(f"fetching wheelhouse {name} …", flush=True)
+            urllib.request.urlretrieve(f"{WHEELS_RELEASE}/{name}", tgz)
+            with tarfile.open(tgz) as t:
+                t.extractall(WHEELHOUSE)
+            print(f"wheelhouse ready ({accel})", flush=True)
+            return accel
+        except Exception as e:
+            print(f"  {name} unavailable ({e})", flush=True)
+    return None
+
+
 # --- 1. deps ---------------------------------------------------------------
-sh(f"{sys.executable} -m pip install -q fastapi 'uvicorn[standard]' httpx pydantic huggingface_hub")
+accel = fetch_wheelhouse()
+pkgs = ["fastapi", "uvicorn[standard]", "httpx", "pydantic", "huggingface_hub"]
 if MODEL_FILE:
-    variant = "cu124" if GPU else "cpu"
-    sh(f"{sys.executable} -m pip install -q 'llama-cpp-python[server]' "
-       f"--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/{variant} "
-       f"--only-binary llama-cpp-python")
+    pkgs.insert(0, f"llama-cpp-python[server]=={LLAMA_VERSION}")
+
+if accel:
+    # Install from the wheelhouse first (offline for everything it has), letting
+    # pip reach PyPI only for the two small pure-python server deps. Never build
+    # llama-cpp-python from source.
+    sh(f"{sys.executable} -m pip install -q --find-links {WHEELHOUSE} "
+       f"--only-binary llama-cpp-python " + " ".join(f"'{p}'" for p in pkgs))
+    GPU = GPU and accel == "gpu"  # if we fell back to CPU wheels, run on CPU
+else:
+    # No wheelhouse for this Python — fall back to PyPI + the abetlen wheel index.
+    print("no prebuilt wheelhouse for this Python; falling back to PyPI", flush=True)
+    sh(f"{sys.executable} -m pip install -q fastapi 'uvicorn[standard]' httpx pydantic huggingface_hub")
+    if MODEL_FILE:
+        variant = "cu124" if GPU else "cpu"
+        sh(f"{sys.executable} -m pip install -q 'llama-cpp-python[server]' "
+           f"--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/{variant} "
+           f"--only-binary llama-cpp-python")
 
 # --- 2. backend code -------------------------------------------------------
 if not os.path.exists(ROOT):
