@@ -1,0 +1,120 @@
+"""Run the EdgeRunner backend on Kaggle and expose it via a cloudflared tunnel.
+
+HOW TO USE
+----------
+1. Open a new Kaggle Notebook. In the sidebar: Internet = ON (required),
+   Accelerator = None (CPU) or GPU T4 if you want speed.
+2. Paste this whole file into a single cell and run it.
+3. It prints a line like:
+
+       EDGERUNNER_URL=https://something.trycloudflare.com
+
+4. Copy that URL into the EdgeRunner web app: ⚙ settings → paste it → connect.
+
+That's the whole contract: this script serves the backend + a public URL; the
+web app just points at the URL. No Kaggle API keys, no auto-launch.
+
+To only TEST the connection (no model), set MODEL_FILE = None below — the app
+connects and the Echo (mock) harness works; llama.cpp chat needs a model.
+"""
+import os, re, subprocess, sys, time, urllib.request
+
+# --- config ---------------------------------------------------------------
+REPO = "https://github.com/deveshpat/EdgeRunner"
+MODEL_REPO = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+MODEL_FILE = "qwen2.5-1.5b-instruct-q4_k_m.gguf"  # set to None to skip the model
+GPU = False  # set True on a GPU T4 session
+ROOT = "/kaggle/working/EdgeRunner"
+
+
+def sh(cmd):
+    subprocess.check_call(cmd, shell=True)
+
+
+def wait(url, tries, delay):
+    for _ in range(tries):
+        try:
+            urllib.request.urlopen(url, timeout=2)
+            return True
+        except Exception:
+            time.sleep(delay)
+    return False
+
+
+# --- 1. deps ---------------------------------------------------------------
+sh(f"{sys.executable} -m pip install -q fastapi 'uvicorn[standard]' httpx pydantic huggingface_hub")
+if MODEL_FILE:
+    variant = "cu124" if GPU else "cpu"
+    sh(f"{sys.executable} -m pip install -q 'llama-cpp-python[server]' "
+       f"--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/{variant} "
+       f"--only-binary llama-cpp-python")
+
+# --- 2. backend code -------------------------------------------------------
+if not os.path.exists(ROOT):
+    sh(f"git clone --depth 1 {REPO} {ROOT}")
+backend = f"{ROOT}/backend"
+
+# --- 3. model + llama-server (optional) ------------------------------------
+llama_base = None
+if MODEL_FILE:
+    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    from huggingface_hub import hf_hub_download
+
+    print("downloading model …", flush=True)
+    model_path = hf_hub_download(repo_id=MODEL_REPO, filename=MODEL_FILE)
+    print("model:", model_path, flush=True)
+
+    alias = MODEL_FILE.rsplit(".", 1)[0]
+    subprocess.Popen(
+        [sys.executable, "-m", "llama_cpp.server", "--model", model_path,
+         "--model_alias", alias, "--host", "127.0.0.1", "--port", "8080",
+         "--n_ctx", "8192", "--n_batch", "512",
+         "--n_gpu_layers", "-1" if GPU else "0"])
+    if wait("http://127.0.0.1:8080/v1/models", 180, 2):
+        print("llama server up", flush=True)
+        llama_base = "http://127.0.0.1:8080"
+    else:
+        print("llama server did not start; continuing without a model", flush=True)
+
+# --- 4. EdgeRunner FastAPI (uvicorn) ---------------------------------------
+env = dict(os.environ, PYTHONPATH=backend)
+if llama_base:
+    env["LLAMACPP_BASE_URL"] = llama_base
+subprocess.Popen(
+    [sys.executable, "-m", "uvicorn", "app.main:app",
+     "--host", "0.0.0.0", "--port", "8000"], cwd=backend, env=env)
+if not wait("http://127.0.0.1:8000/api/health", 60, 1):
+    raise SystemExit("FastAPI failed to start (check the cell output above)")
+print("api up", flush=True)
+
+# --- 5. cloudflared tunnel -------------------------------------------------
+CF = "/kaggle/working/cloudflared"
+if not os.path.exists(CF):
+    sh(f"wget -q -O {CF} https://github.com/cloudflare/cloudflared/releases/latest/"
+       f"download/cloudflared-linux-amd64 && chmod +x {CF}")
+tun_log = "/kaggle/working/tunnel.log"
+subprocess.Popen([CF, "tunnel", "--no-autoupdate", "--url", "http://localhost:8000"],
+                 stdout=open(tun_log, "w"), stderr=subprocess.STDOUT)
+url = None
+for _ in range(40):
+    time.sleep(1)
+    try:
+        m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", open(tun_log).read())
+    except Exception:
+        m = None
+    if m:
+        url = m.group(0)
+        break
+if not url:
+    raise SystemExit("cloudflared did not produce a URL (check Internet is ON)")
+
+print("\n" + "=" * 60)
+print(f"EDGERUNNER_URL={url}")
+print("Paste this URL into the EdgeRunner app (settings → connect).")
+print("=" * 60 + "\n", flush=True)
+
+# Keep the cell (and the tunnel) alive; re-print the URL periodically.
+while True:
+    time.sleep(30)
+    print(f"EDGERUNNER_URL={url}", flush=True)
