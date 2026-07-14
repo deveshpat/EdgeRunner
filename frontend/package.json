@@ -3,7 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "build-bundle": "node scripts/build-kernel-bundle.mjs",
+    "predev": "node scripts/build-kernel-bundle.mjs",
     "dev": "next dev",
+    "prebuild": "node scripts/build-kernel-bundle.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "next lint"

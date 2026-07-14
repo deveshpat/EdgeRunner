@@ -2,8 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { BackendControl, STATE_COLOR, STATE_LABEL } from "@/components/BackendControl";
 import { Composer } from "@/components/Composer";
+import {
+  KaggleControl,
+  STATE_COLOR,
+  STATE_LABEL,
+} from "@/components/KaggleControl";
 import { Logo } from "@/components/Logo";
 import { Message } from "@/components/Message";
 import { Picker } from "@/components/Picker";
@@ -16,8 +20,8 @@ import {
   saveSettings,
   type Settings,
 } from "@/lib/storage";
-import { useBackend } from "@/lib/useBackend";
 import { useConversations } from "@/lib/useConversations";
+import { useKaggle } from "@/lib/useKaggle";
 
 // llama-cpp-python reports a model id that can be a full filesystem path;
 // show just the file's base name without the .gguf extension.
@@ -35,9 +39,9 @@ export default function Home() {
   const [atBottom, setAtBottom] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  // Backend connection (paste-a-URL). Declared before catalog effects so its
-  // setApiBase runs first when the active backend changes.
-  const backend = useBackend();
+  // Kaggle control plane (declared before catalog effects so its setApiBase
+  // effect runs first when the active backend changes).
+  const kaggle = useKaggle();
 
   const chat = useConversations(
     {
@@ -66,17 +70,17 @@ export default function Home() {
     setSettings(loadSettings());
   }, []);
 
-  // (Re)load the catalog whenever the active backend changes — i.e. when a
-  // backend URL connects or disconnects.
+  // (Re)load the catalog whenever the active backend changes — i.e. when the
+  // Kaggle session comes online (tunnel) or goes back offline (local).
   useEffect(() => {
     loadCatalog();
-  }, [loadCatalog, backend.status, backend.url]);
+  }, [loadCatalog, kaggle.state, kaggle.publicUrl]);
 
   // The worker brings the API + tunnel up BEFORE the model finishes loading, so
   // the first catalog is placeholders. While online, poll until the real
   // (llama-loaded) model appears, then stop.
   useEffect(() => {
-    if (backend.status !== "online") return;
+    if (kaggle.state !== "online") return;
     const isPlaceholder =
       !catalog || catalog.models.some((m) => m.description.startsWith("Placeholder"));
     if (!isPlaceholder) return;
@@ -86,7 +90,7 @@ export default function Home() {
       clearInterval(poll);
       clearTimeout(stop);
     };
-  }, [backend.status, catalog, loadCatalog]);
+  }, [kaggle.state, catalog, loadCatalog]);
 
   // Keep the active conversation pointed at a model the backend actually serves
   // (the placeholder id won't match llama's alias once the model loads).
@@ -215,17 +219,27 @@ export default function Home() {
               ⚙ settings
             </button>
 
-            {/* Backend connect button: opens settings to paste a URL, or
-                disconnects when online. */}
+            {/* Kaggle power button */}
             <button
               onClick={() => {
-                if (backend.status === "online") backend.disconnect();
-                else setShowSettings(true);
+                if (!kaggle.configured) {
+                  setShowSettings(true);
+                } else if (
+                  ["online", "packing", "pushing", "provisioning"].includes(
+                    kaggle.state,
+                  )
+                ) {
+                  kaggle.stop();
+                } else {
+                  kaggle.start(); // uses the selected accelerator
+                }
               }}
-              className={`text-xs ${STATE_COLOR[backend.status]} hover:opacity-80`}
-              title="Backend connection"
+              disabled={kaggle.busy}
+              className={`text-xs ${STATE_COLOR[kaggle.state]} hover:opacity-80
+                          disabled:opacity-40`}
+              title="Kaggle backend"
             >
-              ⏻ backend: {STATE_LABEL[backend.status]}
+              ⏻ kaggle: {STATE_LABEL[kaggle.state]}
             </button>
 
             <span className="ml-auto text-xs text-term-dim">
@@ -235,7 +249,7 @@ export default function Home() {
           {showSettings && (
             <>
               <SettingsPanel settings={settings} onChange={updateSettings} />
-              <BackendControl backend={backend} />
+              <KaggleControl kaggle={kaggle} />
             </>
           )}
         </header>
@@ -273,14 +287,14 @@ export default function Home() {
             )}
             {chat.error && <p className="py-2 text-term-red">! {chat.error}</p>}
             {catalogError &&
-              (backend.status === "online" ? (
+              (kaggle.state === "online" ? (
                 // Online but the tunnel isn't answering yet — a real problem.
                 <p className="py-2 text-term-red">! {catalogError}</p>
               ) : (
-                // No backend yet — guide instead of alarm.
+                // No backend yet — guide instead of alarm (common on mobile).
                 <p className="py-2 text-term-dim">
-                  No backend connected. Open ⚙ settings and paste your Kaggle
-                  tunnel URL.
+                  No backend connected yet. Open ⚙ settings → Kaggle backend and
+                  hit start, or run a backend locally.
                 </p>
               ))}
           </div>
