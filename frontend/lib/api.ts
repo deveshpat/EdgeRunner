@@ -1,12 +1,12 @@
 // API client for the EdgeRunner backend.
 
-// The orchestrator is the local control-plane backend (holds the Kaggle key,
-// starts/stops the worker). It's fixed. Chat/catalog go to the *active* base,
-// which is the orchestrator by default and switches to the Kaggle tunnel URL
-// once a session is online.
-const DEFAULT_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-export const ORCHESTRATOR_URL =
-  process.env.NEXT_PUBLIC_ORCHESTRATOR_URL ?? DEFAULT_BASE;
+// Chat/catalog go to the *active* base — the Kaggle tunnel URL once a session
+// is online, and nothing otherwise. There is deliberately NO localhost default:
+// in the deployed app there is no local backend, so defaulting to localhost
+// only masked bugs during local dev (catalog/chat silently hit the dev server
+// while the real Kaggle path was broken). For local dev against a fixed
+// backend, set NEXT_PUBLIC_API_URL explicitly.
+const DEFAULT_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 let activeBase = DEFAULT_BASE;
 
@@ -18,6 +18,15 @@ export function setApiBase(url: string | null): void {
 export function getApiBase(): string {
   return activeBase;
 }
+
+/** True when a backend is actually connected (a tunnel is online, or a dev
+ * base was configured). When false, chat/catalog must not be attempted. */
+export function hasBackend(): boolean {
+  return activeBase !== "";
+}
+
+/** Raised when a request is attempted with no backend connected. */
+export const NO_BACKEND = "No backend connected — turn on the Kaggle backend.";
 
 export interface Model {
   id: string;
@@ -68,6 +77,7 @@ export interface ToolEvent {
 }
 
 export async function fetchCatalog(): Promise<Catalog> {
+  if (!hasBackend()) throw new Error(NO_BACKEND);
   const resp = await fetch(`${getApiBase()}/api/catalog`);
   if (!resp.ok) throw new Error(`catalog: ${resp.status}`);
   return resp.json();
@@ -90,6 +100,7 @@ export async function* streamChat(
   } & SamplingParams,
   signal?: AbortSignal,
 ): AsyncGenerator<StreamEvent> {
+  if (!hasBackend()) throw new Error(NO_BACKEND);
   const resp = await fetch(`${getApiBase()}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

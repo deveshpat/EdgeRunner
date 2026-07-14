@@ -13,7 +13,7 @@ import { Message } from "@/components/Message";
 import { Picker } from "@/components/Picker";
 import { SettingsPanel } from "@/components/Settings";
 import { Sidebar } from "@/components/Sidebar";
-import { fetchCatalog, type Catalog } from "@/lib/api";
+import { fetchCatalog, hasBackend, type Catalog } from "@/lib/api";
 import {
   DEFAULT_SETTINGS,
   loadSettings,
@@ -54,6 +54,12 @@ export default function Home() {
 
   const loadCatalog = useCallback(() => {
     setCatalogError(null);
+    // No backend connected → don't fetch (there is no localhost fallback in the
+    // deployed app). The empty-state guidance invites turning Kaggle on.
+    if (!hasBackend()) {
+      setCatalog(null);
+      return;
+    }
     fetchCatalog()
       .then(setCatalog)
       .catch((e) => setCatalogError(`Could not reach backend: ${e.message}`));
