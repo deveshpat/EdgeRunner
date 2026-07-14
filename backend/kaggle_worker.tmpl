@@ -20,7 +20,12 @@ ROOT = pathlib.Path("/kaggle/working/edgerunner")
 # browser (which reads a bounded window) would never reach it.
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
-os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")  # fast Rust downloader
+# NOTE: hf_transfer (the Rust downloader) is intentionally left OFF. On
+# unauthenticated Hub requests it can stall indefinitely at 0 bytes without
+# raising, which used to hang the whole worker (llama never starts, tunnel
+# never opens, browser stuck forever). Plain hf_hub_download streams reliably
+# and we add our own stall detection + fallback below.
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
 
 
 def log(m):
@@ -69,39 +74,58 @@ def install_deps():
     log("python deps installed")
 
 
+# A dropped/wedged connection surfaces as a socket timeout (urlopen timeout=30)
+# and we retry with an HTTP Range resume rather than hang until max_lifetime.
+DL_ATTEMPTS = 4
+
+
 def download_model():
-    import threading
-    from huggingface_hub import hf_hub_download
+    """Stream the GGUF straight from the HF resolve URL to a local file.
 
-    cache = pathlib.Path.home() / ".cache" / "huggingface"
-    stop = threading.Event()
+    We deliberately do NOT use huggingface_hub here: its cache layout + optional
+    hf_transfer made progress opaque (heartbeats showed 0 MB while the real
+    bytes landed elsewhere), so a working download looked stalled. A plain
+    ranged HTTP stream gives byte-accurate progress and lets us resume on a
+    dropped connection, which is what actually made this reliable.
+    """
+    repo, fname = CONFIG["model_repo"], CONFIG["model_file"]
+    url = f"https://huggingface.co/{repo}/resolve/main/{fname}?download=true"
+    dest = ROOT / fname
+    log(f"downloading {repo}/{fname} …")
 
-    def watch():
-        # Heartbeat so a slow download is visibly progressing, not hung.
-        while not stop.wait(10):
-            try:
-                mb = sum(f.stat().st_size for f in cache.rglob("*") if f.is_file())
-                log(f"  …downloaded {mb // (1024 * 1024)} MB")
-            except Exception:
-                pass
+    for attempt in range(1, DL_ATTEMPTS + 1):
+        have = dest.stat().st_size if dest.exists() else 0
+        req = urllib.request.Request(url, headers={"User-Agent": "edgerunner"})
+        if have:
+            req.add_header("Range", f"bytes={have}-")  # resume
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                total = have + int(r.headers.get("Content-Length", 0) or 0)
+                mode = "ab" if have and r.status == 206 else "wb"
+                if mode == "wb":
+                    have = 0
+                last, last_t = have, time.time()
+                with open(dest, mode) as f:
+                    while True:
+                        chunk = r.read(1 << 20)  # 1 MiB
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        have += len(chunk)
+                        now = time.time()
+                        if now - last_t >= 10:
+                            pct = f" ({have * 100 // total}%)" if total else ""
+                            log(f"  …downloaded {have // (1024 * 1024)} MB{pct}")
+                            last, last_t = have, now
+            if dest.stat().st_size > 0 and (not total or dest.stat().st_size >= total):
+                log(f"model ready: {dest} ({dest.stat().st_size // (1024 * 1024)} MB)")
+                return str(dest)
+            log(f"download incomplete on attempt {attempt}; retrying")
+        except Exception as e:
+            log(f"download attempt {attempt} failed ({e}); retrying")
+        time.sleep(3)
 
-    log(f"downloading {CONFIG['model_repo']}/{CONFIG['model_file']} …")
-    threading.Thread(target=watch, daemon=True).start()
-    t0 = time.time()
-    try:
-        path = hf_hub_download(
-            repo_id=CONFIG["model_repo"], filename=CONFIG["model_file"]
-        )
-    except Exception as e:
-        log(f"fast download failed ({e}); retrying without hf_transfer")
-        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
-        path = hf_hub_download(
-            repo_id=CONFIG["model_repo"], filename=CONFIG["model_file"]
-        )
-    finally:
-        stop.set()
-    log(f"model ready in {int(time.time() - t0)}s: {path}")
-    return path
+    raise RuntimeError(f"model download failed after {DL_ATTEMPTS} attempts")
 
 
 def start_llama(model_path):
@@ -170,7 +194,26 @@ def start_tunnel():
     raise RuntimeError("cloudflared did not produce a URL")
 
 
+# Hard ceiling on setup (install + download + llama + tunnel). If we don't
+# reach "ready" within this, something wedged — self-terminate so we don't burn
+# Kaggle quota until max_lifetime with nothing serving. The in-process watchdog
+# only arms once the API is up, so this covers the gap before that.
+SETUP_DEADLINE_SECS = 900
+
+
+def _setup_guard(ready):
+    import threading
+    def run():
+        if not ready.wait(SETUP_DEADLINE_SECS):
+            log(f"setup did not reach ready within {SETUP_DEADLINE_SECS}s — self-terminating")
+            os._exit(1)
+    threading.Thread(target=run, daemon=True).start()
+
+
 def main():
+    import threading
+    ready = threading.Event()
+    _setup_guard(ready)
     materialize()
     log_accelerator()
     install_deps()
@@ -178,6 +221,7 @@ def main():
     llama = start_llama(model)
     api = start_api()
     tunnel, tunnel_url = start_tunnel()
+    ready.set()
     log(f"ready — serving at {tunnel_url}")
     # The FastAPI watchdog calls os._exit() in ITS process on shutdown/idle,
     # which only kills the API subprocess. The bootstrap must notice and tear
