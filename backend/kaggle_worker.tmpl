@@ -9,7 +9,7 @@ watchdog hard-exits the process (idle / shutdown / max lifetime).
 FILES is injected at build time; CONFIG is injected per launch. Both are JSON
 parsed at runtime so JSON literals (true/false/null) stay valid.
 """
-import base64, json, os, pathlib, re, subprocess, sys, time, urllib.request
+import base64, json, os, pathlib, re, subprocess, sys, threading, time, urllib.request
 
 FILES = json.loads(r"""__FILES__""")
 CONFIG = json.loads(r"""__CONFIG__""")
@@ -74,28 +74,64 @@ def install_deps():
     log("python deps installed")
 
 
-# A dropped/wedged connection surfaces as a socket timeout (urlopen timeout=30)
-# and we retry with an HTTP Range resume rather than hang until max_lifetime.
-DL_ATTEMPTS = 4
+# Two independent download strategies. huggingface_hub is PRIMARY: it sends the
+# right headers and negotiates HF's LFS/CDN redirect, so it isn't 403'd from
+# Kaggle's datacenter IPs (a raw request with a bot User-Agent is). We only
+# disable hf_transfer (the Rust downloader that could stall at 0 bytes without
+# raising). A direct ranged HTTP stream with a browser UA is the FALLBACK.
+DL_TIMEOUT = 300  # per-attempt wall clock
+_BROWSER_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+_HF_SNIPPET = (
+    "import sys;from huggingface_hub import hf_hub_download;"
+    "print(hf_hub_download(repo_id=sys.argv[1], filename=sys.argv[2]))"
+)
 
 
-def download_model():
-    """Stream the GGUF straight from the HF resolve URL to a local file.
+def _heartbeat(stop, t0, label):
+    while not stop.wait(15):
+        log(f"  …{label} {int(time.time() - t0)}s")
 
-    We deliberately do NOT use huggingface_hub here: its cache layout + optional
-    hf_transfer made progress opaque (heartbeats showed 0 MB while the real
-    bytes landed elsewhere), so a working download looked stalled. A plain
-    ranged HTTP stream gives byte-accurate progress and lets us resume on a
-    dropped connection, which is what actually made this reliable.
-    """
-    repo, fname = CONFIG["model_repo"], CONFIG["model_file"]
+
+def _hf_download(repo, fname):
+    """Primary: huggingface_hub in a killable subprocess (hf_transfer off)."""
+    for attempt in range(1, 3):
+        stop, t0 = threading.Event(), time.time()
+        threading.Thread(
+            target=_heartbeat, args=(stop, t0, f"hf_hub attempt {attempt}"),
+            daemon=True).start()
+        env = dict(os.environ)
+        env["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _HF_SNIPPET, repo, fname],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+        try:
+            out, _ = proc.communicate(timeout=DL_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, _ = proc.communicate()
+            out = (out or "") + " [timed out]"
+        finally:
+            stop.set()
+        if proc.returncode == 0 and out and out.strip():
+            path = out.strip().splitlines()[-1].strip()
+            if path and pathlib.Path(path).exists():
+                log(f"model ready via hf_hub in {int(time.time() - t0)}s: {path}")
+                return path
+        log(f"hf_hub attempt {attempt} failed: {(out or '').strip()[-200:]}")
+    return None
+
+
+def _direct_download(repo, fname):
+    """Fallback: ranged HTTP stream with a browser UA (resumable)."""
     url = f"https://huggingface.co/{repo}/resolve/main/{fname}?download=true"
     dest = ROOT / fname
-    log(f"downloading {repo}/{fname} …")
-
-    for attempt in range(1, DL_ATTEMPTS + 1):
+    for attempt in range(1, 3):
         have = dest.stat().st_size if dest.exists() else 0
-        req = urllib.request.Request(url, headers={"User-Agent": "edgerunner"})
+        req = urllib.request.Request(
+            url, headers={"User-Agent": _BROWSER_UA, "Accept": "*/*"})
         if have:
             req.add_header("Range", f"bytes={have}-")  # resume
         try:
@@ -104,7 +140,7 @@ def download_model():
                 mode = "ab" if have and r.status == 206 else "wb"
                 if mode == "wb":
                     have = 0
-                last, last_t = have, time.time()
+                last_t = time.time()
                 with open(dest, mode) as f:
                     while True:
                         chunk = r.read(1 << 20)  # 1 MiB
@@ -112,20 +148,28 @@ def download_model():
                             break
                         f.write(chunk)
                         have += len(chunk)
-                        now = time.time()
-                        if now - last_t >= 10:
+                        if time.time() - last_t >= 10:
                             pct = f" ({have * 100 // total}%)" if total else ""
-                            log(f"  …downloaded {have // (1024 * 1024)} MB{pct}")
-                            last, last_t = have, now
+                            log(f"  …direct {have // (1024 * 1024)} MB{pct}")
+                            last_t = time.time()
             if dest.stat().st_size > 0 and (not total or dest.stat().st_size >= total):
-                log(f"model ready: {dest} ({dest.stat().st_size // (1024 * 1024)} MB)")
+                log(f"model ready via direct stream: {dest} "
+                    f"({dest.stat().st_size // (1024 * 1024)} MB)")
                 return str(dest)
-            log(f"download incomplete on attempt {attempt}; retrying")
+            log(f"direct attempt {attempt} incomplete; retrying")
         except Exception as e:
-            log(f"download attempt {attempt} failed ({e}); retrying")
+            log(f"direct attempt {attempt} failed ({e}); retrying")
         time.sleep(3)
+    return None
 
-    raise RuntimeError(f"model download failed after {DL_ATTEMPTS} attempts")
+
+def download_model():
+    repo, fname = CONFIG["model_repo"], CONFIG["model_file"]
+    log(f"downloading {repo}/{fname} …")
+    path = _hf_download(repo, fname) or _direct_download(repo, fname)
+    if path:
+        return path
+    raise RuntimeError("model download failed (hf_hub + direct stream)")
 
 
 def start_llama(model_path):
@@ -198,7 +242,7 @@ def start_tunnel():
 # reach "ready" within this, something wedged — self-terminate so we don't burn
 # Kaggle quota until max_lifetime with nothing serving. The in-process watchdog
 # only arms once the API is up, so this covers the gap before that.
-SETUP_DEADLINE_SECS = 900
+SETUP_DEADLINE_SECS = 1200
 
 
 def _setup_guard(ready):
