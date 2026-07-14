@@ -13,7 +13,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..");
 const backendDir = join(repoRoot, "backend");
 const appDir = join(backendDir, "app");
-const templatePath = join(backendDir, "kaggle_worker.py");
+const templatePath = join(backendDir, "kaggle_worker.tmpl");
 const outDir = join(here, "..", "public");
 const outPath = join(outDir, "kernel-bundle.json");
 
