@@ -74,7 +74,7 @@ def _fetch_wheelhouse():
             log(f"fetching wheelhouse {name} …")
             urllib.request.urlretrieve(f"{WHEELS_RELEASE}/{name}", tgz)
             with tarfile.open(tgz) as t:
-                t.extractall(WHEELHOUSE)
+                t.extractall(WHEELHOUSE, filter='data')
             log(f"wheelhouse ready ({accel})")
             return accel
         except Exception as e:
