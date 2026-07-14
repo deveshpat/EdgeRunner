@@ -1,10 +1,16 @@
 """EdgeRunner Kaggle worker (generated — do not edit).
 
-Pushed to Kaggle as a single script. It materializes the embedded backend,
-installs deps, serves a GGUF via llama-cpp-python's OpenAI-compatible server,
-starts the FastAPI app (worker role, watchdog on), opens a cloudflared tunnel,
-and prints EDGERUNNER_URL=<url> for the browser to scrape. Blocks until the
-watchdog hard-exits the process (idle / shutdown / max lifetime).
+Pushed to Kaggle as a single script. Startup order is deliberate so the
+frontend connects as fast as possible:
+
+  1. pip install deps
+  2. start the FastAPI app + cloudflared tunnel, print EDGERUNNER_URL=<url>
+     → the browser connects here immediately (health/catalog work without a
+       model; the picker shows the model as it loads)
+  3. in the background: download the GGUF and start llama-server
+     → chat goes live once llama is up
+
+Blocks (supervising) until the API/tunnel exits or the watchdog hard-exits.
 
 FILES is injected at build time; CONFIG is injected per launch. Both are JSON
 parsed at runtime so JSON literals (true/false/null) stay valid.
@@ -15,36 +21,20 @@ FILES = json.loads(r"""__FILES__""")
 CONFIG = json.loads(r"""__CONFIG__""")
 ROOT = pathlib.Path("/kaggle/working/edgerunner")
 
-# Keep the kernel log tiny: Kaggle's log stream replays the whole history on
-# every connect, so progress bars would bury the EDGERUNNER_URL line and the
-# browser (which reads a bounded window) would never reach it.
+# Keep the kernel log tiny: Kaggle replays the whole log on every connect, so
+# progress bars would bury EDGERUNNER_URL. hf_transfer (the Rust downloader) is
+# left OFF — it could stall at 0 bytes without raising; plain hf_hub_download is
+# reliable.
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
-# NOTE: hf_transfer (the Rust downloader) is intentionally left OFF. On
-# unauthenticated Hub requests it can stall indefinitely at 0 bytes without
-# raising, which used to hang the whole worker (llama never starts, tunnel
-# never opens, browser stuck forever). Plain hf_hub_download streams reliably
-# and we add our own stall detection + fallback below.
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
+
+# Child processes to tear down on exit (llama is started from a worker thread).
+PROCS = []
 
 
 def log(m):
     print(f"[edgerunner] {m}", flush=True)
-
-
-def log_accelerator():
-    """Report the accelerator actually allocated vs requested (for debugging)."""
-    detected = "none"
-    try:
-        out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=10)
-        names = [l.strip() for l in out.stdout.splitlines() if l.strip()]
-        if names:
-            detected = ", ".join(names)
-    except Exception:
-        pass
-    log(f"accelerator: requested={'gpu' if CONFIG.get('gpu') else 'cpu'} | detected GPU={detected}")
 
 
 def materialize():
@@ -60,141 +50,16 @@ def pip(*args):
 
 
 def install_deps():
-    pip("fastapi", "uvicorn[standard]", "httpx", "pydantic",
-        "huggingface_hub", "hf_transfer")
+    pip("fastapi", "uvicorn[standard]", "httpx", "pydantic", "huggingface_hub")
     # llama-cpp-python ships prebuilt wheels ONLY via this index (PyPI is an
-    # sdist that compiles GGML from source — minutes). Force a wheel so we
-    # never compile: --only-binary fails fast if no wheel matches instead of
-    # silently building.
+    # sdist that compiles from source). --only-binary fails fast if no wheel
+    # matches instead of silently compiling for minutes.
     variant = CONFIG.get("cuda", "cu124") if CONFIG.get("gpu") else "cpu"
     idx = f"https://abetlen.github.io/llama-cpp-python/whl/{variant}"
     log(f"installing prebuilt llama-cpp-python wheel ({variant})")
     pip("llama-cpp-python[server]", "--extra-index-url", idx,
         "--only-binary", "llama-cpp-python")
-    log("python deps installed")
-
-
-# Two independent download strategies. huggingface_hub is PRIMARY: it sends the
-# right headers and negotiates HF's LFS/CDN redirect, so it isn't 403'd from
-# Kaggle's datacenter IPs (a raw request with a bot User-Agent is). We only
-# disable hf_transfer (the Rust downloader that could stall at 0 bytes without
-# raising). A direct ranged HTTP stream with a browser UA is the FALLBACK.
-DL_TIMEOUT = 300  # per-attempt wall clock
-_BROWSER_UA = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
-_HF_SNIPPET = (
-    "import sys;from huggingface_hub import hf_hub_download;"
-    "print(hf_hub_download(repo_id=sys.argv[1], filename=sys.argv[2]))"
-)
-
-
-def _heartbeat(stop, t0, label):
-    while not stop.wait(15):
-        log(f"  …{label} {int(time.time() - t0)}s")
-
-
-def _hf_download(repo, fname):
-    """Primary: huggingface_hub in a killable subprocess (hf_transfer off)."""
-    for attempt in range(1, 3):
-        stop, t0 = threading.Event(), time.time()
-        threading.Thread(
-            target=_heartbeat, args=(stop, t0, f"hf_hub attempt {attempt}"),
-            daemon=True).start()
-        env = dict(os.environ)
-        env["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
-        proc = subprocess.Popen(
-            [sys.executable, "-c", _HF_SNIPPET, repo, fname],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
-        try:
-            out, _ = proc.communicate(timeout=DL_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            out, _ = proc.communicate()
-            out = (out or "") + " [timed out]"
-        finally:
-            stop.set()
-        if proc.returncode == 0 and out and out.strip():
-            path = out.strip().splitlines()[-1].strip()
-            if path and pathlib.Path(path).exists():
-                log(f"model ready via hf_hub in {int(time.time() - t0)}s: {path}")
-                return path
-        log(f"hf_hub attempt {attempt} failed: {(out or '').strip()[-200:]}")
-    return None
-
-
-def _direct_download(repo, fname):
-    """Fallback: ranged HTTP stream with a browser UA (resumable)."""
-    url = f"https://huggingface.co/{repo}/resolve/main/{fname}?download=true"
-    dest = ROOT / fname
-    for attempt in range(1, 3):
-        have = dest.stat().st_size if dest.exists() else 0
-        req = urllib.request.Request(
-            url, headers={"User-Agent": _BROWSER_UA, "Accept": "*/*"})
-        if have:
-            req.add_header("Range", f"bytes={have}-")  # resume
-        try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                total = have + int(r.headers.get("Content-Length", 0) or 0)
-                mode = "ab" if have and r.status == 206 else "wb"
-                if mode == "wb":
-                    have = 0
-                last_t = time.time()
-                with open(dest, mode) as f:
-                    while True:
-                        chunk = r.read(1 << 20)  # 1 MiB
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        have += len(chunk)
-                        if time.time() - last_t >= 10:
-                            pct = f" ({have * 100 // total}%)" if total else ""
-                            log(f"  …direct {have // (1024 * 1024)} MB{pct}")
-                            last_t = time.time()
-            if dest.stat().st_size > 0 and (not total or dest.stat().st_size >= total):
-                log(f"model ready via direct stream: {dest} "
-                    f"({dest.stat().st_size // (1024 * 1024)} MB)")
-                return str(dest)
-            log(f"direct attempt {attempt} incomplete; retrying")
-        except Exception as e:
-            log(f"direct attempt {attempt} failed ({e}); retrying")
-        time.sleep(3)
-    return None
-
-
-def download_model():
-    repo, fname = CONFIG["model_repo"], CONFIG["model_file"]
-    log(f"downloading {repo}/{fname} …")
-    path = _hf_download(repo, fname) or _direct_download(repo, fname)
-    if path:
-        return path
-    raise RuntimeError("model download failed (hf_hub + direct stream)")
-
-
-def start_llama(model_path):
-    # Alias so /v1/models reports a short id (e.g. "qwen2.5-3b-instruct-q4_k_m")
-    # instead of the full HF cache path.
-    alias = CONFIG["model_file"].rsplit(".", 1)[0]
-    # llama_cpp.server defaults to n_ctx=2048, which starves multi-turn and
-    # agentic use. Give it real headroom + a larger batch for throughput.
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "llama_cpp.server",
-         "--model", model_path, "--model_alias", alias,
-         "--host", "127.0.0.1", "--port", "8080",
-         "--n_ctx", str(CONFIG.get("n_ctx", 8192)),
-         "--n_batch", "512",
-         "--n_gpu_layers", "-1" if CONFIG.get("gpu") else "0"],
-        stdout=open(ROOT / "llama.log", "w"), stderr=subprocess.STDOUT,
-        env=dict(os.environ))
-    for _ in range(120):
-        try:
-            urllib.request.urlopen("http://127.0.0.1:8080/v1/models", timeout=2)
-            log("llama server up")
-            return proc
-        except Exception:
-            time.sleep(2)
-    raise RuntimeError("llama server failed to start")
+    log("deps installed")
 
 
 def start_api():
@@ -202,16 +67,25 @@ def start_api():
     env.update({
         "LLAMACPP_BASE_URL": "http://127.0.0.1:8080",
         "EDGERUNNER_WATCHDOG": "1",
-        "EDGERUNNER_IDLE_TIMEOUT": str(CONFIG.get("idle_timeout", 120)),
+        "EDGERUNNER_IDLE_TIMEOUT": str(CONFIG.get("idle_timeout", 90)),
         "EDGERUNNER_MAX_LIFETIME": str(CONFIG.get("max_lifetime", 3600)),
-        "EDGERUNNER_STARTUP_GRACE": str(CONFIG.get("startup_grace", 900)),
+        "EDGERUNNER_STARTUP_GRACE": str(CONFIG.get("startup_grace", 90)),
         "PYTHONPATH": str(ROOT),
     })
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app.main:app",
          "--host", "0.0.0.0", "--port", "8000"],
         cwd=str(ROOT), env=env,
         stdout=open(ROOT / "api.log", "w"), stderr=subprocess.STDOUT)
+    PROCS.append(proc)
+    for _ in range(60):
+        try:
+            urllib.request.urlopen("http://127.0.0.1:8000/api/health", timeout=2)
+            log("api up")
+            return proc
+        except Exception:
+            time.sleep(1)
+    raise RuntimeError("FastAPI failed to start")
 
 
 def start_tunnel():
@@ -225,6 +99,7 @@ def start_tunnel():
     proc = subprocess.Popen(
         [str(bin_path), "tunnel", "--no-autoupdate", "--url", "http://localhost:8000"],
         stdout=open(log_path, "w"), stderr=subprocess.STDOUT)
+    PROCS.append(proc)
     for _ in range(40):
         time.sleep(1)
         try:
@@ -238,61 +113,96 @@ def start_tunnel():
     raise RuntimeError("cloudflared did not produce a URL")
 
 
-# Hard ceiling on setup (install + download + llama + tunnel). If we don't
-# reach "ready" within this, something wedged — self-terminate so we don't burn
-# Kaggle quota until max_lifetime with nothing serving. The in-process watchdog
-# only arms once the API is up, so this covers the gap before that.
-SETUP_DEADLINE_SECS = 1200
+def download_model():
+    """Download the GGUF via huggingface_hub (reliable; retries on failure)."""
+    from huggingface_hub import hf_hub_download
+
+    repo, fname = CONFIG["model_repo"], CONFIG["model_file"]
+    log(f"downloading {repo}/{fname} …")
+    for attempt in range(1, 4):
+        stop, t0 = threading.Event(), time.time()
+        threading.Thread(
+            target=lambda: [log(f"  …downloading {int(time.time()-t0)}s")
+                            for _ in iter(lambda: stop.wait(15), True)],
+            daemon=True).start()
+        try:
+            path = hf_hub_download(repo_id=repo, filename=fname)
+            log(f"model downloaded in {int(time.time()-t0)}s")
+            return path
+        except Exception as e:
+            log(f"download attempt {attempt} failed: {e}")
+            time.sleep(5)
+        finally:
+            stop.set()
+    raise RuntimeError("model download failed")
 
 
-def _setup_guard(ready):
-    import threading
-    def run():
-        if not ready.wait(SETUP_DEADLINE_SECS):
-            log(f"setup did not reach ready within {SETUP_DEADLINE_SECS}s — self-terminating")
-            os._exit(1)
-    threading.Thread(target=run, daemon=True).start()
+def start_llama(model_path):
+    # Alias so /v1/models reports a short id (not the full HF cache path).
+    alias = CONFIG["model_file"].rsplit(".", 1)[0]
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "llama_cpp.server",
+         "--model", model_path, "--model_alias", alias,
+         "--host", "127.0.0.1", "--port", "8080",
+         "--n_ctx", str(CONFIG.get("n_ctx", 8192)),
+         "--n_batch", "512",
+         "--n_gpu_layers", "-1" if CONFIG.get("gpu") else "0"],
+        stdout=open(ROOT / "llama.log", "w"), stderr=subprocess.STDOUT,
+        env=dict(os.environ))
+    PROCS.append(proc)
+    for _ in range(180):
+        try:
+            urllib.request.urlopen("http://127.0.0.1:8080/v1/models", timeout=2)
+            log("llama server up — chat is live")
+            return proc
+        except Exception:
+            time.sleep(2)
+    raise RuntimeError("llama server failed to start")
+
+
+def load_model_in_background():
+    try:
+        start_llama(download_model())
+    except Exception as e:
+        log(f"model/llama setup failed: {e} (backend stays up; chat unavailable)")
+
+
+def teardown():
+    for p in PROCS:
+        try:
+            p.kill()
+        except Exception:
+            pass
+    time.sleep(1)
+    os._exit(0)
 
 
 def main():
-    import threading
-    ready = threading.Event()
-    _setup_guard(ready)
     materialize()
-    log_accelerator()
     install_deps()
-    model = download_model()
-    llama = start_llama(model)
     api = start_api()
-    tunnel, tunnel_url = start_tunnel()
-    ready.set()
-    log(f"ready — serving at {tunnel_url}")
-    # The FastAPI watchdog calls os._exit() in ITS process on shutdown/idle,
-    # which only kills the API subprocess. The bootstrap must notice and tear
-    # down llama + tunnel + itself, or the Kaggle session lingers (quota burn).
+    tunnel, url = start_tunnel()
+    log(f"backend online at {url} — loading model in background")
+    threading.Thread(target=load_model_in_background, daemon=True).start()
+
+    # Supervise: the FastAPI watchdog os._exit()s its own process on idle/
+    # shutdown, so when the API subprocess dies we tear everything down (else
+    # the Kaggle session lingers and burns quota).
     ticks = 0
     try:
         while True:
             time.sleep(3)
             ticks += 1
-            # Re-emit the URL every ~21s so a reconnecting client always finds
-            # it near the log tail (and the log shows the session is alive).
-            if ticks % 7 == 0:
-                log(f"EDGERUNNER_URL={tunnel_url}")
+            if ticks % 7 == 0:  # re-emit URL so reconnects find it near the tail
+                log(f"EDGERUNNER_URL={url}")
             if api.poll() is not None:
-                log("API/watchdog exited — ending session")
+                log("api exited — ending session")
                 break
             if tunnel.poll() is not None:
                 log("tunnel exited — ending session")
                 break
     finally:
-        for p in (tunnel, api, llama):
-            try:
-                p.kill()
-            except Exception:
-                pass
-        time.sleep(1)
-        os._exit(0)
+        teardown()
 
 
 if __name__ == "__main__":

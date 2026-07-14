@@ -76,6 +76,33 @@ export default function Home() {
     loadCatalog();
   }, [loadCatalog, kaggle.state, kaggle.publicUrl]);
 
+  // The worker brings the API + tunnel up BEFORE the model finishes loading, so
+  // the first catalog is placeholders. While online, poll until the real
+  // (llama-loaded) model appears, then stop.
+  useEffect(() => {
+    if (kaggle.state !== "online") return;
+    const isPlaceholder =
+      !catalog || catalog.models.some((m) => m.description.startsWith("Placeholder"));
+    if (!isPlaceholder) return;
+    const poll = setInterval(loadCatalog, 4000);
+    const stop = setTimeout(() => clearInterval(poll), 300_000);
+    return () => {
+      clearInterval(poll);
+      clearTimeout(stop);
+    };
+  }, [kaggle.state, catalog, loadCatalog]);
+
+  // Keep the active conversation pointed at a model the backend actually serves
+  // (the placeholder id won't match llama's alias once the model loads).
+  useEffect(() => {
+    const a = chat.active;
+    if (!catalog || catalog.models.length === 0 || !a) return;
+    const ids = catalog.models.map((m) => m.id);
+    if (a.model && !ids.includes(a.model)) {
+      chat.setModel(catalog.models[0].id);
+    }
+  }, [catalog, chat]);
+
   // Once hydrated and the catalog is loaded, make sure there is a session.
   useEffect(() => {
     if (
