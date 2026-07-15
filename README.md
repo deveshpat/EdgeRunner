@@ -1,5 +1,6 @@
-# EdgeRunner
-
+# <p align="center">
+  <img src="EdgeRunner.jpg" alt="GIF">
+</p>
 A web app for an agent harness. Run local models through agent harnesses on
 remote GPUs (llama.cpp on Kaggle), driven from a terminal-themed chat UI.
 
