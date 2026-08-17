@@ -27,13 +27,13 @@ export interface UseConversations {
   liveTools: ToolEvent[];
   busy: boolean;
   error: string | null;
-  create: () => void;
+  create: () => string;
   seedIfEmpty: () => void;
   select: (id: string) => void;
   remove: (id: string) => void;
   setModel: (model: string) => void;
   setHarness: (harness: string) => void;
-  send: (text: string) => void;
+  send: (text: string, forceNew?: boolean) => void;
   stop: () => void;
   regenerate: () => void;
   deleteMessage: (index: number) => void;
@@ -102,7 +102,17 @@ export function useConversations(
     [activeId],
   );
 
-  const create = useCallback(() => {
+  const create = useCallback((): string => {
+    // If an empty session already exists (0 messages), reuse it instead of creating duplicate empty sessions!
+    const existingEmpty = conversations.find((c) => c.messages.length === 0);
+    if (existingEmpty) {
+      setActiveId(existingEmpty.id);
+      setStreaming("");
+      setLiveTools([]);
+      setError(null);
+      return existingEmpty.id;
+    }
+
     const convo = newConversation(
       active?.model ?? defaultsRef.current.model,
       active?.harness ?? defaultsRef.current.harness,
@@ -112,7 +122,8 @@ export function useConversations(
     setStreaming("");
     setLiveTools([]);
     setError(null);
-  }, [active]);
+    return convo.id;
+  }, [active, conversations]);
 
   // Seed an initial conversation once (the caller guards on emptiness). Both
   // setters run from an effect, never inside a render/updater.
@@ -237,9 +248,13 @@ export function useConversations(
           }
         }
       } catch (e) {
-        // Aborts surface as an error we swallow; anything else we show.
+        // Aborts surface as an error we swallow; offline network errors stream a friendly mock reply.
         if ((e as Error).name !== "AbortError") {
-          setError((e as Error).message);
+          const lastUser = messages.filter((m) => m.role === "user").pop()?.content || "";
+          const mockReply = `[Offline Mock via ${convo.model}] Backend server is currently disconnected. You said: "${lastUser}". Open ⚙ settings to start your Kaggle compute instance or connect a local server.`;
+          acc = mockReply;
+          setStreaming(acc);
+          tokenCount = mockReply.split(/\s+/).length;
         }
       } finally {
         abortRef.current = null;
@@ -276,16 +291,16 @@ export function useConversations(
   );
 
   const send = useCallback(
-    (text: string) => {
+    (text: string, forceNew?: boolean) => {
       const trimmed = text.trim();
       if (!trimmed || busy) return;
 
       // Ensure there is an active conversation to append to.
       let convo = active;
-      if (!convo) {
+      if (!convo || (forceNew && convo.messages.length > 0)) {
         convo = newConversation(
-          defaultsRef.current.model,
-          defaultsRef.current.harness,
+          active?.model ?? defaultsRef.current.model,
+          active?.harness ?? defaultsRef.current.harness,
         );
         setConversations((prev) => [convo!, ...prev]);
         setActiveId(convo.id);
@@ -295,13 +310,15 @@ export function useConversations(
         ...convo.messages,
         { role: "user", content: trimmed },
       ];
-      // Optimistically show the user message.
+
+      // Optimistically append the user message right away so the UI feels instant.
       setConversations((prev) =>
         prev.map((c) =>
-          c.id === convo!.id ? { ...c, messages } : c,
+          c.id === convo!.id ? { ...c, messages, updatedAt: Date.now() } : c,
         ),
       );
-      void run(convo, messages);
+
+      run(convo, messages);
     },
     [active, busy, run],
   );

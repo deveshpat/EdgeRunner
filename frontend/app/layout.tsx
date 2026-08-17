@@ -1,9 +1,16 @@
 import type { Metadata } from "next";
+import { JetBrains_Mono } from "next/font/google";
 import "./globals.css";
+
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ["latin"],
+  variable: "--font-mono",
+  display: "swap",
+});
 
 export const metadata: Metadata = {
   title: "EdgeRunner",
-  description: "A terminal-themed web app for running agent harnesses.",
+  description: "High-performance edge AI inference and agent terminal.",
 };
 
 export default function RootLayout({
@@ -12,8 +19,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
-      <body>{children}</body>
+    <html lang="en" className={jetbrainsMono.variable}>
+      <body className="font-mono bg-term-bg text-term-fg antialiased selection:bg-term-green/20 selection:text-term-green">
+        {children}
+      </body>
     </html>
   );
 }

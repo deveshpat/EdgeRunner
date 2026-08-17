@@ -55,10 +55,10 @@ export function KaggleControl({ kaggle }: { kaggle: UseKaggle }) {
   }
 
   return (
-    <div className="mt-3 space-y-2 rounded border border-term-border bg-term-panel/40 p-3 text-xs">
+    <div className="mt-3 space-y-2 rounded border border-term-border bg-term-panel/40 p-3 text-xs font-mono">
       <div className="flex items-center justify-between">
-        <span className="uppercase tracking-wider text-term-dim">kaggle backend</span>
-        <span className={STATE_COLOR[state]}>● {STATE_LABEL[state]}</span>
+        <span className="uppercase tracking-wider text-term-dim">// KAGGLE COMPUTE</span>
+        <span className={STATE_COLOR[state]}>[{STATE_LABEL[state].toUpperCase()}]</span>
       </div>
 
       {showForm ? (
@@ -83,10 +83,8 @@ export function KaggleControl({ kaggle }: { kaggle: UseKaggle }) {
             onChange={(e) => setKey(e.target.value)}
           />
           <p className="text-[10px] text-term-dim">
-            API token (KGAT_…) or legacy key from kaggle.com → Settings → API →
-            Create New Token. Stored encrypted in this browser (IndexedDB) and
-            sent only to Kaggle over HTTPS — it never touches our servers or
-            leaves your device.
+            API token (KGAT_…) or legacy key from kaggle.com :: Settings :: API ::
+            Create New Token. Stored encrypted on-device.
           </p>
           <input
             className="w-full rounded border border-term-border bg-term-bg px-2 py-1
@@ -99,27 +97,25 @@ export function KaggleControl({ kaggle }: { kaggle: UseKaggle }) {
             onChange={(e) => setHf(e.target.value)}
           />
           <p className="text-[10px] text-term-dim">
-            HF read token from huggingface.co → Settings → Access Tokens. Needed
-            to download the model — anonymous downloads from Kaggle are blocked
-            (HTTP 403). Stored encrypted on-device with your Kaggle key.
+            HF read token from huggingface.co :: Settings :: Access Tokens. Enables fast unthrottled downloads.
           </p>
           <div className="flex gap-2">
             <button
               disabled={busy || !username || !key}
               onClick={connect}
-              className="rounded border border-term-border px-2 py-1 text-term-green
-                         hover:border-term-green disabled:opacity-30"
+              className="flex items-center gap-1 rounded border border-term-green/60 bg-term-green/10 px-3 py-1 text-term-green
+                         hover:border-term-green hover:bg-term-green/20 disabled:opacity-30 transition-colors font-semibold"
             >
-              {busy ? "checking…" : configured ? "save" : "connect"}
+              {busy ? "Checking…" : configured ? "Save" : "Connect"}
             </button>
             {configured && (
               <button
                 disabled={busy}
                 onClick={() => setEditing(false)}
-                className="rounded border border-term-border px-2 py-1 text-term-dim
-                           hover:text-term-fg"
+                className="flex items-center gap-1 rounded border border-term-border px-3 py-1 text-term-dim
+                           hover:text-term-fg hover:border-term-dim transition-colors"
               >
-                cancel
+                Cancel
               </button>
             )}
           </div>
@@ -128,85 +124,69 @@ export function KaggleControl({ kaggle }: { kaggle: UseKaggle }) {
         <div className="space-y-2">
           <div className="flex items-center gap-2 text-term-dim">
             <span>
-              connected as{" "}
-              <span className="text-term-green">{kaggle.username}</span>
+              OPERATOR:{" "}
+              <span className="text-term-green">@{kaggle.username}</span>
             </span>
             <button
               disabled={running}
               onClick={beginEdit}
-              className="underline hover:text-term-green disabled:opacity-30
-                         disabled:no-underline"
+              className="flex items-center gap-0.5 hover:text-term-green disabled:opacity-30 transition-colors"
             >
-              change
+              [edit]
             </button>
             <button
               disabled={running}
               onClick={kaggle.forget}
-              className="hover:text-term-red disabled:opacity-30"
+              className="flex items-center gap-0.5 hover:text-term-red disabled:opacity-30 transition-colors"
             >
-              forget
+              [forget]
             </button>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <label className="text-term-dim">model</label>
-            <select
-              value={kaggle.launchModel}
-              disabled={running || busy}
-              onChange={(e) => kaggle.setLaunchModel(e.target.value)}
-              className="max-w-[60vw] truncate rounded border border-term-border bg-term-bg
-                         px-2 py-1 text-term-fg focus:border-term-green focus:outline-none
-                         disabled:opacity-50 sm:max-w-none"
-            >
-              {LAUNCH_MODELS.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
-          </div>
+
           <p className="text-[10px] text-term-dim">{modelById(kaggle.launchModel).note}</p>
           {modelById(kaggle.launchModel).gpu && accelerator !== "gpu" && (
             <p className="text-[10px] text-term-amber">
-              ⚠ this model needs the GPU — set accelerator to GPU before starting.
+              GPU recommended for this payload — select GPU (T4) before deployment.
             </p>
           )}
+
           <div className="flex items-center gap-2">
-            <label className="text-term-dim">accelerator</label>
+            <label className="text-term-dim text-[11px] font-semibold">ACCELERATOR</label>
             <select
               value={accelerator}
               disabled={running || busy}
               onChange={(e) => setAccelerator(e.target.value)}
               className="rounded border border-term-border bg-term-bg px-2 py-1
                          text-term-fg focus:border-term-green focus:outline-none
-                         disabled:opacity-50"
+                         disabled:opacity-50 text-xs"
             >
               <option value="cpu">CPU</option>
-              <option value="gpu">GPU (T4)</option>
+              <option value="gpu">NVIDIA GPU (T4)</option>
             </select>
             {running ? (
               <button
                 disabled={busy}
                 onClick={kaggle.stop}
-                className="rounded border border-term-border px-2 py-1 text-term-red
-                           hover:border-term-red disabled:opacity-30"
+                className="flex items-center gap-1 rounded border border-term-red/60 bg-term-red/10 px-2.5 py-1 text-term-red
+                           hover:border-term-red hover:bg-term-red/20 disabled:opacity-30 transition-colors text-xs font-semibold"
               >
-                ⏻ stop
+                STOP
               </button>
             ) : (
               <button
                 disabled={busy}
                 onClick={() => kaggle.start()}
-                className="rounded border border-term-border px-2 py-1 text-term-green
-                           hover:border-term-green disabled:opacity-30"
+                className="flex items-center gap-1 rounded border border-term-green/60 bg-term-green/10 px-2.5 py-1 text-term-green
+                           hover:border-term-green hover:bg-term-green/20 disabled:opacity-30 transition-colors text-xs font-semibold shadow-[0_0_8px_rgba(62,207,92,0.15)]"
               >
-                ⏻ start
+                START
               </button>
             )}
           </div>
 
           {publicUrl && (
-            <p className="break-all text-term-dim">
-              tunnel: <span className="text-term-green">{publicUrl}</span>
+            <p className="break-all text-term-dim text-[11px]">
+              TUNNEL: <span className="text-term-green font-mono">{publicUrl}</span>
             </p>
           )}
 
@@ -214,13 +194,13 @@ export function KaggleControl({ kaggle }: { kaggle: UseKaggle }) {
             <div>
               <button
                 onClick={() => setShowLogs((s) => !s)}
-                className="text-term-dim hover:text-term-green"
+                className="text-term-dim hover:text-term-green text-[11px] transition-colors"
               >
-                {showLogs ? "▾ hide logs" : "▸ show logs"}
+                {showLogs ? "▾ Hide Telemetry Logs" : "▸ Show Telemetry Logs"}
               </button>
               {showLogs && (
                 <pre className="mt-1 max-h-40 overflow-auto rounded border border-term-border
-                                bg-term-bg p-2 text-[10px] leading-snug text-term-dim">
+                                bg-term-bg p-2 text-[10px] leading-snug text-term-dim font-mono">
                   {logs}
                 </pre>
               )}
@@ -229,7 +209,7 @@ export function KaggleControl({ kaggle }: { kaggle: UseKaggle }) {
         </div>
       )}
 
-      {error && <p className="text-term-red">! {error}</p>}
+      {error && <p className="text-term-red text-xs">⚠ {error}</p>}
     </div>
   );
 }

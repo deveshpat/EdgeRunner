@@ -46,8 +46,27 @@ LLAMA_VERSION = "0.3.33"
 _T0 = time.time()
 
 
+def publish_event(msg):
+    topic = os.environ.get("RENDEZVOUS_TOPIC")
+    if not topic:
+        u = os.environ.get("KAGGLE_USERNAME", "")
+        if u:
+            topic = f"edgerunner_{u.lower()}"
+    if topic:
+        try:
+            req = urllib.request.Request(
+                f"https://ntfy.sh/{topic}",
+                data=msg.encode("utf-8"),
+                headers={"User-Agent": "EdgeRunner", "X-Cache": "yes"},
+            )
+            urllib.request.urlopen(req, timeout=5)
+        except Exception:
+            pass
+
+
 def log(msg):
     print(f"[edgerunner +{int(time.time() - _T0)}s] {msg}", flush=True)
+    publish_event(f"[edgerunner] {msg}")
 
 
 def sh(cmd):

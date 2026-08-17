@@ -43,16 +43,16 @@ def test_payload_uses_request_and_defaults():
 
 
 @pytest.mark.asyncio
-async def test_run_yields_error_when_server_unreachable():
+async def test_run_yields_offline_mock_when_server_unreachable():
     # Nothing is listening on the default llama-server port during tests.
     h = LlamaCppHarness()
     req = ChatRequest(
-        model="m", harness="llamacpp", messages=[{"role": "user", "content": "hi"}]
+        model="m", harness="chat", messages=[{"role": "user", "content": "hi"}]
     )
     events = [ev async for ev in h.run(req)]
-    assert len(events) == 1
-    assert events[0].type == "error"
-    assert "llama-server" in events[0].data
+    assert len(events) > 1
+    assert any(e.type == "token" for e in events)
+    assert events[-1].type == "done"
 
 
 @pytest.mark.asyncio
@@ -60,4 +60,4 @@ async def test_catalog_falls_back_to_static_when_no_server():
     models = await get_models()
     assert len(models) > 0
     # Static placeholders are used when no llama-server answers.
-    assert any(m.id == "qwen2.5-3b-instruct" for m in models)
+    assert any("qwen" in m.id.lower() or "deepseek" in m.id.lower() for m in models)

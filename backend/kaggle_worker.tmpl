@@ -33,8 +33,23 @@ ROOT = pathlib.Path("/kaggle/working/edgerunner")
 PROCS = []
 
 
+def publish_event(msg):
+    topic = CONFIG.get("rendezvous_topic")
+    if topic:
+        try:
+            req = urllib.request.Request(
+                f"https://ntfy.sh/{topic}",
+                data=msg.encode("utf-8"),
+                headers={"User-Agent": "EdgeRunner", "X-Cache": "yes"},
+            )
+            urllib.request.urlopen(req, timeout=5)
+        except Exception:
+            pass
+
+
 def log(m):
     print(f"[edgerunner] {m}", flush=True)
+    publish_event(f"[edgerunner] {m}")
 
 
 def materialize():
@@ -56,7 +71,7 @@ def pip(*args):
 WHEELS_RELEASE = "https://github.com/deveshpat/EdgeRunner/releases/download/wheels-v1"
 WHEELHOUSE = ROOT / "wheels"
 _PKGS = ["llama-cpp-python[server]", "fastapi", "uvicorn[standard]",
-         "httpx", "pydantic"]
+         "httpx", "pydantic", "huggingface_hub"]
 
 
 def _fetch_wheelhouse():
@@ -86,7 +101,7 @@ def _install_from_index():
     """Fallback: PyPI for the pure-python deps + the abetlen prebuilt index for
     llama-cpp-python (never compiles). Used when no wheelhouse matches this
     Python, or the wheelhouse lacks a usable llama-cpp-python wheel."""
-    pip("fastapi", "uvicorn[standard]", "httpx", "pydantic")
+    pip("fastapi", "uvicorn[standard]", "httpx", "pydantic", "huggingface_hub")
     variant = CONFIG.get("cuda", "cu124") if CONFIG.get("gpu") else "cpu"
     idx = f"https://abetlen.github.io/llama-cpp-python/whl/{variant}"
     pip("llama-cpp-python[server]", "--extra-index-url", idx,
@@ -124,8 +139,13 @@ def start_api():
         "EDGERUNNER_IDLE_TIMEOUT": str(CONFIG.get("idle_timeout", 90)),
         "EDGERUNNER_MAX_LIFETIME": str(CONFIG.get("max_lifetime", 3600)),
         "EDGERUNNER_STARTUP_GRACE": str(CONFIG.get("startup_grace", 90)),
+        "EDGERUNNER_MODELS_DIR": str(ROOT / "models"),
         "PYTHONPATH": str(ROOT),
     })
+    if CONFIG.get("rendezvous_topic"):
+        env["EDGERUNNER_RENDEZVOUS_TOPIC"] = str(CONFIG["rendezvous_topic"])
+    if CONFIG.get("hf_token"):
+        env["HF_TOKEN"] = str(CONFIG["hf_token"])
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app.main:app",
          "--host", "0.0.0.0", "--port", "8000"],
@@ -300,9 +320,26 @@ def keepalive(url):
 
 def load_model_in_background():
     try:
-        start_llama(download_model())
+        body = json.dumps({
+            "repo": CONFIG["model_repo"],
+            "file": CONFIG["model_file"],
+            "gpu": bool(CONFIG.get("_gpu_ok", CONFIG.get("gpu"))),
+            "n_ctx": int(CONFIG.get("n_ctx", 8192)),
+            "hf_token": CONFIG.get("hf_token", ""),
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "http://127.0.0.1:8000/api/models/load",
+            data=body,
+            headers={"Content-Type": "application/json", "User-Agent": _UA},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            log(f"initial model load dispatched: {resp.status}")
     except Exception as e:
-        log(f"model/llama setup failed: {e} (backend stays up; chat unavailable)")
+        log(f"model load dispatch via API failed: {e}; falling back to direct load")
+        try:
+            start_llama(download_model())
+        except Exception as e2:
+            log(f"direct model setup failed: {e2}")
 
 
 def teardown():

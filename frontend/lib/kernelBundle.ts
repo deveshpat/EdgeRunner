@@ -31,6 +31,8 @@ export interface WorkerConfig {
   startup_grace: number;
   /** HF read token — anon GGUF downloads from Kaggle IPs are 403'd. */
   hf_token: string;
+  /** Real-time rendezvous topic for zero-latency URL & log delivery. */
+  rendezvous_topic?: string;
 }
 
 export function renderWorker(template: string, config: WorkerConfig): string {

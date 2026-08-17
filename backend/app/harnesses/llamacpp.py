@@ -27,9 +27,9 @@ from app.schemas import ChatRequest
 
 
 class LlamaCppHarness(Harness):
-    id = "llamacpp"
-    name = "llama.cpp (live)"
-    description = "Streams from a llama.cpp llama-server running a local GGUF model."
+    id = "chat"
+    name = "Chat"
+    description = "Direct chat with the neural model."
 
     def _payload(self, request: ChatRequest) -> dict:
         messages = ensure_system_prompt(
@@ -79,13 +79,20 @@ class LlamaCppHarness(Harness):
                         if token:
                             yield StreamEvent(type="token", data=token)
         except httpx.ConnectError:
-            yield StreamEvent(
-                type="error",
-                data=(
-                    f"Could not connect to llama-server at "
-                    f"{settings.llamacpp_base_url}. Is it running?"
-                ),
+            last_user = next(
+                (m.content for m in reversed(request.messages) if m.role == "user"),
+                "",
             )
+            msg = (
+                f"[Offline Mock via {request.model}] Backend model server is currently offline. "
+                f"You said: {last_user!r}. "
+                "Start a local llama-server or connect your Kaggle GPU rig to stream live tokens."
+            )
+            import asyncio
+            for word in msg.split(" "):
+                await asyncio.sleep(0.02)
+                yield StreamEvent(type="token", data=word + " ")
+            yield StreamEvent(type="done")
             return
         except httpx.TimeoutException:
             yield StreamEvent(type="error", data="llama-server timed out.")

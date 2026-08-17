@@ -1,20 +1,19 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { BackendControl } from "@/components/BackendControl";
 import { Composer } from "@/components/Composer";
-import {
-  KaggleControl,
-  STATE_COLOR,
-  STATE_LABEL,
-} from "@/components/KaggleControl";
+import { KaggleControl } from "@/components/KaggleControl";
 import { Logo } from "@/components/Logo";
 import { Message } from "@/components/Message";
+import { ModelPickerModal } from "@/components/ModelPickerModal";
 import { Picker } from "@/components/Picker";
 import { SettingsPanel } from "@/components/Settings";
+import { ShortcutsModal } from "@/components/ShortcutsModal";
 import { Sidebar } from "@/components/Sidebar";
 import { fetchCatalog, hasBackend, type Catalog } from "@/lib/api";
+import { LAUNCH_MODELS } from "@/lib/models";
 import {
   DEFAULT_SETTINGS,
   loadSettings,
@@ -24,13 +23,7 @@ import {
 import { useBackend } from "@/lib/useBackend";
 import { useConversations } from "@/lib/useConversations";
 import { useKaggle } from "@/lib/useKaggle";
-
-// llama-cpp-python reports a model id that can be a full filesystem path;
-// show just the file's base name without the .gguf extension.
-function prettyModelName(name: string): string {
-  const base = name.split("/").pop() ?? name;
-  return base.replace(/\.gguf$/i, "");
-}
+import { useModelManager } from "@/lib/useModelManager";
 
 export default function Home() {
   const [catalog, setCatalog] = useState<Catalog | null>(null);
@@ -38,21 +31,108 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [showSettings, setShowSettings] = useState(false);
+  const [showModelModal, setShowModelModal] = useState(false);
+  const [showShortcutsModal, setShowShortcutsModal] = useState(false);
+  const [trafficHovered, setTrafficHovered] = useState(false);
+  const [dockedSessionIds, setDockedSessionIds] = useState<string[]>([]);
+  const [viewMode, setViewMode] = useState<"landing" | "workspace">("landing");
   const [atBottom, setAtBottom] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  // Kaggle control plane (declared before catalog effects so its setApiBase
-  // effect runs first when the active backend changes).
+  // Kaggle control plane
   const kaggle = useKaggle();
-  // Alternative to the one-click Kaggle launch: run the backend yourself and
-  // paste the tunnel URL. Either path sets the shared API base.
   const backend = useBackend();
   const backendOnline = kaggle.state === "online" || backend.status === "online";
 
+  const modelManager = useModelManager(backendOnline);
+  const [customSelectedModel, setCustomSelectedModel] = useState<{
+    id: string;
+    name: string;
+    repo: string;
+    file: string;
+    gpu?: boolean;
+  } | null>(null);
+
+  // Reconcile model list: curated defaults + custom selected + live backend catalog.
+  const modelOptions = useMemo(() => {
+    const optionsMap = new Map<
+      string,
+      {
+        id: string;
+        name: string;
+        description?: string;
+        repo?: string;
+        file?: string;
+        gpu?: boolean;
+      }
+    >();
+
+    const register = (
+      id: string,
+      name: string,
+      description?: string,
+      repo?: string,
+      file?: string,
+      gpu?: boolean,
+    ) => {
+      const key = id.replace(/\.gguf$/i, "").toLowerCase();
+      const existing = optionsMap.get(key);
+      if (existing && existing.name.includes("[MOUNTED]")) {
+        return;
+      }
+      optionsMap.set(key, {
+        id,
+        name,
+        description,
+        repo,
+        file: file || (id.endsWith(".gguf") ? id : `${id}.gguf`),
+        gpu,
+      });
+    };
+
+    // 1. Live backend catalog
+    for (const m of catalog?.models ?? []) {
+      const cleanId = m.id.split("/").pop()?.replace(/\.gguf$/i, "") ?? m.id;
+      const lm = LAUNCH_MODELS.find(
+        (x) =>
+          x.id.toLowerCase() === cleanId.toLowerCase() ||
+          x.file.replace(/\.gguf$/i, "").toLowerCase() === cleanId.toLowerCase(),
+      );
+      register(
+        m.id,
+        m.name,
+        m.description,
+        lm?.repo,
+        lm?.file || (m.id.endsWith(".gguf") ? m.id : `${m.id}.gguf`),
+        lm?.gpu,
+      );
+    }
+
+    // 2. Custom selected model
+    if (customSelectedModel) {
+      register(
+        customSelectedModel.id,
+        customSelectedModel.name,
+        `${customSelectedModel.repo} :: ${customSelectedModel.file}`,
+        customSelectedModel.repo,
+        customSelectedModel.file,
+        customSelectedModel.gpu,
+      );
+    }
+
+    // 3. Curated launch models
+    for (const m of LAUNCH_MODELS) {
+      const alias = m.file.replace(/\.gguf$/i, "");
+      register(alias, m.label, m.note, m.repo, m.file, m.gpu);
+    }
+
+    return Array.from(optionsMap.values());
+  }, [catalog, customSelectedModel]);
+
   const chat = useConversations(
     {
-      model: catalog?.models[0]?.id ?? "",
-      harness: catalog?.harnesses[0]?.id ?? "",
+      model: modelOptions[0]?.id ?? "Qwen3.5-4B-Q4_K_M",
+      harness: "chat",
     },
     settings,
   );
@@ -60,8 +140,6 @@ export default function Home() {
 
   const loadCatalog = useCallback(() => {
     setCatalogError(null);
-    // No backend connected → don't fetch (there is no localhost fallback in the
-    // deployed app). The empty-state guidance invites turning Kaggle on.
     if (!hasBackend()) {
       setCatalog(null);
       return;
@@ -71,20 +149,247 @@ export default function Home() {
       .catch((e) => setCatalogError(`Could not reach backend: ${e.message}`));
   }, []);
 
+  const handleSelectModel = useCallback(
+    async (selected: {
+      id: string;
+      name: string;
+      repo: string;
+      file: string;
+      gpu?: boolean;
+    }) => {
+      setCustomSelectedModel(selected);
+      chat.setModel(selected.id);
+      kaggle.setLaunchModel(selected.id, selected.repo, selected.file);
+      if (selected.gpu && kaggle.accelerator !== "gpu") {
+        kaggle.setAccelerator("gpu");
+      }
+
+      if (backendOnline) {
+        await modelManager.switchModel({
+          repo: selected.repo,
+          file: selected.file,
+          modelId: selected.id,
+          gpu: selected.gpu ?? (kaggle.accelerator === "gpu"),
+          hfToken: kaggle.hfToken,
+        });
+        loadCatalog();
+      }
+    },
+    [backendOnline, chat, kaggle, loadCatalog, modelManager],
+  );
+
+  const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const [isCanvasDragOver, setIsCanvasDragOver] = useState(false);
+
+  // Toggle multi-session split view dock (cycles between all windows docked and single focused window)
+  const toggleSplitDock = useCallback(() => {
+    setViewMode("workspace");
+    if (dockedSessionIds.length > 0) {
+      // Collapse all other docked windows, keeping ONLY the currently active/selected window
+      setDockedSessionIds([]);
+    } else {
+      // Dock all available sessions if more than 1 conversation exists
+      if (chat.conversations.length > 1) {
+        setDockedSessionIds(chat.conversations.map((c) => c.id));
+      }
+    }
+  }, [dockedSessionIds, chat.conversations]);
+
+  const undockSession = useCallback((id: string) => {
+    setDockedSessionIds((prev) => {
+      const next = prev.filter((x) => x !== id);
+      if (next.length <= 1) return [];
+      return next;
+    });
+  }, []);
+
+  const handleCanvasDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      setIsCanvasDragOver(false);
+      const droppedId =
+        e.dataTransfer.getData("application/edgerunner-session-id") ||
+        e.dataTransfer.getData("text/plain");
+
+      if (!droppedId) return;
+
+      setViewMode("workspace");
+      if (dockedSessionIds.length === 0) {
+        const currentId = chat.active?.id;
+        if (currentId && currentId !== droppedId) {
+          setDockedSessionIds([currentId, droppedId]);
+        } else {
+          const other = chat.conversations.find((c) => c.id !== droppedId);
+          setDockedSessionIds(other ? [other.id, droppedId] : [droppedId]);
+        }
+      } else if (!dockedSessionIds.includes(droppedId)) {
+        setDockedSessionIds((prev) => [...prev, droppedId]);
+      }
+      chat.select(droppedId);
+    },
+    [chat, dockedSessionIds],
+  );
+
+  // Global Keyboard Shortcuts (Collision-free)
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      const isInput =
+        document.activeElement?.tagName === "INPUT" ||
+        document.activeElement?.tagName === "TEXTAREA" ||
+        document.activeElement?.tagName === "SELECT";
+
+      // Tab / Shift+Tab: Cycle between sessions (docked panes or single window conversations)
+      if (e.key === "Tab" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        if (viewMode === "workspace") {
+          if (dockedSessionIds.length > 1) {
+            e.preventDefault();
+            const currentIndex = dockedSessionIds.indexOf(chat.active?.id || "");
+            const nextIndex = e.shiftKey
+              ? (currentIndex - 1 + dockedSessionIds.length) % dockedSessionIds.length
+              : (currentIndex + 1) % dockedSessionIds.length;
+            chat.select(dockedSessionIds[nextIndex]);
+            return;
+          } else if (chat.conversations.length > 1) {
+            e.preventDefault();
+            const currentIndex = chat.conversations.findIndex(
+              (c) => c.id === chat.active?.id,
+            );
+            const nextIndex = e.shiftKey
+              ? (currentIndex - 1 + chat.conversations.length) % chat.conversations.length
+              : (currentIndex + 1) % chat.conversations.length;
+            chat.select(chat.conversations[nextIndex].id);
+            return;
+          }
+        }
+      }
+
+      // Enter when session sidebar is open: closes drawer to currently selected session in workspace
+      if (sidebarOpen && e.key === "Enter" && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+        e.preventDefault();
+        setSidebarOpen(false);
+        setViewMode("workspace");
+        return;
+      }
+
+      // Enter in docked mode (when not actively typing prompt text):
+      // Expands the selected active window (collapses all others, identical to ⌘\)
+      if (e.key === "Enter" && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+        if (viewMode === "workspace" && dockedSessionIds.length > 0) {
+          if (!isInput || !input.trim()) {
+            e.preventDefault();
+            setDockedSessionIds([]);
+            return;
+          }
+        }
+      }
+
+      // ⌘/Ctrl + K: Clear to Landing Page
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setViewMode("landing");
+        setDockedSessionIds([]);
+        return;
+      }
+
+      // ⌘/Ctrl + Shift + N: New Session
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        chat.create();
+        setViewMode("workspace");
+        return;
+      }
+
+      // ⌘/Ctrl + B: Toggle Sidebar
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        setSidebarOpen((s) => !s);
+        return;
+      }
+
+      // ⌘/Ctrl + M: Model Picker Matrix
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "m") {
+        e.preventDefault();
+        setShowModelModal((s) => !s);
+        return;
+      }
+
+      // ⌘/Ctrl + \ : Toggle Split Screen Dock (Dock All ↔ Focus Active)
+      if ((e.metaKey || e.ctrlKey) && e.key === "\\") {
+        e.preventDefault();
+        toggleSplitDock();
+        return;
+      }
+
+      // ⌘/Ctrl + ,: Toggle Settings
+      if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+        e.preventDefault();
+        setShowSettings((s) => !s);
+        return;
+      }
+
+      // ⌘/Ctrl + L: Clear current session messages
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "l") {
+        e.preventDefault();
+        if (chat.active) {
+          chat.deleteMessage(-1);
+        }
+        return;
+      }
+
+      // ⌘/Ctrl + /: Shortcuts HUD
+      if ((e.metaKey || e.ctrlKey) && e.key === "/") {
+        e.preventDefault();
+        setShowShortcutsModal((s) => !s);
+        return;
+      }
+
+      // ? when not in input: Shortcuts HUD
+      if (e.key === "?" && !isInput && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        setShowShortcutsModal(true);
+        return;
+      }
+
+      // Escape: Close modals / abort stream
+      if (e.key === "Escape") {
+        if (showShortcutsModal) {
+          setShowShortcutsModal(false);
+          return;
+        }
+        if (showModelModal) {
+          setShowModelModal(false);
+          return;
+        }
+        if (showSettings) {
+          setShowSettings(false);
+          return;
+        }
+        if (sidebarOpen) {
+          setSidebarOpen(false);
+          return;
+        }
+        if (chat.busy) {
+          chat.stop();
+          return;
+        }
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [chat, showModelModal, showSettings, showShortcutsModal, sidebarOpen, toggleSplitDock]);
+
   // Load settings on mount.
   useEffect(() => {
     setSettings(loadSettings());
   }, []);
 
-  // (Re)load the catalog whenever the active backend changes — i.e. when the
-  // Kaggle session comes online (tunnel) or goes back offline (local).
+  // (Re)load catalog when active backend changes
   useEffect(() => {
     loadCatalog();
   }, [loadCatalog, kaggle.state, kaggle.publicUrl, backend.status, backend.url]);
 
-  // The worker brings the API + tunnel up BEFORE the model finishes loading, so
-  // the first catalog is placeholders. While online, poll until the real
-  // (llama-loaded) model appears, then stop.
   useEffect(() => {
     if (!backendOnline) return;
     const isPlaceholder =
@@ -98,30 +403,18 @@ export default function Home() {
     };
   }, [backendOnline, catalog, loadCatalog]);
 
-  // Keep the active conversation pointed at a model the backend actually serves
-  // (the placeholder id won't match llama's alias once the model loads).
+  // Keep active conversation pointed at a known model
   useEffect(() => {
     const a = chat.active;
-    if (!catalog || catalog.models.length === 0 || !a) return;
-    const ids = catalog.models.map((m) => m.id);
+    if (modelOptions.length === 0 || !a) return;
+    const ids = modelOptions.map((m) => m.id);
     if (a.model && !ids.includes(a.model)) {
-      chat.setModel(catalog.models[0].id);
+      if (customSelectedModel && customSelectedModel.id === a.model) return;
+      chat.setModel(modelOptions[0].id);
     }
-  }, [catalog, chat]);
+  }, [modelOptions, chat, customSelectedModel]);
 
-  // Once hydrated and the catalog is loaded, make sure there is a session.
-  useEffect(() => {
-    if (
-      chat.hydrated &&
-      catalog &&
-      catalog.models.length > 0 &&
-      chat.conversations.length === 0
-    ) {
-      chat.seedIfEmpty();
-    }
-  }, [chat.hydrated, catalog, chat.conversations.length, chat.seedIfEmpty]);
-
-  // Autoscroll only when the user is already at the bottom.
+  // Autoscroll
   useEffect(() => {
     if (atBottom) {
       scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
@@ -149,210 +442,668 @@ export default function Home() {
 
   const active = chat.active;
   const model = active?.model || catalog?.models[0]?.id || "";
-  const harness = active?.harness || catalog?.harnesses[0]?.id || "";
+  const harness = active?.harness || "chat";
   const canRegenerate =
     !chat.busy &&
     !!active &&
     active.messages.some((m) => m.role === "assistant");
 
+  // Multi-docked sessions list
+  const dockedConvos = useMemo(() => {
+    return dockedSessionIds
+      .map((id) => chat.conversations.find((c) => c.id === id))
+      .filter((c): c is NonNullable<typeof c> => !!c);
+  }, [dockedSessionIds, chat.conversations]);
+
   function submit() {
     const text = input.trim();
     if (!text || chat.busy) return;
-    chat.send(text);
+    const isFromLanding = viewMode === "landing";
+    setViewMode("workspace");
+    chat.send(text, isFromLanding);
     setInput("");
   }
 
+  function handleStartNewSession() {
+    chat.create();
+    setViewMode("workspace");
+  }
+
+  function handleTogglePower() {
+    if (!kaggle.configured) {
+      setShowSettings(true);
+    } else if (
+      ["online", "packing", "pushing", "provisioning"].includes(kaggle.state)
+    ) {
+      kaggle.stop();
+    } else {
+      kaggle.start();
+    }
+  }
+
+  // Pickers element rendered at bottom-right of text sandbox
+  const sandboxPickers = (
+    <div className="flex items-center gap-1.5 font-mono text-xs">
+      <Picker
+        label="payload"
+        options={modelOptions}
+        value={
+          modelOptions.find(
+            (m) =>
+              m.id === model ||
+              m.id.replace(/\.gguf$/i, "").toLowerCase() ===
+                model.replace(/\.gguf$/i, "").toLowerCase(),
+          )?.id ?? model
+        }
+        onChange={(id) => {
+          const found = modelOptions.find(
+            (m) =>
+              m.id === id ||
+              m.id.replace(/\.gguf$/i, "").toLowerCase() ===
+                id.replace(/\.gguf$/i, "").toLowerCase(),
+          );
+          const lm = LAUNCH_MODELS.find(
+            (m) =>
+              m.id === id ||
+              m.file.replace(/\.gguf$/i, "").toLowerCase() ===
+                id.replace(/\.gguf$/i, "").toLowerCase() ||
+              m.file === id,
+          );
+          const repo =
+            found?.repo ||
+            lm?.repo ||
+            customSelectedModel?.repo ||
+            "unsloth/Qwen3.5-4B-GGUF";
+          const file =
+            found?.file ||
+            lm?.file ||
+            customSelectedModel?.file ||
+            (id.endsWith(".gguf") ? id : `${id}.gguf`);
+          handleSelectModel({
+            id,
+            name: found?.name || id,
+            repo,
+            file,
+            gpu: found?.gpu ?? lm?.gpu,
+          });
+        }}
+        onOpenModal={() => setShowModelModal(true)}
+        badge={
+          modelManager.activeModelId &&
+          (model.toLowerCase().includes(modelManager.activeModelId.toLowerCase()) ||
+            modelManager.activeModelId.toLowerCase().includes(model.toLowerCase()))
+            ? "ONLINE"
+            : undefined
+        }
+        isLoading={modelManager.isSwitching}
+        disabled={chat.busy || modelManager.isSwitching}
+      />
+
+      <Picker
+        label="harness"
+        options={[
+          {
+            id: "chat",
+            name: "Chat",
+            description: "Direct chat with the model without tools.",
+          },
+          {
+            id: "agent",
+            name: "Agent",
+            description:
+              "Autonomous coding agent combining Python, shell, browser, and system tools.",
+          },
+        ]}
+        value={
+          harness === "chat" || harness === "agent"
+            ? harness
+            : harness === "browser-agent"
+              ? "agent"
+              : harness === "llamacpp"
+                ? "chat"
+                : harness || "chat"
+        }
+        onChange={chat.setHarness}
+        disabled={chat.busy}
+      />
+
+      {chat.busy ? (
+        <button
+          onClick={chat.stop}
+          className="flex items-center gap-1 rounded border border-term-red/60 bg-term-bg px-1.5 py-0.5 text-[10px] text-term-red hover:bg-term-red/10 transition-colors"
+          title="Abort active stream"
+        >
+          <span>■</span>
+        </button>
+      ) : (
+        canRegenerate && (
+          <button
+            onClick={chat.regenerate}
+            disabled={modelManager.isSwitching}
+            className="flex items-center gap-1 rounded border border-term-border bg-term-bg px-1.5 py-0.5 text-[10px] text-term-dim hover:border-term-green hover:text-term-green disabled:opacity-25 transition-colors"
+            title="Retry last response"
+          >
+            <span>↻</span>
+          </button>
+        )
+      )}
+    </div>
+  );
+
   return (
-    <main className="flex h-screen">
+    <main className="flex h-screen w-screen overflow-hidden bg-term-bg text-term-fg font-mono">
+      {/* Session History Slide-out Drawer (available on Landing & Workspace) */}
       <Sidebar
         conversations={chat.conversations}
         activeId={active?.id ?? null}
-        onSelect={chat.select}
-        onCreate={chat.create}
-        onDelete={chat.remove}
+        onSelect={(id) => {
+          chat.select(id);
+          setViewMode("workspace");
+        }}
+        onCreate={() => {
+          chat.create();
+          setViewMode("workspace");
+        }}
+        onDelete={(id) => {
+          setDockedSessionIds((prev) => prev.filter((x) => x !== id));
+          chat.remove(id);
+        }}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
       />
 
-      <div className="mx-auto flex h-screen max-w-4xl flex-1 flex-col p-4">
-        {/* Header */}
-        <header className="border-b border-term-border pb-3">
-          <div className="relative flex items-center">
-            <button
-              onClick={() => setSidebarOpen(true)}
-              className="absolute left-0 top-0 z-10 shrink-0 rounded border border-term-border
-                         px-2 py-1 text-term-dim hover:border-term-green hover:text-term-green
-                         md:hidden"
-              aria-label="open sidebar"
-            >
-              ☰
-            </button>
-            <Logo />
-          </div>
-          <div className="mt-2 flex flex-wrap items-center gap-4">
-            <Picker
-              label="model"
-              options={(catalog?.models ?? []).map((m) => ({
-                ...m,
-                name: prettyModelName(m.name),
-              }))}
-              value={model}
-              onChange={chat.setModel}
-              disabled={chat.busy}
-            />
-            <Picker
-              label="harness"
-              options={[
-                ...(catalog?.harnesses ?? []),
-                {
-                  id: "browser-agent",
-                  name: "Agent (browser)",
-                  description:
-                    "Runs in your browser; can execute JS and manage sessions.",
-                },
-              ]}
-              value={harness}
-              onChange={chat.setHarness}
-              disabled={chat.busy}
-            />
-            <button
-              onClick={() => setShowSettings((s) => !s)}
-              className={`text-xs ${
-                showSettings ? "text-term-green" : "text-term-dim"
-              } hover:text-term-green`}
-              aria-expanded={showSettings}
-            >
-              ⚙ settings
-            </button>
-
-            {/* Kaggle power button */}
-            <button
-              onClick={() => {
-                if (!kaggle.configured) {
-                  setShowSettings(true);
-                } else if (
-                  ["online", "packing", "pushing", "provisioning"].includes(
-                    kaggle.state,
-                  )
-                ) {
-                  kaggle.stop();
-                } else {
-                  kaggle.start(); // uses the selected accelerator
-                }
-              }}
-              disabled={kaggle.busy}
-              className={`text-xs ${STATE_COLOR[kaggle.state]} hover:opacity-80
-                          disabled:opacity-40`}
-              title="Kaggle backend"
-            >
-              ⏻ kaggle: {STATE_LABEL[kaggle.state]}
-            </button>
-
-            <span className="ml-auto text-xs text-term-dim">
-              {catalog ? "● connected" : "○ connecting…"}
-            </span>
-          </div>
-          {showSettings && (
-            <>
-              <SettingsPanel settings={settings} onChange={updateSettings} />
-              <KaggleControl kaggle={kaggle} />
-              <div className="mt-3 text-center text-[10px] uppercase tracking-wider text-term-dim">
-                — or connect your own backend —
+      <div className="flex h-screen w-full flex-1 flex-col transition-all overflow-hidden">
+        {/* Full-Length Top Navbar */}
+        {viewMode === "workspace" ? (
+          <header className="w-full border-b border-term-border bg-term-panel/60 px-4 py-2.5 text-xs select-none transition-all duration-300">
+            <div className="flex items-center justify-between gap-4 w-full">
+              {/* Left: Window Controls + History Trigger */}
+              <div className="flex items-center gap-3 min-w-[140px]">
+                {/* Traffic Lights */}
+                <div
+                  className="flex items-center gap-1.5"
+                  onMouseEnter={() => setTrafficHovered(true)}
+                  onMouseLeave={() => setTrafficHovered(false)}
+                >
+                  <button
+                    onClick={() => {
+                      // Red dot returns directly to Hero Landing Page
+                      setDockedSessionIds([]);
+                      setViewMode("landing");
+                    }}
+                    title="Close session & return to Landing (⌘K)"
+                    className="flex h-3 w-3 items-center justify-center rounded-full bg-[#FF5F56] transition-transform hover:scale-110 active:scale-95"
+                  >
+                    {trafficHovered && <span className="text-[7px] font-bold text-black leading-none">✕</span>}
+                  </button>
+                  <button
+                    onClick={() => chat.active && chat.deleteMessage(-1)}
+                    title="Clear Active Transcript (⌘L)"
+                    className="flex h-3 w-3 items-center justify-center rounded-full bg-[#FFBD2E] transition-transform hover:scale-110 active:scale-95"
+                  >
+                    {trafficHovered && <span className="text-[7px] font-bold text-black leading-none">−</span>}
+                  </button>
+                  <button
+                    onClick={toggleSplitDock}
+                    title={dockedConvos.length > 0 ? "Collapse to Selected Active Window (⌘\\)" : "Dock All Windows (⌘\\)"}
+                    className={`flex h-3 w-3 items-center justify-center rounded-full ${
+                      dockedConvos.length > 0 ? "bg-[#3ecf5c] ring-1 ring-white" : "bg-[#27C93F]"
+                    } transition-transform hover:scale-110 active:scale-95`}
+                  >
+                    {trafficHovered && <span className="text-[6px] font-bold text-black leading-none">⤢</span>}
+                  </button>
+                </div>
               </div>
-              <BackendControl backend={backend} />
-            </>
-          )}
-        </header>
 
-        {/* Transcript */}
-        <div className="relative flex-1 overflow-hidden">
-          <div
-            ref={scrollRef}
-            onScroll={onScroll}
-            className="h-full overflow-y-auto px-1 py-4 text-sm leading-relaxed sm:px-2"
-          >
-            {!active || active.messages.length === 0 ? (
-              <p className="text-term-dim">
-                Pick a model and harness, then type a message to start.
-              </p>
-            ) : (
-              active.messages.map((m, i) => (
-                <Message
-                  key={i}
-                  role={m.role}
-                  content={m.content}
-                  tools={m.tools}
-                  stats={m.stats}
-                  onDelete={() => chat.deleteMessage(i)}
+              {/* Center: Stylized EdgeRunner Wordmark (Larger, clicking returns home) */}
+              <div
+                onClick={() => {
+                  setDockedSessionIds([]);
+                  setViewMode("landing");
+                }}
+                className="flex-1 flex items-center justify-center cursor-pointer hover:opacity-90 transition-opacity"
+                title="Return to Hero Landing (⌘K)"
+              >
+                <Logo variant="navbar" />
+              </div>
+
+              {/* Right: Merged Power/Status Button + Settings + Shortcuts */}
+              <div className="flex items-center gap-2.5 justify-end min-w-[140px]">
+                {/* Merged Single Status / Power Toggle Button */}
+                {backendOnline ? (
+                  <button
+                    onClick={handleTogglePower}
+                    disabled={kaggle.busy}
+                    className="flex items-center gap-1.5 rounded border border-term-green/60 bg-term-green/10 px-2.5 py-1 text-[11px] text-term-green hover:border-term-red hover:text-term-red hover:bg-term-red/10 transition-all shadow-[0_0_8px_rgba(57,255,20,0.2)] font-semibold"
+                    title="Click to Disconnect / Power Down"
+                  >
+                    <span>●</span>
+                    <span>ONLINE</span>
+                  </button>
+                ) : kaggle.busy || kaggle.state === "provisioning" || kaggle.state === "packing" || kaggle.state === "pushing" ? (
+                  <button
+                    onClick={kaggle.stop}
+                    className="flex items-center gap-1.5 rounded border border-term-amber/50 bg-term-amber/10 px-2.5 py-1 text-[11px] text-term-amber animate-pulse hover:border-term-red hover:text-term-red transition-all font-semibold"
+                    title="Starting up… Click to Cancel"
+                  >
+                    <span>⚡</span>
+                    <span>CONNECTING…</span>
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleTogglePower}
+                    disabled={kaggle.busy}
+                    className="flex items-center gap-1.5 rounded border border-term-border bg-term-panel/40 px-2.5 py-1 text-[11px] text-term-dim hover:border-term-green hover:text-term-green transition-all font-semibold"
+                    title="Click to Launch Compute Rig"
+                  >
+                    <span>⏻</span>
+                    <span>OFFLINE</span>
+                  </button>
+                )}
+
+                <button
+                  onClick={() => setShowSettings((s) => !s)}
+                  className={`flex items-center justify-center h-7 w-7 rounded border border-term-border transition-colors ${
+                    showSettings ? "text-term-green border-term-green" : "text-term-dim hover:text-term-green hover:border-term-dim"
+                  }`}
+                  title="Settings & Hardware (⌘,)"
+                >
+                  ⚙
+                </button>
+
+                <button
+                  onClick={() => setShowShortcutsModal(true)}
+                  className="hidden sm:flex items-center justify-center rounded border border-term-border/70 px-1.5 py-0.5 text-[10px] text-term-dim hover:text-term-green hover:border-term-green transition-colors"
+                  title="Keyboard Shortcuts (⌘/)"
+                >
+                  ⌘/
+                </button>
+              </div>
+            </div>
+
+            {showSettings && (
+              <div className="mt-3 border-t border-term-border pt-3">
+                <SettingsPanel settings={settings} onChange={updateSettings} />
+                <KaggleControl kaggle={kaggle} />
+                <div className="mt-3 text-center text-[10px] uppercase tracking-wider text-term-dim">
+                  — or connect your own backend —
+                </div>
+                <BackendControl backend={backend} />
+              </div>
+            )}
+          </header>
+        ) : null}
+
+        {/* Two-Phased Main Content Area */}
+        {viewMode === "landing" ? (
+          /* Phase 1: Hero Landing Page */
+          <div className="flex flex-1 flex-col items-center justify-center p-6 text-center select-none overflow-y-auto">
+            <div className="w-full max-w-2xl flex flex-col items-center space-y-6">
+              {/* Centered Grand Glowing Original Logo */}
+              <Logo variant="hero" className="w-full py-4" />
+
+              {/* Terminal Slash Command Menu */}
+              <div className="w-full max-w-md mx-auto space-y-2 py-2 text-left select-none">
+                <button
+                  onClick={handleStartNewSession}
+                  className="group flex items-center justify-between w-full rounded border border-term-border/80 bg-term-panel/40 px-4 py-2.5 text-sm text-term-fg transition-all duration-200 hover:border-term-green hover:bg-term-green/[0.04] hover:text-term-green hover:shadow-[0_0_24px_rgba(57,255,20,0.32),inset_0_0_12px_rgba(57,255,20,0.05)]"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-bold text-term-dim group-hover:text-term-green font-mono transition-colors">
+                      [ 01 ]
+                    </span>
+                    <span className="font-semibold text-sm sm:text-base tracking-wide font-mono">
+                      <span className="text-term-green font-bold">/</span>new
+                    </span>
+                  </div>
+                  <kbd className="rounded border border-term-border/60 bg-term-bg/90 px-2 py-0.5 text-[10px] text-term-dim group-hover:border-term-green/40 group-hover:text-term-green font-mono transition-colors">
+                    ⌘⇧N
+                  </kbd>
+                </button>
+
+                <button
+                  onClick={() => setSidebarOpen(true)}
+                  className="group flex items-center justify-between w-full rounded border border-term-border/80 bg-term-panel/40 px-4 py-2.5 text-sm text-term-fg transition-all duration-200 hover:border-term-green hover:bg-term-green/[0.04] hover:text-term-green hover:shadow-[0_0_24px_rgba(57,255,20,0.32),inset_0_0_12px_rgba(57,255,20,0.05)]"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-bold text-term-dim group-hover:text-term-green font-mono transition-colors">
+                      [ 02 ]
+                    </span>
+                    <span className="font-semibold text-sm sm:text-base tracking-wide font-mono">
+                      <span className="text-term-green font-bold">/</span>resume
+                    </span>
+                  </div>
+                  <kbd className="rounded border border-term-border/60 bg-term-bg/90 px-2 py-0.5 text-[10px] text-term-dim group-hover:border-term-green/40 group-hover:text-term-green font-mono transition-colors">
+                    ⌘B
+                  </kbd>
+                </button>
+
+                <button
+                  onClick={() => setShowModelModal(true)}
+                  className="group flex items-center justify-between w-full rounded border border-term-border/80 bg-term-panel/40 px-4 py-2.5 text-sm text-term-fg transition-all duration-200 hover:border-term-green hover:bg-term-green/[0.04] hover:text-term-green hover:shadow-[0_0_24px_rgba(57,255,20,0.32),inset_0_0_12px_rgba(57,255,20,0.05)]"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-bold text-term-dim group-hover:text-term-green font-mono transition-colors">
+                      [ 03 ]
+                    </span>
+                    <span className="font-semibold text-sm sm:text-base tracking-wide font-mono">
+                      <span className="text-term-green font-bold">/</span>model
+                    </span>
+                  </div>
+                  <kbd className="rounded border border-term-border/60 bg-term-bg/90 px-2 py-0.5 text-[10px] text-term-dim group-hover:border-term-green/40 group-hover:text-term-green font-mono transition-colors">
+                    ⌘M
+                  </kbd>
+                </button>
+              </div>
+
+              {/* Direct Launch Sandbox Composer with Outline-Breaking Pickers */}
+              <div className="w-full pt-4 pb-3 text-left">
+                <Composer
+                  value={input}
+                  onChange={setInput}
+                  onSubmit={submit}
+                  placeholder="Type a prompt to launch session… (↵ to send)"
+                  disabled={chat.busy || modelManager.isSwitching}
+                  bottomRight={sandboxPickers}
                 />
-              ))
-            )}
-            {(chat.streaming || chat.liveTools.length > 0) && (
-              <Message
-                role="assistant"
-                content={chat.streaming}
-                tools={chat.liveTools}
-                streaming
-              />
-            )}
-            {chat.error && <p className="py-2 text-term-red">! {chat.error}</p>}
-            {catalogError &&
-              (backendOnline ? (
-                // Online but the tunnel isn't answering yet — a real problem.
-                <p className="py-2 text-term-red">! {catalogError}</p>
-              ) : (
-                // No backend yet — guide instead of alarm (common on mobile).
-                <p className="py-2 text-term-dim">
-                  No backend connected yet. Open ⚙ settings → hit start on the
-                  Kaggle backend, or paste your own backend URL.
-                </p>
-              ))}
-          </div>
+              </div>
 
-          {!atBottom && (
-            <button
-              onClick={scrollToBottom}
-              className="absolute bottom-3 right-3 rounded border border-term-border
-                         bg-term-panel px-2 py-1 text-xs text-term-dim
-                         hover:border-term-green hover:text-term-green"
+              {/* Shortcuts Matrix Footer */}
+              <div className="flex flex-wrap items-center justify-center gap-2 pt-1 pb-4 text-[11px] text-term-dim">
+                <span className="rounded border border-term-border/70 bg-term-panel/30 px-2 py-0.5">
+                  ⌘K Home
+                </span>
+                <span className="rounded border border-term-border/70 bg-term-panel/30 px-2 py-0.5">
+                  ⌘M Model Matrix
+                </span>
+                <span className="rounded border border-term-border/70 bg-term-panel/30 px-2 py-0.5">
+                  ⌘\ Docking
+                </span>
+                <button
+                  onClick={() => setShowShortcutsModal(true)}
+                  className="rounded border border-term-border/70 bg-term-panel/30 px-2 py-0.5 hover:text-term-green transition-colors"
+                >
+                  ⌘/ Shortcuts
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : (
+          /* Phase 2: Active Workspace Mode with Multi-Session Docking Grid */
+          <div className="flex flex-1 flex-col overflow-hidden max-w-7xl mx-auto w-full px-3 sm:px-6 pt-2 pb-4">
+            {/* Transcript Area / Multi-Session Dock Grid / Drag & Drop Target */}
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "copy";
+                if (!isCanvasDragOver) setIsCanvasDragOver(true);
+              }}
+              onDragLeave={() => setIsCanvasDragOver(false)}
+              onDrop={handleCanvasDrop}
+              className={`relative flex-1 overflow-hidden min-h-0 py-1 transition-all rounded-lg ${
+                isCanvasDragOver ? "ring-2 ring-term-green bg-term-green/[0.02]" : ""
+              }`}
             >
-              ↓ bottom
-            </button>
-          )}
-        </div>
+              {dockedConvos.length > 0 ? (
+                /* Multi-Session Dock Grid: unlimited windows + in-place selection + drag and drop reordering */
+                <div
+                  className={`grid h-full gap-3 overflow-y-auto ${
+                    dockedConvos.length === 2
+                      ? "grid-cols-1 md:grid-cols-2"
+                      : dockedConvos.length === 3
+                        ? "grid-cols-1 md:grid-cols-2 lg:grid-cols-3"
+                        : dockedConvos.length === 4
+                          ? "grid-cols-1 md:grid-cols-2 lg:grid-cols-4"
+                          : dockedConvos.length <= 6
+                            ? "grid-cols-1 md:grid-cols-2 lg:grid-cols-3"
+                            : "grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
+                  }`}
+                >
+                  {dockedConvos.map((convo, index) => {
+                    const isActive = convo.id === active?.id;
+                    const isDragging = draggedIndex === index;
+                    const isDragOver = dragOverIndex === index;
 
-        {/* Controls */}
-        <div className="border-t border-term-border pt-3">
-          <div className="mb-2 flex gap-2 text-xs">
-            {chat.busy ? (
-              <button
-                onClick={chat.stop}
-                className="rounded border border-term-border px-2 py-1 text-term-red
-                           hover:border-term-red"
-              >
-                ■ stop
-              </button>
-            ) : (
-              <button
-                onClick={chat.regenerate}
-                disabled={!canRegenerate}
-                className="rounded border border-term-border px-2 py-1 text-term-dim
-                           hover:border-term-green hover:text-term-green
-                           disabled:opacity-30 disabled:hover:border-term-border
-                           disabled:hover:text-term-dim"
-              >
-                ↻ regenerate
-              </button>
-            )}
+                    return (
+                      <div
+                        key={convo.id}
+                        draggable
+                        onDragStart={(e) => {
+                          setDraggedIndex(index);
+                          e.dataTransfer.effectAllowed = "move";
+                        }}
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = "move";
+                          if (dragOverIndex !== index) setDragOverIndex(index);
+                        }}
+                        onDragLeave={() => {
+                          if (dragOverIndex === index) setDragOverIndex(null);
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          if (draggedIndex !== null && draggedIndex !== index) {
+                            setDockedSessionIds((prev) => {
+                              const next = [...prev];
+                              const [moved] = next.splice(draggedIndex, 1);
+                              next.splice(index, 0, moved);
+                              return next;
+                            });
+                          }
+                          setDraggedIndex(null);
+                          setDragOverIndex(null);
+                        }}
+                        onDragEnd={() => {
+                          setDraggedIndex(null);
+                          setDragOverIndex(null);
+                        }}
+                        onClick={() => chat.select(convo.id)}
+                        className={`flex flex-col h-full rounded-lg overflow-hidden cursor-pointer transition-all duration-200 ${
+                          isDragging ? "opacity-35 scale-[0.98]" : ""
+                        } ${
+                          isDragOver ? "ring-2 ring-term-green ring-offset-2 ring-offset-term-bg" : ""
+                        } ${
+                          isActive
+                            ? "border-2 border-term-green/90 bg-term-bg/60 shadow-[0_0_18px_rgba(57,255,20,0.15)]"
+                            : "border border-term-border bg-term-bg/30 opacity-80 hover:opacity-100 hover:border-term-dim"
+                        }`}
+                      >
+                        {/* Pane Header */}
+                        <div
+                          onDoubleClick={() => setDockedSessionIds([])}
+                          title="Double-click header or press Enter to expand to full window"
+                          className={`flex items-center justify-between px-3 py-1.5 text-xs select-none transition-colors ${
+                            isActive
+                              ? "border-b border-term-border/80 bg-term-panel/80 text-term-fg"
+                              : "border-b border-term-border/60 bg-term-panel/40 text-term-dim"
+                          }`}
+                        >
+                          <div className="flex items-center gap-2 truncate">
+                            <span
+                              className="cursor-grab text-term-dim hover:text-term-fg text-[11px]"
+                              title="Drag to rearrange pane position"
+                            >
+                              ⠿
+                            </span>
+                            {isActive ? (
+                              <span className="text-term-green font-bold text-[11px] shrink-0">● ACTIVE</span>
+                            ) : (
+                              <span className="text-term-dim text-[11px] shrink-0">○ DOCKED</span>
+                            )}
+                            <span className={`truncate ${isActive ? "text-term-fg font-medium" : "text-term-dim"}`}>
+                              {convo.title || "Session"}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className="text-[9px] text-term-dim uppercase truncate max-w-[70px]">
+                              [{convo.model.replace(/\.gguf$/i, "")}]
+                            </span>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                undockSession(convo.id);
+                              }}
+                              className="text-[11px] text-term-dim hover:text-term-red px-1 transition-colors"
+                              title="Undock this pane"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Pane Message Transcript */}
+                        <div
+                          ref={isActive ? scrollRef : undefined}
+                          onScroll={isActive ? onScroll : undefined}
+                          className="flex-1 overflow-y-auto px-2.5 py-3 text-sm leading-relaxed"
+                        >
+                          {convo.messages.length === 0 ? (
+                            <div className="flex h-full flex-col items-center justify-center py-6 text-center">
+                              <p className="text-term-dim text-xs">
+                                {isActive
+                                  ? "Type a prompt below to interact with this session."
+                                  : "Click anywhere on this box to focus."}
+                              </p>
+                            </div>
+                          ) : (
+                            convo.messages.map((m, i) => (
+                              <Message
+                                key={i}
+                                role={m.role}
+                                content={m.content}
+                                tools={m.tools}
+                                stats={m.stats}
+                                onDelete={isActive ? () => chat.deleteMessage(i) : undefined}
+                              />
+                            ))
+                          )}
+                          {isActive && (chat.streaming || chat.liveTools.length > 0) && (
+                            <Message
+                              role="assistant"
+                              content={chat.streaming}
+                              tools={chat.liveTools}
+                              streaming
+                            />
+                          )}
+                          {isActive && chat.error && (
+                            <p className="py-2 text-term-red text-xs">⚠ {chat.error}</p>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                /* Single Active Session Transcript View */
+                <div
+                  ref={scrollRef}
+                  onScroll={onScroll}
+                  className="h-full overflow-y-auto px-1 py-3 text-sm leading-relaxed sm:px-2"
+                >
+                  {!active || active.messages.length === 0 ? (
+                    <div className="flex h-full flex-col items-center justify-center py-8 text-center">
+                      <Logo variant="hero" className="mb-4 max-w-[340px]" />
+                      <div className="max-w-md space-y-2">
+                        <p className="text-xs text-term-dim">
+                          Ready for inference on your compute node.
+                        </p>
+                      </div>
+                    </div>
+                  ) : (
+                    active.messages.map((m, i) => (
+                      <Message
+                        key={i}
+                        role={m.role}
+                        content={m.content}
+                        tools={m.tools}
+                        stats={m.stats}
+                        onDelete={() => chat.deleteMessage(i)}
+                      />
+                    ))
+                  )}
+                  {(chat.streaming || chat.liveTools.length > 0) && (
+                    <Message
+                      role="assistant"
+                      content={chat.streaming}
+                      tools={chat.liveTools}
+                      streaming
+                    />
+                  )}
+                  {chat.error && <p className="py-2 text-term-red text-xs">⚠ {chat.error}</p>}
+                  {catalogError &&
+                    (backendOnline ? (
+                      <p className="py-2 text-term-red text-xs">⚠ {catalogError}</p>
+                    ) : (
+                      <p className="py-2 text-term-dim text-xs">
+                        No backend connected yet. Open ⚙ settings → hit start on compute rig.
+                      </p>
+                    ))}
+                </div>
+              )}
+
+              {!atBottom && (
+                <button
+                  onClick={scrollToBottom}
+                  className="absolute bottom-3 right-3 flex items-center gap-1 rounded border border-term-border
+                             bg-term-panel/90 backdrop-blur px-2.5 py-1 text-xs text-term-dim
+                             hover:border-term-green hover:text-term-green shadow-md transition-colors"
+                >
+                  <span>▾</span>
+                  <span>bottom</span>
+                </button>
+              )}
+            </div>
+
+            {/* Composer & Bottom Sandbox Controls */}
+            <div className="pt-2 pb-2">
+              {modelManager.isSwitching && (
+                <div className="mb-2 flex items-center justify-between rounded border border-term-amber/40 bg-term-amber/10 px-3 py-1.5 text-xs text-term-amber">
+                  <div className="flex items-center gap-2">
+                    <span className="animate-pulse">⚡</span>
+                    <span>{modelManager.loadingMessage || "SWITCHING PAYLOAD…"}</span>
+                  </div>
+                  {modelManager.downloadProgress > 0 && (
+                    <span className="text-[10px]">
+                      {modelManager.downloadProgress}% ({Math.round(modelManager.downloadedMb)}/
+                      {Math.round(modelManager.totalMb)}MB)
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {modelManager.error && (
+                <div className="mb-2 rounded border border-term-red/40 bg-term-red/10 px-3 py-1 text-xs text-term-red">
+                  ⚠ {modelManager.error}
+                </div>
+              )}
+
+              <Composer
+                value={input}
+                onChange={setInput}
+                onSubmit={submit}
+                disabled={chat.busy || modelManager.isSwitching}
+                bottomRight={sandboxPickers}
+              />
+            </div>
           </div>
-          <Composer
-            value={input}
-            onChange={setInput}
-            onSubmit={submit}
-            disabled={chat.busy}
-          />
-        </div>
+        )}
       </div>
+
+      <ModelPickerModal
+        isOpen={showModelModal}
+        onClose={() => setShowModelModal(false)}
+        currentModelId={model}
+        onSelectModel={handleSelectModel}
+        modelManager={modelManager}
+        hfToken={kaggle.hfToken}
+        gpuActive={kaggle.accelerator === "gpu"}
+      />
+
+      <ShortcutsModal
+        isOpen={showShortcutsModal}
+        onClose={() => setShowShortcutsModal(false)}
+      />
     </main>
   );
 }

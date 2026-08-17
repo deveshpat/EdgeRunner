@@ -12,6 +12,16 @@ from app.harnesses.llamacpp import LlamaCppHarness
 
 _REGISTRY: dict[str, Harness] = {}
 
+chat_harness = LlamaCppHarness()
+agent_harness = AgentHarness()
+echo_harness = EchoHarness()
+
+# Register built-in harnesses
+_REGISTRY["chat"] = chat_harness
+_REGISTRY["llamacpp"] = chat_harness
+_REGISTRY["agent"] = agent_harness
+_REGISTRY["echo"] = echo_harness
+
 
 def register(harness: Harness) -> None:
     _REGISTRY[harness.id] = harness
@@ -22,13 +32,8 @@ def get(harness_id: str) -> Harness | None:
 
 
 def all_harnesses() -> list[Harness]:
-    return list(_REGISTRY.values())
+    """Return the 2 visible public harnesses: Chat and Agent."""
+    return [chat_harness, agent_harness]
 
-
-# Register built-in harnesses. Echo stays first so it is the default in the
-# picker and local dev works with no llama-server running.
-register(EchoHarness())
-register(LlamaCppHarness())
-register(AgentHarness())
 
 __all__ = ["Harness", "StreamEvent", "register", "get", "all_harnesses"]

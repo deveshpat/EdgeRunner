@@ -39,12 +39,15 @@ export interface UseKaggle {
   accelerator: string;
   setAccelerator: (a: string) => void;
   launchModel: string;
-  setLaunchModel: (id: string) => void;
+  launchModelRepo?: string;
+  launchModelFile?: string;
+  setLaunchModel: (id: string, repo?: string, file?: string) => void;
   hfToken: string;
   saveCreds: (username: string, key: string, hfToken: string) => Promise<boolean>;
   forget: () => Promise<void>;
   start: () => Promise<void>;
   stop: () => Promise<void>;
+  attachUrl: (url: string) => Promise<boolean>;
 }
 
 // Die 90s after the last heartbeat (or if no client ever connects), so an
@@ -77,6 +80,8 @@ export function useKaggle(): UseKaggle {
   const [error, setError] = useState<string | null>(null);
   const [accelerator, setAcceleratorState] = useState("cpu");
   const [launchModel, setLaunchModelState] = useState(DEFAULT_MODEL_ID);
+  const [launchModelRepo, setLaunchModelRepo] = useState<string | undefined>();
+  const [launchModelFile, setLaunchModelFile] = useState<string | undefined>();
   const [hfToken, setHfToken] = useState("");
 
   const authRef = useRef<KaggleAuth | null>(null);
@@ -96,10 +101,14 @@ export function useKaggle(): UseKaggle {
     }
   }, []);
 
-  const setLaunchModel = useCallback((id: string) => {
+  const setLaunchModel = useCallback((id: string, repo?: string, file?: string) => {
     setLaunchModelState(id);
+    setLaunchModelRepo(repo);
+    setLaunchModelFile(file);
     try {
       localStorage.setItem("edgerunner.launchModel", id);
+      if (repo) localStorage.setItem("edgerunner.launchModelRepo", repo);
+      if (file) localStorage.setItem("edgerunner.launchModelFile", file);
     } catch {
       /* ignore */
     }
@@ -110,6 +119,10 @@ export function useKaggle(): UseKaggle {
     try {
       const m = localStorage.getItem("edgerunner.launchModel");
       if (m) setLaunchModelState(m);
+      const r = localStorage.getItem("edgerunner.launchModelRepo");
+      if (r) setLaunchModelRepo(r);
+      const f = localStorage.getItem("edgerunner.launchModelFile");
+      if (f) setLaunchModelFile(f);
       const saved = localStorage.getItem("edgerunner.accelerator");
       if (saved) setAcceleratorState(saved);
     } catch {
@@ -141,31 +154,107 @@ export function useKaggle(): UseKaggle {
     [stopHeartbeat],
   );
 
+function rendezvousTopic(username: string): string {
+  return "edgerunner_" + username.toLowerCase().replace(/[^a-z0-9_-]/g, "");
+}
+
+async function fetchRendezvousLogs(topic: string, signal?: AbortSignal): Promise<string> {
+  try {
+    const res = await fetch(`https://ntfy.sh/${topic}/json?poll=1&since=10m`, { signal });
+    if (!res.ok) return "";
+    const text = await res.text();
+    const messages: string[] = [];
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const ev = JSON.parse(line);
+        if (ev.message) messages.push(ev.message);
+      } catch {
+        /* ignore */
+      }
+    }
+    return messages.join("\n");
+  } catch {
+    return "";
+  }
+}
+
   // Scrape logs/status until the tunnel URL appears (shared by start + attach).
   const provision = useCallback(
     async (auth: KaggleAuth, signal: AbortSignal) => {
       setState("provisioning");
-      const deadline = Date.now() + 900_000;
+      const startTime = Date.now();
+      const deadline = startTime + 900_000;
+      const topic = rendezvousTopic(auth.username);
+      let consecutiveComplete = 0;
+      let consecutiveError = 0;
+      let hasBeenActive = false;
+
       while (Date.now() < deadline && !signal.aborted) {
-        const status = await kernelStatus(auth, signal).catch(() => "");
-        const log = await kernelLogs(auth, { signal, maxMs: 10_000 }).catch(() => "");
-        if (log) setLogs(log.slice(-8000));
-        const url = extractTunnelUrl(log);
+        const [status, rzLog, log] = await Promise.all([
+          kernelStatus(auth, signal).catch(() => ""),
+          fetchRendezvousLogs(topic, signal),
+          kernelLogs(auth, { signal, maxMs: 8000 }).catch(() => ""),
+        ]);
+
+        const combined = [log, rzLog].filter(Boolean).join("\n");
+        if (combined) setLogs(combined.slice(-8000));
+
+        const url = extractTunnelUrl(rzLog) || extractTunnelUrl(log);
         if (url && (await probeBackend(url))) {
           goOnline(url);
           return;
         }
-        if (status.includes("ERROR") || status.includes("CANCEL")) {
-          setState("failed");
-          setError(`Kaggle kernel ${status || "failed"}`);
-          return;
+
+        if (isActive(status)) {
+          hasBeenActive = true;
+          consecutiveComplete = 0;
+          consecutiveError = 0;
         }
-        if (status.includes("COMPLETE") && !url) {
-          setState("failed");
-          setError("Kernel finished without publishing a URL (see logs).");
-          return;
+
+        // Kaggle may report stale status (COMPLETE / ERROR) from a previous run
+        // for the first 30-45s while the new kernel is queued and initialized.
+        // Avoid premature failure declarations during this startup grace period.
+        const elapsed = Date.now() - startTime;
+        const inStartupGrace = elapsed < 45_000 && !hasBeenActive;
+
+        if (!inStartupGrace) {
+          if (status.includes("ERROR") || status.includes("CANCEL")) {
+            consecutiveError += 1;
+            if (consecutiveError >= 2 || hasBeenActive) {
+              setState("failed");
+              setError(`Kaggle kernel ${status || "failed"}`);
+              return;
+            }
+          } else {
+            consecutiveError = 0;
+          }
+
+          if (status.includes("COMPLETE") && !url) {
+            consecutiveComplete += 1;
+            if (consecutiveComplete >= 3 || (hasBeenActive && consecutiveComplete >= 2)) {
+              // Final check: fetch logs once more to be sure no URL was missed
+              const [finalRz, finalLog] = await Promise.all([
+                fetchRendezvousLogs(topic, signal),
+                kernelLogs(auth, { signal, maxMs: 10_000 }).catch(() => ""),
+              ]);
+              const finalCombined = [finalLog, finalRz].filter(Boolean).join("\n");
+              if (finalCombined) setLogs(finalCombined.slice(-8000));
+              const finalUrl = extractTunnelUrl(finalRz) || extractTunnelUrl(finalLog);
+              if (finalUrl && (await probeBackend(finalUrl))) {
+                goOnline(finalUrl);
+                return;
+              }
+              setState("failed");
+              setError("Kernel finished without publishing a URL (see logs).");
+              return;
+            }
+          } else {
+            consecutiveComplete = 0;
+          }
         }
-        await sleep(6000, signal);
+
+        await sleep(4000, signal);
       }
       if (!signal.aborted) {
         setState("failed");
@@ -179,12 +268,17 @@ export function useKaggle(): UseKaggle {
   const discoverUrl = useCallback(
     async (auth: KaggleAuth, signal: AbortSignal, budgetMs: number) => {
       const deadline = Date.now() + budgetMs;
+      const topic = rendezvousTopic(auth.username);
       while (Date.now() < deadline && !signal.aborted) {
-        const log = await kernelLogs(auth, { signal, maxMs: 10_000 }).catch(() => "");
-        if (log) setLogs(log.slice(-8000));
-        const url = extractTunnelUrl(log);
+        const [rzLog, log] = await Promise.all([
+          fetchRendezvousLogs(topic, signal),
+          kernelLogs(auth, { signal, maxMs: 8000 }).catch(() => ""),
+        ]);
+        const combined = [log, rzLog].filter(Boolean).join("\n");
+        if (combined) setLogs(combined.slice(-8000));
+        const url = extractTunnelUrl(rzLog) || extractTunnelUrl(log);
         if (url) return url;
-        await sleep(4000, signal);
+        await sleep(3000, signal);
       }
       return null;
     },
@@ -292,15 +386,18 @@ export function useKaggle(): UseKaggle {
         setState("packing");
         const template = await loadWorkerTemplate();
         const model = modelById(launchModel);
+        const repo = launchModelRepo || model.repo;
+        const file = launchModelFile || model.file;
         const config: WorkerConfig = {
           gpu: accelerator === "gpu",
           cuda: "cu124",
-          model_repo: model.repo,
-          model_file: model.file,
+          model_repo: repo,
+          model_file: file,
           idle_timeout: IDLE_TIMEOUT,
           max_lifetime: MAX_LIFETIME,
           startup_grace: STARTUP_GRACE,
           hf_token: hfTokenRef.current.trim(),
+          rendezvous_topic: rendezvousTopic(auth.username),
         };
         const source = renderWorker(template, config);
 
@@ -346,6 +443,20 @@ export function useKaggle(): UseKaggle {
     setBusy(false);
   }, [publicUrl, stopHeartbeat]);
 
+  const attachUrl = useCallback(
+    async (rawUrl: string): Promise<boolean> => {
+      const trimmed = rawUrl.trim().replace(/\/+$/, "");
+      if (!trimmed) return false;
+      const normalized = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+      if (await probeBackend(normalized)) {
+        goOnline(normalized);
+        return true;
+      }
+      return false;
+    },
+    [goOnline],
+  );
+
   return {
     hydrated,
     configured: username !== null,
@@ -364,5 +475,6 @@ export function useKaggle(): UseKaggle {
     forget,
     start,
     stop,
+    attachUrl,
   };
 }

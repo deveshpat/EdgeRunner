@@ -4,6 +4,17 @@
 
 :root {
   color-scheme: dark;
+  /* ========================================================================= */
+  /*  MAIN THEME & TEXT COLOR CONFIGURATION (Edit hex values here to test)      */
+  /* ========================================================================= */
+  --term-bg: #0a0e0a;         /* Main app canvas background */
+  --term-panel: #0f140f;      /* Cards and secondary panels background */
+  --term-border: #1e2a1e;     /* Outlines and panel dividers */
+  --term-dim: #4a5a4a;        /* Muted descriptions, secondary labels, icons */
+  --term-fg: #f4d5fd;         /* MAIN TEXT COLOR (Chat messages, titles, body) */
+  --term-green: #d2f8d2;      /* NEON ACCENT (Logo, active states, halos, '$') */
+  --term-amber: #e6b23e;      /* Warning / Connecting status */
+  --term-red: #e6483e;        /* Error / Offline / Abort buttons */
 }
 
 html,

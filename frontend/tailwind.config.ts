@@ -9,20 +9,21 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // terminal palette
+        // terminal palette (reads directly from CSS variables in globals.css)
         term: {
-          bg: "#0a0e0a",
-          panel: "#0f140f",
-          border: "#1e2a1e",
-          dim: "#4a5a4a",
-          fg: "#c8e6c8",
-          green: "#3ecf5c",
-          amber: "#e6b23e",
-          red: "#e6483e",
+          bg: "var(--term-bg, #0a0e0a)",
+          panel: "var(--term-panel, #0f140f)",
+          border: "var(--term-border, #1e2a1e)",
+          dim: "var(--term-dim, #4a5a4a)",
+          fg: "var(--term-fg, #c8e6c8)",
+          green: "var(--term-green, #39FF14)",
+          amber: "var(--term-amber, #e6b23e)",
+          red: "var(--term-red, #e6483e)",
         },
       },
       fontFamily: {
         mono: [
+          "var(--font-mono)",
           "JetBrains Mono",
           "Fira Code",
           "SFMono-Regular",

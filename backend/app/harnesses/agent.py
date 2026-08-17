@@ -40,9 +40,9 @@ SYSTEM_PROMPT = (
 
 class AgentHarness(Harness):
     id = "agent"
-    name = "Agent (tools)"
+    name = "Agent"
     description = (
-        "Streaming coding agent: runs Python & shell (any language), plus "
+        "Autonomous coding agent: runs Python & shell (any language), plus "
         "calculator, clock, random, text stats, and hashing."
     )
 
@@ -120,13 +120,21 @@ class AgentHarness(Harness):
                 data=f"Agent stopped after {MAX_ITERATIONS} tool iterations.",
             )
         except httpx.ConnectError:
-            yield StreamEvent(
-                type="error",
-                data=(
-                    f"Could not connect to llama-server at "
-                    f"{settings.llamacpp_base_url}. Is it running?"
-                ),
+            last_user = next(
+                (m.content for m in reversed(request.messages) if m.role == "user"),
+                "",
             )
+            msg = (
+                f"[Offline Mock via {request.model}] Backend model server is currently offline. "
+                f"You said: {last_user!r}. "
+                "Start a local llama-server or connect your Kaggle GPU rig to run live agent loops."
+            )
+            import asyncio
+            for word in msg.split(" "):
+                await asyncio.sleep(0.02)
+                yield StreamEvent(type="token", data=word + " ")
+            yield StreamEvent(type="done")
+            return
         except httpx.TimeoutException:
             yield StreamEvent(type="error", data="llama-server timed out.")
 

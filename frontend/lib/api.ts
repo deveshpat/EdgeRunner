@@ -134,3 +134,154 @@ export async function* streamChat(
     }
   }
 }
+
+export interface HardwareInfo {
+  gpu: boolean;
+  gpu_name: string | null;
+  vram_gb: number | null;
+  ram_gb: number | null;
+}
+
+export interface BackendModelStatus {
+  status: "idle" | "downloading" | "loading" | "ready" | "error";
+  model_id: string | null;
+  repo: string | null;
+  file: string | null;
+  progress: number;
+  downloaded_mb: number;
+  total_mb: number;
+  error: string | null;
+  hardware: HardwareInfo;
+}
+
+export interface HFModel {
+  id: string;
+  name: string;
+  repo: string;
+  downloads: number;
+  likes: number;
+  param_size: string;
+  categories: string[];
+  recommended_file: string;
+  fits_hardware: boolean;
+  tier_label?: string;
+}
+
+export interface HFTreeFile {
+  path: string;
+  size_bytes: number;
+  size_mb: number;
+  size_gb: number;
+  recommended: boolean;
+}
+
+export async function fetchModelStatus(): Promise<BackendModelStatus> {
+  if (!hasBackend()) throw new Error(NO_BACKEND);
+  const resp = await fetch(`${getApiBase()}/api/models/status`);
+  if (!resp.ok) throw new Error(`models/status: ${resp.status}`);
+  return resp.json();
+}
+
+export async function loadModelOnBackend(params: {
+  repo: string;
+  file: string;
+  model_id?: string;
+  gpu?: boolean;
+  n_ctx?: number;
+  hf_token?: string;
+}): Promise<BackendModelStatus & { message?: string }> {
+  if (!hasBackend()) throw new Error(NO_BACKEND);
+  const resp = await fetch(`${getApiBase()}/api/models/load`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!resp.ok) throw new Error(`models/load: ${resp.status}`);
+  return resp.json();
+}
+
+export async function fetchHuggingFaceModels(
+  sort: "trending" | "downloads" | "likes" = "trending",
+  search?: string,
+  limit: number = 25,
+): Promise<{ models: HFModel[]; cached: boolean }> {
+  const base = hasBackend() ? getApiBase() : "";
+  const query = new URLSearchParams({ sort, limit: String(limit) });
+  if (search) query.set("search", search);
+
+  // If backend is active, use backend proxy to avoid CORS/rate-limiting
+  if (base) {
+    const resp = await fetch(`${base}/api/models/explore?${query.toString()}`);
+    if (resp.ok) return resp.json();
+  }
+
+  // Fallback: direct fetch from HuggingFace Hub API
+  const hfSort = sort === "trending" ? "trendingScore" : sort;
+  const hfParams = new URLSearchParams({
+    filter: "gguf",
+    sort: hfSort,
+    direction: "-1",
+    limit: String(limit),
+    full: "false",
+  });
+  if (search) hfParams.set("search", search);
+
+  const res = await fetch(`https://huggingface.co/api/models?${hfParams.toString()}`);
+  if (!res.ok) throw new Error(`HF API: ${res.status}`);
+  const raw = (await res.json()) as Array<{
+    id?: string;
+    modelId?: string;
+    downloads?: number;
+    likes?: number;
+    tags?: string[];
+  }>;
+
+  const models: HFModel[] = raw.map((item) => {
+    const repoId = item.id || item.modelId || "";
+    const clean = repoId.split("/").pop() || repoId;
+    return {
+      id: repoId,
+      name: clean,
+      repo: repoId,
+      downloads: item.downloads || 0,
+      likes: item.likes || 0,
+      param_size: "GGUF",
+      categories: ["General"],
+      recommended_file: `${clean.toLowerCase()}-q4_k_m.gguf`,
+      fits_hardware: true,
+    };
+  });
+  return { models, cached: false };
+}
+
+export async function fetchModelFiles(repo: string): Promise<HFTreeFile[]> {
+  const base = hasBackend() ? getApiBase() : "";
+  if (base) {
+    const resp = await fetch(`${base}/api/models/tree?repo=${encodeURIComponent(repo)}`);
+    if (resp.ok) {
+      const data = await resp.json();
+      return data.files || [];
+    }
+  }
+
+  // Direct HF fallback
+  const res = await fetch(`https://huggingface.co/api/models/${repo}/tree/main`);
+  if (!res.ok) throw new Error(`HF tree: ${res.status}`);
+  const files = (await res.json()) as Array<{ path?: string; size?: number }>;
+  return files
+    .filter((f) => f.path?.endsWith(".gguf"))
+    .map((f) => {
+      const bytes = f.size || 0;
+      return {
+        path: f.path || "",
+        size_bytes: bytes,
+        size_mb: Math.round(bytes / (1024 * 1024)),
+        size_gb: Math.round((bytes / 1024 ** 3) * 100) / 100,
+        recommended:
+          f.path?.toLowerCase().includes("q4_k_m") ||
+          f.path?.toLowerCase().includes("q4_0") ||
+          false,
+      };
+    });
+}
+

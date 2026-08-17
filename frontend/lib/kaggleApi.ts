@@ -136,35 +136,120 @@ export function isActive(status: string): boolean {
   );
 }
 
-// The EDGERUNNER_URL= branch REQUIRES a trailing delimiter (lookahead) so we
-// never accept a URL that a mid-stream chunk boundary cut in half — otherwise
-// kernelLogs' onprogress would finish early on a truncated host and probe a
-// dead URL forever (Kaggle replays the whole log identically each poll, so it
-// truncates at the same byte every time and the UI hangs on "starting"). The
-// trycloudflare branch is inherently safe: it must end in the literal domain.
 const URL_RE =
-  /(?:EDGERUNNER_URL=)(https?:\/\/[^\s"'\\]+?)(?=[\s"'\\])|(https:\/\/[a-z0-9-]+\.trycloudflare\.com)\b/;
+  /(?:EDGERUNNER_URL=\s*)(https?:\/\/[^\s"'\\]+)|(https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com)\b/i;
 
 export function extractTunnelUrl(logs: string): string | null {
+  if (!logs) return null;
+  const lines = logs.split("\n").reverse();
+  for (const line of lines) {
+    const m = URL_RE.exec(line);
+    if (m) {
+      const candidate = (m[1] || m[2]).trim().replace(/[)'".,;]+$/, "");
+      if (candidate.startsWith("http://") || candidate.startsWith("https://")) {
+        return candidate;
+      }
+    }
+  }
   const m = URL_RE.exec(logs);
   if (!m) return null;
-  const url = m[1] || m[2];
-  return url ? url.replace(/[)'".,;]+$/, "") : null;
+  const url = (m[1] || m[2]).trim().replace(/[)'".,;]+$/, "");
+  return url.startsWith("http://") || url.startsWith("https://") ? url : null;
 }
 
-/** Fetch worker logs. Returns accumulated log text (or "" on failure).
- *
- * Kaggle's endpoint is always an SSE stream (text/event-stream, keep-alive).
- * We read it with XMLHttpRequest + onprogress instead of fetch().body.getReader()
- * because iOS Safari / some mobile browsers don't reliably expose a readable
- * stream on fetch responses — which left the mobile UI stuck on "starting"
- * while desktop worked. XHR's incremental responseText is reliable everywhere.
- */
-export function kernelLogs(
+/** Fetch worker logs from Kaggle API using all available endpoints (RPC, REST, and stream). */
+export async function kernelLogs(
   auth: KaggleAuth,
   opts?: { maxMs?: number; signal?: AbortSignal },
 ): Promise<string> {
-  const maxMs = opts?.maxMs ?? 12_000;
+  // 1. Try GetKernelSessionOutput RPC
+  try {
+    const d = await kagglePost<{
+      log?: string;
+      output?: string;
+      sessionOutput?: string;
+      consoleOutput?: string;
+      data?: string;
+      stream?: string;
+      text?: string;
+      lines?: string[];
+      files?: { data?: string; text?: string; content?: string }[];
+    }>(
+      "/kernels.KernelsApiService/GetKernelSessionOutput",
+      auth,
+      { userName: auth.username, kernelSlug: STABLE_SLUG },
+      opts?.signal,
+    );
+    if (d) {
+      if (d.log) return parseSse(d.log);
+      if (d.output) return parseSse(d.output);
+      if (d.sessionOutput) return parseSse(d.sessionOutput);
+      if (d.consoleOutput) return parseSse(d.consoleOutput);
+      if (d.text) return parseSse(d.text);
+      if (d.data) return parseSse(d.data);
+      if (d.stream) return parseSse(d.stream);
+      if (Array.isArray(d.lines)) return d.lines.join("\n");
+      if (Array.isArray(d.files)) {
+        const fileContent = d.files.map((f) => f.content || f.text || f.data || "").join("\n");
+        if (fileContent) return fileContent;
+      }
+    }
+  } catch {
+    /* fallback */
+  }
+
+  // 2. Try GetKernelOutput RPC
+  try {
+    const d = await kagglePost<{ log?: string; output?: string; text?: string }>(
+      "/kernels.KernelsApiService/GetKernelOutput",
+      auth,
+      { userName: auth.username, kernelSlug: STABLE_SLUG },
+      opts?.signal,
+    );
+    if (d?.log) return parseSse(d.log);
+    if (d?.output) return parseSse(d.output);
+    if (d?.text) return parseSse(d.text);
+  } catch {
+    /* fallback */
+  }
+
+  // 3. Try REST GET /kernels/output
+  try {
+    const res = await fetch(
+      `${API}/kernels/output?userName=${encodeURIComponent(auth.username)}&kernelSlug=${STABLE_SLUG}`,
+      {
+        headers: {
+          Accept: "application/json, text/plain, */*",
+          ...authHeaders(auth),
+        },
+        signal: opts?.signal,
+      },
+    );
+    if (res.ok) {
+      const text = await res.text();
+      try {
+        const json = JSON.parse(text);
+        if (json.log) return parseSse(json.log);
+        if (json.output) return parseSse(json.output);
+        if (json.text) return parseSse(json.text);
+      } catch {
+        if (text) return parseSse(text);
+      }
+    }
+  } catch {
+    /* fallback */
+  }
+
+  // 4. Try streaming XHR endpoint
+  return kernelLogsStream(auth, opts);
+}
+
+/** Fallback XHR SSE stream reader */
+export function kernelLogsStream(
+  auth: KaggleAuth,
+  opts?: { maxMs?: number; signal?: AbortSignal },
+): Promise<string> {
+  const maxMs = opts?.maxMs ?? 8000;
   const url = `${API}/kernels/logs/stream/${encodeURIComponent(auth.username)}/${STABLE_SLUG}`;
   return new Promise((resolve) => {
     if (typeof XMLHttpRequest === "undefined") return resolve("");
@@ -195,7 +280,7 @@ export function kernelLogs(
       xhr.onload = finish;
       xhr.onerror = finish;
       xhr.ontimeout = finish;
-      xhr.timeout = maxMs + 3000;
+      xhr.timeout = maxMs + 2000;
       xhr.send();
     } catch {
       finish();
@@ -203,20 +288,44 @@ export function kernelLogs(
   });
 }
 
-/** Turn a raw SSE body ("data: {json}\n\n"…) into readable log text. */
-function parseSse(raw: string): string {
+/** Turn a raw SSE body ("data: {json}\n\n"…) or raw log into readable log text. */
+export function parseSse(raw: string): string {
   if (!raw) return "";
   const out: string[] = [];
+  let foundSse = false;
   for (const line of raw.split("\n")) {
     const s = line.trim();
     if (!s.startsWith("data:")) continue;
+    foundSse = true;
     const p = s.slice(5).trim();
     if (p === "END_OF_LOG") break;
     try {
-      const ev = JSON.parse(p) as { data?: string; stream_name?: string };
-      out.push((ev.stream_name === "stderr" ? "ERR " : "") + String(ev.data ?? "").replace(/\n$/, ""));
+      const ev = JSON.parse(p) as {
+        data?: string;
+        stream_name?: string;
+        message?: string;
+        text?: string;
+      };
+      const content = ev.data ?? ev.message ?? ev.text ?? "";
+      out.push((ev.stream_name === "stderr" ? "ERR " : "") + String(content).replace(/\n$/, ""));
     } catch {
       out.push(p);
+    }
+  }
+  if (!foundSse) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map((item) => (typeof item === "string" ? item : JSON.stringify(item)))
+          .join("\n");
+      }
+      if (parsed && typeof parsed === "object") {
+        if ("text" in parsed) return String(parsed.text);
+        if ("data" in parsed) return String(parsed.data);
+      }
+    } catch {
+      return raw;
     }
   }
   return out.join("\n");
