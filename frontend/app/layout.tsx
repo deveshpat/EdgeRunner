@@ -20,6 +20,21 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className={jetbrainsMono.variable}>
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              window.addEventListener('unhandledrejection', function(event) {
+                var r = event.reason;
+                if (r === 'Canceled' || (r && (r.message === 'Canceled' || r.name === 'Canceled' || r.type === 'cancel' || String(r).indexOf('Canceled') !== -1))) {
+                  event.preventDefault();
+                  event.stopImmediatePropagation();
+                }
+              });
+            `,
+          }}
+        />
+      </head>
       <body className="font-mono bg-term-bg text-term-fg antialiased selection:bg-term-green/20 selection:text-term-green">
         {children}
       </body>

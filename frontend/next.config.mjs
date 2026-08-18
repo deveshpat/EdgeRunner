@@ -7,12 +7,25 @@ const basePath = isPages ? "/EdgeRunner" : "";
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  ...(isPages ? { output: "export" } : {}),
+  ...(isPages ? { output: "export", trailingSlash: true } : {}),
   basePath,
   images: { unoptimized: true },
-  trailingSlash: true,
   // Expose the base path to client code (e.g. for building asset URLs).
   env: { NEXT_PUBLIC_BASE_PATH: basePath },
+  ...(!isPages
+    ? {
+        async rewrites() {
+          const backendUrl =
+            process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+          return [
+            {
+              source: "/api/:path*",
+              destination: `${backendUrl.replace(/\/$/, "")}/api/:path*`,
+            },
+          ];
+        },
+      }
+    : {}),
 };
 
 export default nextConfig;

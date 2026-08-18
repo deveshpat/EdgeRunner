@@ -1,4 +1,4 @@
-"""Tests for the built-in tools and the streaming agentic harness loop."""
+"""Tests for the unified terminal omnitool, alias resolver, and dual-mode streaming agent harness."""
 
 from __future__ import annotations
 
@@ -13,86 +13,45 @@ from app.harnesses.agent import AgentHarness
 from app.schemas import ChatRequest
 
 
-# --- tools -----------------------------------------------------------------
+# --- tools & aliases --------------------------------------------------------
 
 
-def test_calculator_basic():
-    assert tools.execute("calculator", json.dumps({"expression": "3 * (4 + 5)"})) == "27"
+def test_terminal_basic():
+    out = tools.execute("terminal", json.dumps({"command": "echo 'hello terminal'"}))
+    assert "hello terminal" in out
 
 
-def test_calculator_functions_and_constants():
-    assert tools.execute("calculator", json.dumps({"expression": "sqrt(16)"})) == "4"
-    assert tools.execute("calculator", json.dumps({"expression": "max(2, 9, 5)"})) == "9"
-    assert tools.execute("calculator", json.dumps({"expression": "factorial(5)"})) == "120"
+def test_terminal_alias_bash_and_sh():
+    out = tools.execute("bash", json.dumps({"command": "echo 'from bash'"}))
+    assert "from bash" in out
+    out2 = tools.execute("sh", json.dumps({"cmd": "echo 'from sh'"}))
+    assert "from sh" in out2
 
 
-def test_calculator_rejects_code():
-    out = tools.execute("calculator", json.dumps({"expression": "__import__('os')"}))
-    assert out.startswith("error")
-    # A non-whitelisted function must be rejected too.
-    assert tools.execute("calculator", json.dumps({"expression": "eval('1')"})).startswith(
-        "error"
-    )
+def test_terminal_alias_python():
+    out = tools.execute("python", json.dumps({"code": "print(21 * 2)"}))
+    assert "42" in out.strip()
 
 
-def test_calculator_bad_arguments():
-    assert tools.execute("calculator", "not json").startswith("error")
+def test_terminal_alias_calculator():
+    out = tools.execute("calculator", json.dumps({"expression": "print(10 + 5)"}))
+    assert "15" in out.strip()
 
 
-def test_random_number_in_range():
-    for _ in range(20):
-        out = int(tools.execute("random_number", json.dumps({"min": 1, "max": 6})))
-        assert 1 <= out <= 6
+def test_terminal_fuzzy_args():
+    # Model sends 'cmd' instead of 'command'
+    out = tools.execute("terminal", json.dumps({"cmd": "echo 'fuzzy cmd'"}))
+    assert "fuzzy cmd" in out
+    # Model sends raw text instead of JSON
+    out_raw = tools.execute("terminal", "echo 'raw text'")
+    assert "raw text" in out_raw
 
 
-def test_text_stats():
-    out = json.loads(
-        tools.execute("text_stats", json.dumps({"text": "hello world\nbye"}))
-    )
-    assert out == {"characters": 15, "words": 3, "lines": 2}
-
-
-def test_hash_text_sha256():
-    out = tools.execute("hash_text", json.dumps({"text": "abc", "algorithm": "sha256"}))
-    assert out == (
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-    )
-
-
-def test_hash_text_bad_algo():
-    assert tools.execute("hash_text", json.dumps({"text": "x", "algorithm": "nope"})).startswith(
-        "error"
-    )
-
-
-def test_run_python():
-    out = tools.execute("run_python", json.dumps({"code": "print(6 * 7)"}))
-    assert out.strip() == "42"
-
-
-def test_run_python_captures_error():
-    out = tools.execute("run_python", json.dumps({"code": "raise ValueError('boom')"}))
-    assert "boom" in out
-
-
-def test_run_shell():
-    out = tools.execute("run_shell", json.dumps({"command": "echo hello-shell"}))
-    assert "hello-shell" in out
-
-
-def test_run_python_empty():
-    assert tools.execute("run_python", json.dumps({"code": ""})).startswith("error")
-
-
-def test_unknown_tool():
-    assert tools.execute("nope", "{}").startswith("error: unknown tool")
-
-
-def test_specs_shape():
+def test_terminal_specs():
     specs = tools.specs()
-    names = {s["function"]["name"] for s in specs}
-    assert {"calculator", "current_time", "random_number", "text_stats", "hash_text"} <= names
-    assert all(s["type"] == "function" for s in specs)
+    assert len(specs) == 1
+    assert specs[0]["function"]["name"] == "terminal"
+    assert "command" in specs[0]["function"]["parameters"]["properties"]
 
 
 # --- streaming agent loop --------------------------------------------------
@@ -124,7 +83,7 @@ class _MockTransport(httpx.AsyncBaseTransport):
                                         "index": 0,
                                         "id": "call_1",
                                         "type": "function",
-                                        "function": {"name": "calculator", "arguments": ""},
+                                        "function": {"name": "terminal", "arguments": ""},
                                     }
                                 ],
                             },
@@ -139,7 +98,7 @@ class _MockTransport(httpx.AsyncBaseTransport):
                             "index": 0,
                             "delta": {
                                 "tool_calls": [
-                                    {"index": 0, "function": {"arguments": '{"expr'}}
+                                    {"index": 0, "function": {"arguments": '{"command": "python3 -c \\"print(21'}}
                                 ]
                             },
                             "finish_reason": None,
@@ -154,7 +113,7 @@ class _MockTransport(httpx.AsyncBaseTransport):
                                 "tool_calls": [
                                     {
                                         "index": 0,
-                                        "function": {"arguments": 'ession": "21 * 2"}'},
+                                        "function": {"arguments": ' * 2)\\""}'},
                                     }
                                 ]
                             },
@@ -203,12 +162,62 @@ async def test_agent_streams_tool_then_answer(monkeypatch):
     assert types[-1] == "done"
     assert transport.calls == 2
 
-    # Fragmented arguments were reassembled and the calculator produced 42.
+    # Fragmented arguments were reassembled and execution produced 42.
     call_ev = next(e for e in events if e.type == "tool_call")
-    assert json.loads(call_ev.data)["arguments"] == '{"expression": "21 * 2"}'
+    assert "21 * 2" in json.loads(call_ev.data)["arguments"]
     result_ev = next(e for e in events if e.type == "tool_result")
-    assert json.loads(result_ev.data)["result"] == "42"
+    assert "42" in json.loads(result_ev.data)["result"]
 
     # The final answer was streamed as tokens.
     answer = "".join(e.data for e in events if e.type == "token")
     assert "42" in answer
+
+
+class _MockMarkdownFallbackTransport(httpx.AsyncBaseTransport):
+    """Simulates a small model writing a python markdown block instead of a tool call."""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.calls += 1
+        if self.calls == 1:
+            body = _sse(
+                {"choices": [{"index": 0, "delta": {"content": "Let me compute:\n```python\nprint(100 + 44)\n```"}}]}
+            )
+        else:
+            body = _sse(
+                {"choices": [{"index": 0, "delta": {"content": "The result is 144."}, "finish_reason": "stop"}]}
+            )
+        return httpx.Response(
+            200, content=body.encode(), headers={"content-type": "text/event-stream"}
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_markdown_fallback(monkeypatch):
+    transport = _MockMarkdownFallbackTransport()
+    real_client = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        kwargs.pop("timeout", None)
+        return real_client(transport=transport)
+
+    monkeypatch.setattr(agent_mod.httpx, "AsyncClient", fake_client)
+
+    harness = AgentHarness()
+    req = ChatRequest(
+        model="m",
+        harness="agent",
+        messages=[{"role": "user", "content": "compute 100+44"}],
+    )
+    events = [ev async for ev in harness.run(req)]
+    types = [e.type for e in events]
+
+    assert "tool_call" in types
+    assert "tool_result" in types
+    assert types[-1] == "done"
+    assert transport.calls == 2
+
+    result_ev = next(e for e in events if e.type == "tool_result")
+    assert "144" in json.loads(result_ev.data)["result"]

@@ -2,18 +2,23 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { streamChat, type SamplingParams, type ToolEvent } from "./api";
+import { getBackendBase, streamChat, type SamplingParams, type ToolEvent } from "./api";
 import { BROWSER_AGENT_ID, runBrowserAgent } from "./browserAgent";
 import type { BrowserToolContext } from "./browserTools";
+import { wasmShell } from "./wasmShell";
 import {
   Conversation,
   DisplayMessage,
   Settings,
   loadActiveId,
   loadConversations,
+  loadSelectedHarness,
+  loadSelectedModel,
   newConversation,
   saveActiveId,
   saveConversations,
+  saveSelectedHarness,
+  saveSelectedModel,
   titleFrom,
 } from "./storage";
 
@@ -23,11 +28,13 @@ export interface UseConversations {
   hydrated: boolean;
   conversations: Conversation[];
   active: Conversation | null;
+  harness: string;
+  model: string;
   streaming: string;
   liveTools: ToolEvent[];
   busy: boolean;
   error: string | null;
-  create: () => string;
+  create: (harnessOverride?: string, modelOverride?: string) => string;
   seedIfEmpty: () => void;
   select: (id: string) => void;
   remove: (id: string) => void;
@@ -37,6 +44,7 @@ export interface UseConversations {
   stop: () => void;
   regenerate: () => void;
   deleteMessage: (index: number) => void;
+  editMessage: (index: number, newContent: string) => Promise<void>;
 }
 
 export function useConversations(
@@ -47,6 +55,9 @@ export function useConversations(
   const [activeId, setActiveId] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
 
+  const [selectedHarness, setSelectedHarness] = useState<string>(defaults.harness || "chat");
+  const [selectedModel, setSelectedModel] = useState<string>(defaults.model);
+
   const [streaming, setStreaming] = useState("");
   const [liveTools, setLiveTools] = useState<ToolEvent[]>([]);
   const [busy, setBusy] = useState(false);
@@ -54,8 +65,7 @@ export function useConversations(
 
   const abortRef = useRef<AbortController | null>(null);
 
-  // Keep the latest defaults (from the async-loaded catalog) in a ref so
-  // create()/send() always seed new conversations with real values.
+  // Keep the latest defaults in a ref
   const defaultsRef = useRef(defaults);
   defaultsRef.current = defaults;
 
@@ -76,7 +86,18 @@ export function useConversations(
   useEffect(() => {
     const loaded = loadConversations();
     setConversations(loaded);
-    setActiveId(loadActiveId() ?? loaded[0]?.id ?? null);
+    const act = loadActiveId() ?? loaded[0]?.id ?? null;
+    setActiveId(act);
+
+    const activeConvo = loaded.find((c) => c.id === act);
+    const savedHarness = loadSelectedHarness() || activeConvo?.harness || defaults.harness || "chat";
+    const savedModel = loadSelectedModel() || activeConvo?.model || defaults.model;
+
+    setSelectedHarness(savedHarness);
+    setSelectedModel(savedModel);
+    defaultsRef.current.harness = savedHarness;
+    defaultsRef.current.model = savedModel;
+
     setHydrated(true);
   }, []);
 
@@ -102,44 +123,69 @@ export function useConversations(
     [activeId],
   );
 
-  const create = useCallback((): string => {
-    // If an empty session already exists (0 messages), reuse it instead of creating duplicate empty sessions!
-    const existingEmpty = conversations.find((c) => c.messages.length === 0);
-    if (existingEmpty) {
-      setActiveId(existingEmpty.id);
+  const create = useCallback(
+    (harnessOverride?: string, modelOverride?: string): string => {
+      const h = harnessOverride || selectedHarness || defaultsRef.current.harness || "chat";
+      const m = modelOverride || selectedModel || defaultsRef.current.model;
+
+      setSelectedHarness(h);
+      saveSelectedHarness(h);
+      defaultsRef.current.harness = h;
+
+      if (modelOverride) {
+        setSelectedModel(m);
+        saveSelectedModel(m);
+        defaultsRef.current.model = m;
+      }
+
+      const existingEmpty = conversations.find((c) => c.messages.length === 0);
+      if (existingEmpty) {
+        setActiveId(existingEmpty.id);
+        setConversations((prev) =>
+          prev.map((c) =>
+            c.id === existingEmpty.id ? { ...c, harness: h, model: m } : c,
+          ),
+        );
+        setStreaming("");
+        setLiveTools([]);
+        setError(null);
+        return existingEmpty.id;
+      }
+
+      const convo = newConversation(m, h);
+      setConversations((prev) => [convo, ...prev]);
+      setActiveId(convo.id);
       setStreaming("");
       setLiveTools([]);
       setError(null);
-      return existingEmpty.id;
-    }
+      return convo.id;
+    },
+    [conversations, selectedHarness, selectedModel],
+  );
 
-    const convo = newConversation(
-      active?.model ?? defaultsRef.current.model,
-      active?.harness ?? defaultsRef.current.harness,
-    );
-    setConversations((prev) => [convo, ...prev]);
-    setActiveId(convo.id);
-    setStreaming("");
-    setLiveTools([]);
-    setError(null);
-    return convo.id;
-  }, [active, conversations]);
-
-  // Seed an initial conversation once (the caller guards on emptiness). Both
-  // setters run from an effect, never inside a render/updater.
+  // Seed an initial conversation once (the caller guards on emptiness).
   const seedIfEmpty = useCallback(() => {
     if (seededRef.current) return;
     seededRef.current = true;
     const convo = newConversation(
-      defaultsRef.current.model,
-      defaultsRef.current.harness,
+      selectedModel || defaultsRef.current.model,
+      selectedHarness || defaultsRef.current.harness,
     );
     setConversations([convo]);
     setActiveId(convo.id);
-  }, []);
+  }, [selectedHarness, selectedModel]);
 
   const select = useCallback((id: string) => {
     setActiveId(id);
+    const convo = conversationsRef.current.find((c) => c.id === id);
+    if (convo) {
+      setSelectedHarness(convo.harness);
+      saveSelectedHarness(convo.harness);
+      defaultsRef.current.harness = convo.harness;
+      setSelectedModel(convo.model);
+      saveSelectedModel(convo.model);
+      defaultsRef.current.model = convo.model;
+    }
     setStreaming("");
     setLiveTools([]);
     setError(null);
@@ -157,12 +203,27 @@ export function useConversations(
   );
 
   const setModel = useCallback(
-    (model: string) => patchActive((c) => ({ ...c, model })),
-    [patchActive],
+    (model: string) => {
+      setSelectedModel(model);
+      saveSelectedModel(model);
+      defaultsRef.current.model = model;
+      if (activeId) {
+        patchActive((c) => ({ ...c, model }));
+      }
+    },
+    [activeId, patchActive],
   );
+
   const setHarness = useCallback(
-    (harness: string) => patchActive((c) => ({ ...c, harness })),
-    [patchActive],
+    (harness: string) => {
+      setSelectedHarness(harness);
+      saveSelectedHarness(harness);
+      defaultsRef.current.harness = harness;
+      if (activeId) {
+        patchActive((c) => ({ ...c, harness }));
+      }
+    },
+    [activeId, patchActive],
   );
 
   // Run a generation for the given message list and append the result.
@@ -248,13 +309,23 @@ export function useConversations(
           }
         }
       } catch (e) {
-        // Aborts surface as an error we swallow; offline network errors stream a friendly mock reply.
+        // Aborts surface as an error we swallow; offline network errors stream a friendly mock reply or run in Wasm Shell.
         if ((e as Error).name !== "AbortError") {
           const lastUser = messages.filter((m) => m.role === "user").pop()?.content || "";
-          const mockReply = `[Offline Mock via ${convo.model}] Backend server is currently disconnected. You said: "${lastUser}". Open ⚙ settings to start your Kaggle compute instance or connect a local server.`;
+          let mockReply = "";
+          if (convo.harness === "terminal") {
+            // Execute via In-Browser WebAssembly Shell with live streaming
+            setStreaming("```\nprocessing…\n```");
+            const wasmRes = await wasmShell.execute(lastUser, (chunk) => {
+              setStreaming(`\`\`\`\n${chunk}\n\`\`\``);
+            });
+            mockReply = `\`\`\`\n${wasmRes.output || "(no output)"}\n\`\`\`\n\`● exit ${wasmRes.exitCode}\``;
+          } else {
+            mockReply = `[Offline Mock via ${convo.model}] Backend server is currently disconnected. You said: "${lastUser}". Open ⚙ settings to start your Kaggle compute instance or connect a local server.`;
+          }
           acc = mockReply;
           setStreaming(acc);
-          tokenCount = mockReply.split(/\s+/).length;
+          tokenCount = convo.harness === "terminal" ? 0 : mockReply.split(/\s+/).length;
         }
       } finally {
         abortRef.current = null;
@@ -262,9 +333,12 @@ export function useConversations(
           role: "assistant",
           content: acc,
           tools: tools.length ? tools : undefined,
-          stats: tokenCount
-            ? { tokens: tokenCount, ms: performance.now() - startedAt }
-            : undefined,
+          stats:
+            convo.harness === "terminal"
+              ? { tokens: 0, ms: performance.now() - startedAt }
+              : tokenCount
+                ? { tokens: tokenCount, ms: performance.now() - startedAt }
+                : undefined,
         };
         setConversations((prev) =>
           prev.map((c) =>
@@ -297,13 +371,32 @@ export function useConversations(
 
       // Ensure there is an active conversation to append to.
       let convo = active;
+      const targetHarness = selectedHarness || defaultsRef.current.harness || "chat";
+      const targetModel = selectedModel || defaultsRef.current.model;
+
       if (!convo || (forceNew && convo.messages.length > 0)) {
         convo = newConversation(
-          active?.model ?? defaultsRef.current.model,
-          active?.harness ?? defaultsRef.current.harness,
+          targetModel,
+          targetHarness,
         );
         setConversations((prev) => [convo!, ...prev]);
         setActiveId(convo.id);
+      } else if (convo.messages.length === 0 && convo.harness !== targetHarness) {
+        convo = { ...convo, harness: targetHarness, model: targetModel };
+        setConversations((prev) =>
+          prev.map((c) => (c.id === convo!.id ? convo! : c)),
+        );
+      }
+
+      // Direct instant intercept for 'clear' command in terminal mode
+      if ((convo.harness === "terminal" || targetHarness === "terminal") && trimmed === "clear") {
+        setConversations((prev) =>
+          prev.map((c) => (c.id === convo!.id ? { ...c, messages: [] } : c)),
+        );
+        setStreaming("");
+        setLiveTools([]);
+        setBusy(false);
+        return;
       }
 
       const messages: DisplayMessage[] = [
@@ -320,43 +413,153 @@ export function useConversations(
 
       run(convo, messages);
     },
-    [active, busy, run],
+    [active, busy, run, selectedHarness, selectedModel],
   );
 
   const stop = useCallback(() => {
-    abortRef.current?.abort();
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    setBusy(false);
+    setStreaming("");
+    setLiveTools([]);
   }, []);
 
   const regenerate = useCallback(() => {
-    if (busy || !active) return;
-    // Drop the trailing assistant message and re-run the prior turn.
-    const msgs = [...active.messages];
-    if (msgs.length && msgs[msgs.length - 1].role === "assistant") msgs.pop();
-    if (!msgs.length) return;
+    if (!active || busy || active.messages.length === 0) return;
+    // Find the last user message and slice the history up to and including it.
+    let lastUserIdx = -1;
+    for (let i = active.messages.length - 1; i >= 0; i--) {
+      if (active.messages[i].role === "user") {
+        lastUserIdx = i;
+        break;
+      }
+    }
+    if (lastUserIdx === -1) return;
+    const history = active.messages.slice(0, lastUserIdx + 1);
     setConversations((prev) =>
-      prev.map((c) => (c.id === active.id ? { ...c, messages: msgs } : c)),
+      prev.map((c) => (c.id === active.id ? { ...c, messages: history } : c)),
     );
-    void run(active, msgs);
+    run(active, history);
   }, [active, busy, run]);
 
   const deleteMessage = useCallback(
     (index: number) => {
-      if (busy || !active) return;
+      if (!active) return;
+      if (index === -1) {
+        setConversations((prev) =>
+          prev.map((c) => (c.id === active.id ? { ...c, messages: [] } : c)),
+        );
+        return;
+      }
       setConversations((prev) =>
-        prev.map((c) =>
-          c.id === active.id
-            ? { ...c, messages: c.messages.filter((_, i) => i !== index) }
-            : c,
-        ),
+        prev.map((c) => {
+          if (c.id !== active.id) return c;
+          const target = c.messages[index];
+          // If deleting a user message, also auto-delete the paired assistant message right below it
+          if (target?.role === "user" && c.messages[index + 1]?.role === "assistant") {
+            return {
+              ...c,
+              messages: c.messages.filter((_, i) => i !== index && i !== index + 1),
+            };
+          }
+          return {
+            ...c,
+            messages: c.messages.filter((_, i) => i !== index),
+          };
+        }),
       );
     },
-    [active, busy],
+    [active],
   );
+
+  const editMessage = useCallback(
+    async (index: number, newContent: string) => {
+      if (!active || busy) return;
+      const targetMsg = active.messages[index];
+      if (!targetMsg) return;
+
+      const isTerminal = active.harness === "terminal";
+
+      if (isTerminal) {
+        // In Terminal mode: update command and re-execute in Wasm shell immediately
+        const updatedMessages = [...active.messages];
+        updatedMessages[index] = { ...targetMsg, content: newContent };
+
+        const nextMsg = updatedMessages[index + 1];
+        const hasAssistant = nextMsg && nextMsg.role === "assistant";
+
+        if (hasAssistant) {
+          updatedMessages[index + 1] = {
+            role: "assistant",
+            content: "```\nrunning…\n```",
+          };
+        } else {
+          updatedMessages.splice(index + 1, 0, {
+            role: "assistant",
+            content: "```\nrunning…\n```",
+          });
+        }
+
+        setConversations((prev) =>
+          prev.map((c) => (c.id === active.id ? { ...c, messages: updatedMessages } : c)),
+        );
+
+        // Execute updated command
+        const startTime = performance.now();
+        try {
+          const res = await wasmShell.execute(newContent);
+          const durationMs = Math.round(performance.now() - startTime);
+          const outputContent = res.output ? `\`\`\`\n${res.output}\n\`\`\`` : "*(no output)*";
+          const finalMessages = [...updatedMessages];
+          finalMessages[index + 1] = {
+            role: "assistant",
+            content: outputContent,
+            stats: {
+              tokens: 0,
+              ms: durationMs,
+            },
+          };
+          setConversations((prev) =>
+            prev.map((c) => (c.id === active.id ? { ...c, messages: finalMessages } : c)),
+          );
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          const finalMessages = [...updatedMessages];
+          finalMessages[index + 1] = {
+            role: "assistant",
+            content: `\`\`\`\nerror: ${msg}\n\`\`\``,
+          };
+          setConversations((prev) =>
+            prev.map((c) => (c.id === active.id ? { ...c, messages: finalMessages } : c)),
+          );
+        }
+      } else {
+        // In Chat / Agent mode: update message text and re-generate from that turn
+        const history = active.messages.slice(0, index);
+        const updatedTurn: DisplayMessage = { ...targetMsg, content: newContent };
+        const newHistory = [...history, updatedTurn];
+
+        setConversations((prev) =>
+          prev.map((c) => (c.id === active.id ? { ...c, messages: newHistory } : c)),
+        );
+
+        run(active, newHistory);
+      }
+    },
+    [active, busy, run],
+  );
+
+  const effectiveHarness = selectedHarness || active?.harness || defaultsRef.current.harness || "chat";
+  const effectiveModel = selectedModel || active?.model || defaultsRef.current.model;
 
   return {
     hydrated,
     conversations,
     active,
+    harness: effectiveHarness,
+    model: effectiveModel,
     streaming,
     liveTools,
     busy,
@@ -371,5 +574,6 @@ export function useConversations(
     stop,
     regenerate,
     deleteMessage,
+    editMessage,
   };
 }

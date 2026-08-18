@@ -15,18 +15,28 @@ export function setApiBase(url: string | null): void {
   activeBase = url || DEFAULT_BASE;
 }
 
-export function getApiBase(): string {
-  return activeBase;
+export function getBackendBase(): string {
+  if (activeBase) return activeBase.replace(/\/$/, "");
+  if (typeof window !== "undefined") {
+    const saved =
+      localStorage.getItem("edgerunner.backendUrl") ||
+      localStorage.getItem("edgerunner_backend_url");
+    if (saved) return saved.replace(/\/$/, "");
+  }
+  return (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000").replace(/\/$/, "");
 }
 
-/** True when a backend is actually connected (a tunnel is online, or a dev
- * base was configured). When false, chat/catalog must not be attempted. */
+export function getApiBase(): string {
+  return getBackendBase();
+}
+
+/** True when a backend endpoint is resolvable. */
 export function hasBackend(): boolean {
-  return activeBase !== "";
+  return Boolean(getBackendBase());
 }
 
 /** Raised when a request is attempted with no backend connected. */
-export const NO_BACKEND = "No backend connected — turn on the Kaggle backend.";
+export const NO_BACKEND = "No backend connected — turn on the Kaggle backend or start local server.";
 
 export interface Model {
   id: string;
@@ -77,8 +87,7 @@ export interface ToolEvent {
 }
 
 export async function fetchCatalog(): Promise<Catalog> {
-  if (!hasBackend()) throw new Error(NO_BACKEND);
-  const resp = await fetch(`${getApiBase()}/api/catalog`);
+  const resp = await fetch(`${getBackendBase()}/api/catalog`);
   if (!resp.ok) throw new Error(`catalog: ${resp.status}`);
   return resp.json();
 }
@@ -100,8 +109,7 @@ export async function* streamChat(
   } & SamplingParams,
   signal?: AbortSignal,
 ): AsyncGenerator<StreamEvent> {
-  if (!hasBackend()) throw new Error(NO_BACKEND);
-  const resp = await fetch(`${getApiBase()}/api/chat`, {
+  const resp = await fetch(`${getBackendBase()}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

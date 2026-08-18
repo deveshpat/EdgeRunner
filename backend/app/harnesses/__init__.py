@@ -9,17 +9,20 @@ from app.harnesses.agent import AgentHarness
 from app.harnesses.base import Harness, StreamEvent
 from app.harnesses.echo import EchoHarness
 from app.harnesses.llamacpp import LlamaCppHarness
+from app.harnesses.terminal import TerminalHarness
 
 _REGISTRY: dict[str, Harness] = {}
 
 chat_harness = LlamaCppHarness()
 agent_harness = AgentHarness()
+terminal_harness = TerminalHarness()
 echo_harness = EchoHarness()
 
 # Register built-in harnesses
 _REGISTRY["chat"] = chat_harness
 _REGISTRY["llamacpp"] = chat_harness
 _REGISTRY["agent"] = agent_harness
+_REGISTRY["terminal"] = terminal_harness
 _REGISTRY["echo"] = echo_harness
 
 
@@ -32,8 +35,8 @@ def get(harness_id: str) -> Harness | None:
 
 
 def all_harnesses() -> list[Harness]:
-    """Return the 2 visible public harnesses: Chat and Agent."""
-    return [chat_harness, agent_harness]
+    """Return the 3 visible public harnesses: Chat, Agent, and Terminal."""
+    return [chat_harness, agent_harness, terminal_harness]
 
 
 __all__ = ["Harness", "StreamEvent", "register", "get", "all_harnesses"]

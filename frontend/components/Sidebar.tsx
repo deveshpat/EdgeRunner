@@ -46,6 +46,14 @@ export function Sidebar({
         return;
       }
 
+      if (e.key === "Backspace" || e.key === "Delete") {
+        e.preventDefault();
+        if (activeId) {
+          onDelete(activeId);
+        }
+        return;
+      }
+
       if (conversations.length > 1 && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
         e.preventDefault();
         const currentIndex = conversations.findIndex((c) => c.id === activeId);
@@ -58,7 +66,7 @@ export function Sidebar({
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [open, activeId, conversations, onSelect, onCreate, onClose]);
+  }, [open, activeId, conversations, onSelect, onCreate, onDelete, onClose]);
 
   const select = (id: string) => {
     onSelect(id);
@@ -92,7 +100,7 @@ export function Sidebar({
         <div className="flex items-center justify-between p-3 border-b border-term-border/80 bg-term-panel/80">
           <div className="flex items-center gap-2">
             <span className="text-term-green font-bold text-xs uppercase tracking-wider">
-              ☰ SESSIONS HISTORY
+              ☰ SESSIONS
             </span>
           </div>
           <button

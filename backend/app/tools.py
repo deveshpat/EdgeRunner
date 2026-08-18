@@ -1,159 +1,33 @@
-"""Built-in tools the agentic harness can call.
+"""Unified 'terminal' omnitool for EdgeRunner.
 
-Tools are intentionally safe: a sandboxed arithmetic/maths evaluator, a clock,
-a random-number generator, text statistics, and a hasher. Each tool exposes an
-OpenAI-style JSON schema so it can be advertised to llama-server, plus a `func`
-that executes it.
+Consolidates all agent capabilities into a single universal tool that any model
+(from 3B non-reasoning to 70B frontier) can reliably call and execute in the
+shared `./workspace` sandbox.
+
+Includes a tolerant alias router and fuzzy argument parser to handle whatever
+names or keys a model generates.
 """
 
 from __future__ import annotations
 
-import ast
-import hashlib
 import json
-import math
-import operator
-import random
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Callable
+from typing import Any, Callable
+
+from app.workspace import WORKSPACE_ROOT, ensure_workspace
+
+CODE_TIMEOUT = 30
+_OUTPUT_CAP = 4000
 
 
 @dataclass(frozen=True)
 class Tool:
     name: str
     description: str
-    parameters: dict  # JSON schema for the arguments object
-    func: Callable[[dict], str]
-
-
-# --- calculator ------------------------------------------------------------
-
-_BIN_OPS = {
-    ast.Add: operator.add,
-    ast.Sub: operator.sub,
-    ast.Mult: operator.mul,
-    ast.Div: operator.truediv,
-    ast.Mod: operator.mod,
-    ast.Pow: operator.pow,
-    ast.FloorDiv: operator.floordiv,
-}
-_UNARY_OPS = {ast.UAdd: operator.pos, ast.USub: operator.neg}
-
-# Whitelisted maths functions and constants the calculator may reference.
-_FUNCS: dict[str, Callable] = {
-    "sqrt": math.sqrt,
-    "abs": abs,
-    "round": round,
-    "floor": math.floor,
-    "ceil": math.ceil,
-    "min": min,
-    "max": max,
-    "log": math.log,
-    "log2": math.log2,
-    "log10": math.log10,
-    "sin": math.sin,
-    "cos": math.cos,
-    "tan": math.tan,
-    "exp": math.exp,
-    "factorial": math.factorial,
-}
-_CONSTS = {"pi": math.pi, "e": math.e, "tau": math.tau}
-
-
-def _safe_eval(node: ast.AST) -> float:
-    """Evaluate an arithmetic AST, allowing only whitelisted names/calls."""
-    if isinstance(node, ast.Expression):
-        return _safe_eval(node.body)
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-        return node.value
-    if isinstance(node, ast.Name) and node.id in _CONSTS:
-        return _CONSTS[node.id]
-    if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
-        return _BIN_OPS[type(node.op)](_safe_eval(node.left), _safe_eval(node.right))
-    if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPS:
-        return _UNARY_OPS[type(node.op)](_safe_eval(node.operand))
-    if (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id in _FUNCS
-        and not node.keywords
-    ):
-        args = [_safe_eval(a) for a in node.args]
-        return _FUNCS[node.func.id](*args)
-    raise ValueError("unsupported expression")
-
-
-def _calculator(args: dict) -> str:
-    expr = str(args.get("expression", "")).strip()
-    if not expr:
-        return "error: no expression provided"
-    try:
-        result = _safe_eval(ast.parse(expr, mode="eval"))
-    except Exception:
-        return f"error: could not evaluate {expr!r}"
-    if isinstance(result, float) and result.is_integer():
-        result = int(result)
-    return str(result)
-
-
-# --- clock -----------------------------------------------------------------
-
-
-def _current_time(args: dict) -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-
-# --- random ----------------------------------------------------------------
-
-
-def _random_number(args: dict) -> str:
-    try:
-        low = int(args.get("min", 0))
-        high = int(args.get("max", 100))
-    except (TypeError, ValueError):
-        return "error: min and max must be integers"
-    if low > high:
-        low, high = high, low
-    return str(random.randint(low, high))
-
-
-# --- text stats ------------------------------------------------------------
-
-
-def _text_stats(args: dict) -> str:
-    text = str(args.get("text", ""))
-    stats = {
-        "characters": len(text),
-        "words": len(text.split()),
-        "lines": len(text.splitlines()) or (1 if text else 0),
-    }
-    return json.dumps(stats)
-
-
-# --- hash ------------------------------------------------------------------
-
-_ALGOS = {"sha256", "sha1", "md5"}
-
-
-def _hash_text(args: dict) -> str:
-    text = str(args.get("text", ""))
-    algo = str(args.get("algorithm", "sha256")).lower()
-    if algo not in _ALGOS:
-        return f"error: unsupported algorithm {algo!r} (use one of {sorted(_ALGOS)})"
-    digest = hashlib.new(algo, text.encode("utf-8")).hexdigest()
-    return digest
-
-
-# --- code execution --------------------------------------------------------
-# Runs in the backend's environment. In production that's the isolated,
-# ephemeral Kaggle worker (its own Linux sandbox), which is the point: the
-# agent gets a real code interpreter with the whole toolchain available.
-
-CODE_TIMEOUT = 30
-_OUTPUT_CAP = 4000
+    parameters: dict  # OpenAI JSON schema for the arguments object
+    func: Callable[[dict | str], str]
 
 
 def _cap(text: str) -> str:
@@ -161,147 +35,130 @@ def _cap(text: str) -> str:
     return text[:_OUTPUT_CAP] + "\n…(truncated)" if len(text) > _OUTPUT_CAP else text
 
 
-def _run(cmd: list[str] | str, shell: bool) -> str:
+def _extract_command(args: Any) -> str:
+    """Fuzzy extractor: pulls the command or code string out of any argument structure."""
+    if isinstance(args, str):
+        return args.strip()
+
+    if not isinstance(args, dict):
+        return str(args).strip()
+
+    # Priority key search
+    for key in ("command", "cmd", "code", "script", "expression", "input", "text", "query", "run"):
+        val = args.get(key)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+
+    # If dict has only 1 string value, use it
+    for val in args.values():
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+
+    return ""
+
+
+def run_command(cmd: str, timeout: int = CODE_TIMEOUT) -> tuple[str, int]:
+    """Execute a shell command inside the shared workspace sandbox."""
+    workspace = ensure_workspace()
+    cmd = cmd.strip()
+    if not cmd:
+        return "error: empty command", 1
+
     try:
         r = subprocess.run(
-            cmd, shell=shell, capture_output=True, text=True, timeout=CODE_TIMEOUT
+            cmd,
+            shell=True,
+            cwd=str(workspace),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return f"error: timed out after {CODE_TIMEOUT}s"
+        return f"error: command timed out after {timeout}s", 124
     except Exception as exc:  # noqa: BLE001
-        return f"error: {exc}"
+        return f"error: {exc}", 1
+
     out = r.stdout
     if r.stderr:
         out += ("\n" if out else "") + "[stderr]\n" + r.stderr
-    out = _cap(out)
-    return out or "(no output)"
+    out = _cap(out) or "(no output)"
+    return out, r.returncode
 
 
-def _run_python(args: dict) -> str:
-    code = str(args.get("code", ""))
-    if not code.strip():
-        return "error: no code provided"
-    return _run([sys.executable, "-c", code], shell=False)
-
-
-def _run_shell(args: dict) -> str:
-    cmd = str(args.get("command", ""))
-    if not cmd.strip():
+def _terminal_func(args: dict | str) -> str:
+    """Universal terminal handler."""
+    cmd = _extract_command(args)
+    if not cmd:
         return "error: no command provided"
-    return _run(cmd, shell=True)
+    out, code = run_command(cmd)
+    if code != 0:
+        return f"[exit code {code}]\n{out}"
+    return out
 
 
-# --- registry --------------------------------------------------------------
+def _python_func(args: dict | str) -> str:
+    """Handler for models calling a python-specific tool."""
+    code = _extract_command(args)
+    if not code:
+        return "error: no code provided"
+    # Execute python code via python interpreter inside the workspace
+    py_exec = sys.executable or "python3"
+    # If code is single-line simple expression or script, run with -c
+    escaped_code = code.replace("'", "'\"'\"'")
+    cmd = f"{py_exec} -c '{escaped_code}'"
+    return _terminal_func(cmd)
+
+
+# --- Universal Tool Specification ---
+
+TERMINAL_TOOL = Tool(
+    name="terminal",
+    description=(
+        "Run any shell command or script in the workspace terminal. "
+        "Use this for calculations, running Python (e.g. 'python3 -c \"...\"' or 'python3 script.py'), "
+        "inspecting or creating files (e.g. 'cat', 'ls', 'echo ... > file'), "
+        "or installing packages ('pip install <pkg>')."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": "The shell command to execute in the workspace (e.g. 'python3 -c \"import math; print(math.sqrt(2))\"').",
+            }
+        },
+        "required": ["command"],
+    },
+    func=_terminal_func,
+)
 
 TOOLS: dict[str, Tool] = {
-    t.name: t
-    for t in [
-        Tool(
-            name="calculator",
-            description=(
-                "Evaluate a maths expression. Supports + - * / // % **, "
-                "functions (sqrt, abs, round, floor, ceil, min, max, log, "
-                "sin, cos, tan, exp, factorial) and constants (pi, e, tau)."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "expression": {
-                        "type": "string",
-                        "description": "Expression, e.g. 'sqrt(2) * 10' or '3*(4+5)'.",
-                    }
-                },
-                "required": ["expression"],
-            },
-            func=_calculator,
-        ),
-        Tool(
-            name="current_time",
-            description="Get the current date and time in UTC.",
-            parameters={"type": "object", "properties": {}},
-            func=_current_time,
-        ),
-        Tool(
-            name="random_number",
-            description="Generate a random integer between min and max (inclusive).",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "min": {"type": "integer", "description": "Lower bound."},
-                    "max": {"type": "integer", "description": "Upper bound."},
-                },
-                "required": ["min", "max"],
-            },
-            func=_random_number,
-        ),
-        Tool(
-            name="text_stats",
-            description="Count characters, words, and lines in a piece of text.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string", "description": "Text to analyse."}
-                },
-                "required": ["text"],
-            },
-            func=_text_stats,
-        ),
-        Tool(
-            name="hash_text",
-            description="Compute a cryptographic hash of some text.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string", "description": "Text to hash."},
-                    "algorithm": {
-                        "type": "string",
-                        "enum": sorted(_ALGOS),
-                        "description": "Hash algorithm (default sha256).",
-                    },
-                },
-                "required": ["text"],
-            },
-            func=_hash_text,
-        ),
-        Tool(
-            name="run_python",
-            description=(
-                "Run Python 3 and return its stdout/stderr. Use for calculations, "
-                "data work, or to write and TEST code before answering. The full "
-                "standard library is available; install more with run_shell "
-                "('pip install ...')."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "code": {"type": "string", "description": "Python source to execute."}
-                },
-                "required": ["code"],
-            },
-            func=_run_python,
-        ),
-        Tool(
-            name="run_shell",
-            description=(
-                "Run a shell command and return its output. Use to run other "
-                "languages (node, gcc, go, etc.), inspect files, or install "
-                "packages (pip/apt). Runs in an isolated, ephemeral sandbox."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "Shell command to run."}
-                },
-                "required": ["command"],
-            },
-            func=_run_shell,
-        ),
-    ]
+    "terminal": TERMINAL_TOOL,
+}
+
+# Tolerant Alias Mapping: route whatever the model hallucinates to the right executor
+_ALIASES: dict[str, Callable[[dict | str], str]] = {
+    "terminal": _terminal_func,
+    "bash": _terminal_func,
+    "sh": _terminal_func,
+    "shell": _terminal_func,
+    "run_shell": _terminal_func,
+    "cmd": _terminal_func,
+    "command": _terminal_func,
+    "exec": _terminal_func,
+    "execute": _terminal_func,
+    "python": _python_func,
+    "py": _python_func,
+    "python3": _python_func,
+    "run_python": _python_func,
+    "code_interpreter": _python_func,
+    "eval": _python_func,
+    "calculator": _python_func,
 }
 
 
 def specs() -> list[dict]:
-    """OpenAI-style tool specs to advertise to llama-server."""
+    """OpenAI-style tool specifications advertised to llama-server."""
     return [
         {
             "type": "function",
@@ -315,15 +172,22 @@ def specs() -> list[dict]:
     ]
 
 
-def execute(name: str, arguments: str) -> str:
-    """Run a tool by name with a JSON-encoded argument string."""
-    tool = TOOLS.get(name)
-    if tool is None:
-        return f"error: unknown tool {name!r}"
-    try:
-        args = json.loads(arguments) if arguments else {}
-    except json.JSONDecodeError:
-        return f"error: invalid arguments for {name}: {arguments!r}"
-    if not isinstance(args, dict):
-        return f"error: arguments for {name} must be a JSON object"
-    return tool.func(args)
+def execute(name: str, arguments: str | dict) -> str:
+    """Run a tool by name with fuzzy argument parsing and alias fallback."""
+    clean_name = name.strip().lower()
+
+    func = _ALIASES.get(clean_name)
+    if func is None:
+        # If unknown tool name, fallback to executing with terminal
+        func = _terminal_func
+
+    if isinstance(arguments, str):
+        try:
+            parsed_args = json.loads(arguments) if arguments.strip() else {}
+        except json.JSONDecodeError:
+            # If arguments is raw text / command instead of JSON
+            parsed_args = arguments
+    else:
+        parsed_args = arguments or {}
+
+    return func(parsed_args)

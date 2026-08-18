@@ -13,8 +13,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app import __version__
-from app.routers import catalog, chat, models, passthrough, session
+from app import __version__, workspace
+from app.routers import catalog, chat, files, models, passthrough, session, terminal
 
 
 def _truthy(value: str | None) -> bool:
@@ -23,6 +23,9 @@ def _truthy(value: str | None) -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialize workspace sandbox directory
+    workspace.ensure_workspace()
+
     # Only the Kaggle worker self-terminates; never the local orchestrator.
     if _truthy(os.getenv("EDGERUNNER_WATCHDOG")):
         from app.session import watchdog
@@ -45,6 +48,8 @@ app.add_middleware(
 app.include_router(catalog.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
 app.include_router(models.router, prefix="/api")
+app.include_router(terminal.router, prefix="/api")
+app.include_router(files.router, prefix="/api")
 app.include_router(session.router, prefix="/api")  # worker: heartbeat/shutdown
 app.include_router(passthrough.router)  # /v1/* -> local llama-server
 

@@ -9,6 +9,8 @@ import type { ChatMessage, ToolEvent } from "./api";
 const KEY = "edgerunner.conversations";
 const ACTIVE_KEY = "edgerunner.activeId";
 const SETTINGS_KEY = "edgerunner.settings";
+const HARNESS_KEY = "edgerunner.selectedHarness";
+const MODEL_KEY = "edgerunner.selectedModel";
 
 export interface Settings {
   temperature: number;
@@ -91,6 +93,26 @@ export function loadSettings(): Settings {
 export function saveSettings(settings: Settings): void {
   if (!hasStorage()) return;
   window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+}
+
+export function loadSelectedHarness(): string | null {
+  if (!hasStorage()) return null;
+  return window.localStorage.getItem(HARNESS_KEY);
+}
+
+export function saveSelectedHarness(harness: string): void {
+  if (!hasStorage()) return;
+  window.localStorage.setItem(HARNESS_KEY, harness);
+}
+
+export function loadSelectedModel(): string | null {
+  if (!hasStorage()) return null;
+  return window.localStorage.getItem(MODEL_KEY);
+}
+
+export function saveSelectedModel(model: string): void {
+  if (!hasStorage()) return;
+  window.localStorage.setItem(MODEL_KEY, model);
 }
 
 // crypto.randomUUID needs a secure context + iOS 15.4+; fall back otherwise.

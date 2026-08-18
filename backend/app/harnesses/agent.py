@@ -1,19 +1,20 @@
-"""Agentic harness: a streaming, OpenAI-style tool-calling loop over llama-server.
+"""Agentic harness: a streaming, dual-mode tool-calling loop over llama-server.
 
-Each turn we open a streaming completion, advertising the built-in tools:
-  - content deltas are emitted as `token` events immediately (live streaming),
-  - tool-call deltas are accumulated across chunks by their index.
+Dual-Mode Architecture:
+1. Native Tool Calling: Uses the OpenAI-compatible `terminal` omnitool.
+2. Markdown Interceptor Fallback: If a smaller/non-reasoning model outputs a
+   fenced ````bash ```` or ````python ```` block instead of a JSON tool call,
+   the agent detects it, executes it in the `./workspace` sandbox, emits
+   `tool_call` and `tool_result` events, and feeds the output back into the loop.
 
-If the finished turn produced tool calls we execute them (emitting
-`tool_call` / `tool_result` events), append the results, and loop; otherwise
-the answer has already been streamed and we finish.
-
-Requires a llama-server new enough to stream OpenAI-compatible tool calls.
+This guarantees robust code execution regardless of model size or prompt format.
 """
 
 from __future__ import annotations
 
 import json
+import re
+import sys
 from typing import AsyncIterator
 
 import httpx
@@ -27,14 +28,20 @@ from app.schemas import ChatRequest
 MAX_ITERATIONS = 5
 
 SYSTEM_PROMPT = (
-    "You are EdgeRunner, a capable coding agent running on a local model with a "
-    "real code interpreter. Tools: run_python (Python 3), run_shell (any shell "
-    "command — run node/gcc/go, inspect files, pip/apt install), plus calculator, "
-    "clock, random number, text stats, and hashing. "
-    "Prefer to WRITE AND RUN code to solve and verify tasks rather than guessing: "
-    "compute with run_python, use other languages via run_shell, and check your "
-    "work by executing it. Never fabricate tool output. Think step by step, then "
-    "give a clear final answer in Markdown with fenced code blocks."
+    "You are EdgeRunner, a capable autonomous coding agent with a live workspace terminal. "
+    "You have access to a universal tool: `terminal` (run any shell command, Python code via "
+    "'python3 -c \"...\"' or scripts, inspect files with 'ls'/'cat', or install packages). "
+    "Always prefer to WRITE AND RUN code in the terminal to solve and verify tasks.\n"
+    "Autonomous Self-Healing: If a command or script fails with a traceback, compiler error, or non-zero exit code, "
+    "carefully analyze the error diagnostics and line numbers, patch the source code, and re-run to verify the fix.\n"
+    "Example tool call format:\n"
+    '{"name": "terminal", "arguments": {"command": "python3 -c \\"import math; print(math.sqrt(144))\\""}}\n'
+    "Think step by step, verify your work using the terminal, and give a clear final answer in Markdown."
+)
+
+_CODE_BLOCK_RE = re.compile(
+    r"```(?:bash|sh|shell|zsh|python|py)\s*\n(.*?)```",
+    re.DOTALL | re.IGNORECASE,
 )
 
 
@@ -42,8 +49,8 @@ class AgentHarness(Harness):
     id = "agent"
     name = "Agent"
     description = (
-        "Autonomous coding agent: runs Python & shell (any language), plus "
-        "calculator, clock, random, text stats, and hashing."
+        "Autonomous coding agent: runs Python, shell commands, and tools inside "
+        "the shared workspace sandbox with dual-mode execution."
     )
 
     async def run(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:
@@ -62,9 +69,10 @@ class AgentHarness(Harness):
 
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                for _ in range(MAX_ITERATIONS):
+                for iteration in range(MAX_ITERATIONS):
                     calls: dict[int, dict] = {}
                     error = None
+                    turn_content = ""
 
                     payload = {
                         "model": request.model,
@@ -97,12 +105,14 @@ class AgentHarness(Harness):
                                 error = token
                                 break
                             if token:
+                                turn_content += token
                                 yield StreamEvent(type="token", data=token)
 
                     if error:
                         yield StreamEvent(type="error", data=error)
                         return
 
+                    # Path A: Model emitted formal OpenAI tool calls
                     if calls:
                         ordered = [calls[i] for i in sorted(calls)]
                         messages.append(_assistant_tool_message(ordered))
@@ -111,7 +121,22 @@ class AgentHarness(Harness):
                                 yield ev
                         continue
 
-                    # No tool calls this turn: the answer has been streamed.
+                    # Path B: Fallback - check if non-reasoning model outputted an executable markdown code block
+                    # Only trigger fallback on earlier iterations if tool calls were omitted
+                    if iteration == 0 and not calls and turn_content:
+                        extracted_cmd = _extract_markdown_command(turn_content)
+                        if extracted_cmd:
+                            call = {
+                                "id": f"fallback_call_{iteration}",
+                                "name": "terminal",
+                                "arguments": json.dumps({"command": extracted_cmd}),
+                            }
+                            messages.append({"role": "assistant", "content": turn_content})
+                            async for ev in self._run_tool(call, messages):
+                                yield ev
+                            continue
+
+                    # No tool calls this turn: answer is complete.
                     yield StreamEvent(type="done")
                     return
 
@@ -127,7 +152,7 @@ class AgentHarness(Harness):
             msg = (
                 f"[Offline Mock via {request.model}] Backend model server is currently offline. "
                 f"You said: {last_user!r}. "
-                "Start a local llama-server or connect your Kaggle GPU rig to run live agent loops."
+                "Start a local llama-server or connect your Kaggle GPU rig to run live agent loops in the workspace."
             )
             import asyncio
             for word in msg.split(" "):
@@ -142,7 +167,7 @@ class AgentHarness(Harness):
         self, call: dict, messages: list[dict]
     ) -> AsyncIterator[StreamEvent]:
         call_id = call.get("id", "")
-        name = call.get("name", "")
+        name = call.get("name", "terminal")
         arguments = call.get("arguments", "") or ""
 
         yield StreamEvent(
@@ -160,11 +185,7 @@ class AgentHarness(Harness):
 
 
 def _consume_chunk(data: str, calls: dict[int, dict]) -> tuple[str, bool]:
-    """Parse one SSE chunk. Returns (content_delta, is_error).
-
-    Content deltas are returned for streaming; tool-call deltas are merged into
-    `calls` in place, keyed by index.
-    """
+    """Parse one SSE chunk. Returns (content_delta, is_error)."""
     try:
         chunk = json.loads(data)
     except json.JSONDecodeError:
@@ -202,3 +223,21 @@ def _assistant_tool_message(calls: list[dict]) -> dict:
             for c in calls
         ],
     }
+
+
+def _extract_markdown_command(text: str) -> str | None:
+    """Extract an executable command from a markdown code block if present."""
+    match = _CODE_BLOCK_RE.search(text)
+    if not match:
+        return None
+    code = match.group(1).strip()
+    if not code:
+        return None
+
+    # Check if python or bash
+    block_header = text[: match.start() + 10].lower()
+    if "python" in block_header or "py" in block_header:
+        py_exec = sys.executable or "python3"
+        escaped = code.replace("'", "'\"'\"'")
+        return f"{py_exec} -c '{escaped}'"
+    return code

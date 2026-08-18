@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import type { Role, ToolEvent } from "@/lib/api";
 import type { MessageStats } from "@/lib/storage";
@@ -12,20 +12,10 @@ interface MessageProps {
   tools?: ToolEvent[];
   stats?: MessageStats;
   streaming?: boolean;
+  harness?: string;
   onDelete?: () => void;
+  onEdit?: (newContent: string) => void;
 }
-
-const PROMPT: Record<Role, string> = {
-  user: "you@edgerunner:~$",
-  assistant: "agent >",
-  system: "# system",
-};
-
-const COLOR: Record<Role, string> = {
-  user: "text-term-green",
-  assistant: "text-term-amber",
-  system: "text-term-dim",
-};
 
 export function Message({
   role,
@@ -33,39 +23,164 @@ export function Message({
   tools,
   stats,
   streaming,
+  harness = "chat",
   onDelete,
+  onEdit,
 }: MessageProps) {
+  const isTerminal = harness === "terminal";
+  const isAgent = harness === "agent";
+
+  const [isEditing, setIsEditing] = useState(false);
+  const [editDraft, setEditDraft] = useState(content);
+
+  const previewMatch = useMemo(() => {
+    if (!content) return null;
+    const urlMatch =
+      content.match(/https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?\S*/i) ||
+      content.match(/https?:\/\/[^\s)]+/i);
+    if (urlMatch) return { type: "url", target: urlMatch[0] };
+    const htmlMatch = content.match(/\b[\w-]+\.html\b/i);
+    if (htmlMatch) return { type: "html", target: htmlMatch[0] };
+    return null;
+  }, [content]);
+
+  const promptLabel =
+    role === "user"
+      ? isTerminal
+        ? "you@edgerunner:~/workspace$ "
+        : "you@edgerunner:~$ "
+      : role === "assistant"
+        ? isTerminal
+          ? "bash > "
+          : isAgent
+            ? "agent > "
+            : "model > "
+        : "# system ";
+
+  const promptColor =
+    role === "user"
+      ? "text-term-green"
+      : role === "assistant"
+        ? isTerminal
+          ? "text-term-dim"
+          : "text-term-amber"
+        : "text-term-dim";
+
+  function handleSaveEdit() {
+    const trimmed = editDraft.trim();
+    if (!trimmed) return;
+    setIsEditing(false);
+    if (trimmed !== content && onEdit) {
+      onEdit(trimmed);
+    }
+  }
+
   return (
-    <div className="group py-1.5">
+    <div className="group py-2 font-mono text-sm sm:text-base leading-relaxed">
       {tools && tools.length > 0 && (
-        <div className="mb-1 space-y-1">
+        <div className="mb-1.5 space-y-1">
           {tools.map((t) => (
             <ToolCall key={t.id} tool={t} />
           ))}
         </div>
       )}
-      {(content || streaming) && (
-        <div>
-          <span className={`${COLOR[role]} select-none`}>{PROMPT[role]}</span>{" "}
-          {role === "user" ? (
-            <span className="whitespace-pre-wrap break-words">{content}</span>
-          ) : (
-            <AssistantBody content={content} streaming={streaming} />
-          )}
+
+      {isEditing ? (
+        <div className="my-1.5 rounded border border-term-green/60 bg-term-panel/80 p-2.5 space-y-2">
+          <div className="flex items-center justify-between text-xs text-term-dim">
+            <span className="text-term-green font-semibold">Editing message…</span>
+            <span>↵ to save · Esc to cancel · ⇧↵ for newline</span>
+          </div>
+          <textarea
+            value={editDraft}
+            onChange={(e) => setEditDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                handleSaveEdit();
+              } else if (e.key === "Escape") {
+                setIsEditing(false);
+                setEditDraft(content);
+              }
+            }}
+            className="w-full min-h-[70px] p-2.5 rounded border border-term-border bg-term-bg text-term-fg text-sm focus:outline-none focus:border-term-green resize-y leading-relaxed font-mono"
+            autoFocus
+          />
+          <div className="flex items-center gap-2 justify-end">
+            <button
+              onClick={() => {
+                setIsEditing(false);
+                setEditDraft(content);
+              }}
+              className="px-2.5 py-1 rounded border border-term-border text-xs text-term-dim hover:text-term-fg"
+            >
+              cancel
+            </button>
+            <button
+              onClick={handleSaveEdit}
+              className="px-2.5 py-1 rounded border border-term-green/60 bg-term-green/20 text-term-green text-xs font-bold hover:bg-term-green/30"
+            >
+              save & run ↵
+            </button>
+          </div>
         </div>
+      ) : (
+        (content || streaming) && (
+          <div>
+            <span className={`${promptColor} select-none font-bold`}>{promptLabel}</span>
+            {role === "user" ? (
+              <span className="whitespace-pre-wrap break-words">{content}</span>
+            ) : (
+              <AssistantBody content={content} streaming={streaming} />
+            )}
+          </div>
+        )
       )}
-      {!streaming && (content || tools?.length) && (
-        <div className="mt-1 flex flex-wrap items-center gap-2 sm:gap-3 text-[10px] text-term-dim opacity-70 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+
+      {!streaming && !isEditing && (content || tools?.length) && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-2.5 sm:gap-3.5 text-xs text-term-dim opacity-70 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity select-none">
           <CopyButton text={content} />
+          {onEdit && (
+            <button
+              className="hover:text-term-green transition-colors"
+              onClick={() => {
+                setEditDraft(content);
+                setIsEditing(true);
+              }}
+            >
+              edit
+            </button>
+          )}
+          {previewMatch && (
+            <button
+              onClick={() => {
+                if (typeof window !== "undefined") {
+                  window.dispatchEvent(
+                    new CustomEvent("edgerunner:open-preview", {
+                      detail: { url: previewMatch.type === "url" ? previewMatch.target : undefined },
+                    }),
+                  );
+                }
+              }}
+              className="flex items-center gap-1.5 rounded border border-term-green/60 bg-term-green/10 px-2 py-0.5 text-xs text-term-green hover:bg-term-green/20 transition-colors"
+              title="Open in native Sandboxed Live Previewer"
+            >
+              <span>🌐</span>
+              <span>Preview {previewMatch.target}</span>
+            </button>
+          )}
           {onDelete && (
-            <button className="hover:text-term-red" onClick={onDelete}>
+            <button className="hover:text-term-red transition-colors" onClick={onDelete}>
               delete
             </button>
           )}
           {stats && (
-            <span className="ml-auto tabular-nums">
-              {stats.tokens} tok · {tokPerSec(stats)} tok/s ·{" "}
-              {(stats.ms / 1000).toFixed(1)}s
+            <span className="ml-auto tabular-nums text-xs">
+              {isTerminal ? (
+                `${(stats.ms / 1000).toFixed(2)}s`
+              ) : (
+                `${stats.tokens} tok · ${tokPerSec(stats)} tok/s · ${(stats.ms / 1000).toFixed(1)}s`
+              )}
             </span>
           )}
         </div>
@@ -74,33 +189,22 @@ export function Message({
   );
 }
 
-// Reasoning models emit <think>…</think> or begin thinking immediately ending with </think>.
-// Split it out so the reasoning renders in a collapsible block and the answer stays clean.
 function splitThinking(content: string): {
   reasoning: string | null;
   answer: string;
   thinking: boolean;
 } {
-  const open = content.indexOf("<think>");
-  if (open === -1) {
-    const close = content.indexOf("</think>");
-    if (close !== -1) {
-      const reasoning = content.slice(0, close);
-      const answer = content.slice(close + "</think>".length).trimStart();
-      return { reasoning, answer, thinking: false };
-    }
-    return { reasoning: null, answer: content, thinking: false };
+  const closeIdx = content.indexOf("</think>");
+  if (closeIdx !== -1) {
+    const rawReasoning = content.slice(0, closeIdx).replace(/^<think>\s*/, "").trim();
+    const answer = content.slice(closeIdx + 8).trimStart();
+    return { reasoning: rawReasoning || null, answer, thinking: false };
   }
-  const before = content.slice(0, open);
-  const rest = content.slice(open + "<think>".length);
-  const close = rest.indexOf("</think>");
-  if (close === -1) {
-    // still inside the reasoning block (streaming)
-    return { reasoning: rest, answer: before, thinking: true };
+  if (content.startsWith("<think>")) {
+    const rawReasoning = content.slice(7).trimStart();
+    return { reasoning: rawReasoning, answer: "", thinking: true };
   }
-  const reasoning = rest.slice(0, close);
-  const answer = (before + rest.slice(close + "</think>".length)).trimStart();
-  return { reasoning, answer, thinking: false };
+  return { reasoning: null, answer: content, thinking: false };
 }
 
 function AssistantBody({
@@ -110,46 +214,58 @@ function AssistantBody({
   content: string;
   streaming?: boolean;
 }) {
-  const { reasoning, answer, thinking } = splitThinking(content);
+  const { reasoning, answer, thinking } = useMemo(
+    () => splitThinking(content),
+    [content],
+  );
+
   return (
-    <div className="mt-1 font-mono">
-      {reasoning !== null && reasoning.trim() && (
-        <ThinkBlock reasoning={reasoning} thinking={thinking} />
+    <>
+      {reasoning && (
+        <details
+          className="my-1 rounded border border-term-border bg-term-panel/40 px-2.5 py-1 text-xs text-term-dim"
+          open={thinking}
+        >
+          <summary className="cursor-pointer select-none text-[10px] uppercase tracking-wider text-term-amber">
+            {thinking ? "⚡ thinking…" : "thought process"}
+          </summary>
+          <div className="mt-1 whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-term-dim border-l border-term-amber/30 pl-2">
+            {reasoning}
+          </div>
+        </details>
       )}
-      <div className={streaming && !thinking ? "cursor-blink" : ""}>
-        <Markdown content={answer} />
-      </div>
-    </div>
+      <Markdown content={answer} />
+    </>
   );
 }
 
-function ThinkBlock({
-  reasoning,
-  thinking,
-}: {
-  reasoning: string;
-  thinking: boolean;
-}) {
-  // Auto-expanded while the model is still reasoning; collapsed once done.
+function ToolCall({ tool }: { tool: ToolEvent }) {
   const [open, setOpen] = useState(false);
-  const show = thinking || open;
+  const isDone = tool.result !== undefined;
+
   return (
-    <div className="mb-2 rounded border border-term-border/80 bg-term-panel/40 text-xs font-mono shadow-sm">
-      <button
-        onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-term-dim hover:text-term-fg transition-colors"
+    <div className="rounded border border-term-border bg-term-panel/50 px-2 py-1 text-xs font-mono">
+      <div
+        className="flex cursor-pointer items-center justify-between gap-2 text-[11px]"
+        onClick={() => isDone && setOpen((o) => !o)}
       >
-        <span className="text-term-amber">
-          {thinking ? "⚡" : "🧠"}
-        </span>
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-term-dim">
-          {thinking ? "Thinking process…" : open ? "▾ Reasoning Matrix" : "▸ Reasoning Matrix"}
-        </span>
-      </button>
-      {show && (
-        <div className="border-t border-term-border/60 px-3 py-2 whitespace-pre-wrap break-words text-[11px] leading-relaxed text-term-dim/90 bg-term-bg/50">
-          {reasoning.trim()}
+        <div className="flex items-center gap-1.5 truncate">
+          <span className="text-term-dim">tool:</span>
+          <span className="text-term-green font-semibold">{tool.name}</span>
+          {tool.arguments && (
+            <span className="truncate text-term-dim text-[10px]">
+              ({tool.arguments})
+            </span>
+          )}
         </div>
+        <span className="text-[10px] text-term-dim">
+          {isDone ? (open ? "▾ hide" : "▸ result") : "running…"}
+        </span>
+      </div>
+      {open && tool.result && (
+        <pre className="mt-1 max-h-48 overflow-y-auto rounded bg-term-bg/80 p-1.5 text-[10px] text-term-fg leading-tight">
+          {tool.result}
+        </pre>
       )}
     </div>
   );
@@ -159,39 +275,19 @@ function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <button
-      className="flex items-center gap-1 hover:text-term-green transition-colors font-mono"
-      onClick={() =>
-        navigator.clipboard?.writeText(text).then(() => {
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1200);
-        })
-      }
+      className="hover:text-term-fg"
+      onClick={() => {
+        navigator.clipboard.writeText(text);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      }}
     >
-      <span>{copied ? "✓" : "⎘"}</span>
-      <span>{copied ? "copied" : "copy"}</span>
+      {copied ? "copied" : "copy"}
     </button>
   );
 }
 
-function tokPerSec(stats: MessageStats): string {
-  if (stats.ms <= 0) return "–";
-  return (stats.tokens / (stats.ms / 1000)).toFixed(1);
-}
-
-function ToolCall({ tool }: { tool: ToolEvent }) {
-  return (
-    <div className="rounded border border-term-border bg-term-panel/60 px-2.5 py-1.5 text-xs font-mono">
-      <div className="text-term-dim">
-        <span className="text-term-green font-semibold">⚙ tool</span> {tool.name}
-        {tool.arguments ? (
-          <span className="text-term-fg">({tool.arguments})</span>
-        ) : null}
-      </div>
-      {tool.result !== undefined && (
-        <div className="mt-1 whitespace-pre-wrap break-words text-[11px] text-term-dim">
-          <span className="text-term-amber font-semibold">↳</span> {tool.result}
-        </div>
-      )}
-    </div>
-  );
+function tokPerSec(s: MessageStats): string {
+  if (!s.ms) return "0.0";
+  return ((s.tokens / s.ms) * 1000).toFixed(1);
 }

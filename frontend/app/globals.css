@@ -1,3 +1,4 @@
+@import "@xterm/xterm/css/xterm.css";
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -5,21 +6,37 @@
 :root {
   color-scheme: dark;
   /* ========================================================================= */
-  /*  MAIN THEME & TEXT COLOR CONFIGURATION (Edit hex values here to test)      */
+  /*  DARK THEME CONFIGURATION                                                 */
   /* ========================================================================= */
   --term-bg: #0a0e0a;         /* Main app canvas background */
   --term-panel: #0f140f;      /* Cards and secondary panels background */
   --term-border: #1e2a1e;     /* Outlines and panel dividers */
   --term-dim: #4a5a4a;        /* Muted descriptions, secondary labels, icons */
-  --term-fg: #f4d5fd;         /* MAIN TEXT COLOR (Chat messages, titles, body) */
-  --term-green: #d2f8d2;      /* NEON ACCENT (Logo, active states, halos, '$') */
+  --term-fg: #f4d5fd;         /* Main text color */
+  --term-green: #39FF14;      /* Neon accent */
   --term-amber: #e6b23e;      /* Warning / Connecting status */
   --term-red: #e6483e;        /* Error / Offline / Abort buttons */
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  /* ========================================================================= */
+  /*  CYBERPUNK LIGHT THEME (HIGH-TECH NEO-TOKYO TITANIUM)                    */
+  /* ========================================================================= */
+  --term-bg: #eceff3;         /* Cool titanium-slate cyber canvas */
+  --term-panel: #ffffff;      /* Clean cyber panel cards */
+  --term-border: #94a3b8;     /* Crisp structural grid border */
+  --term-dim: #475569;        /* Sharp high-readability slate */
+  --term-fg: #030712;         /* Deep high-contrast obsidian */
+  --term-green: #0284c7;      /* High-tech electric cyan / neon cobalt accent */
+  --term-amber: #d97706;      /* High-visibility amber-600 */
+  --term-red: #e11d48;        /* Cyber laser-rose red-600 */
 }
 
 html,
 body {
   height: 100%;
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
 
 body {

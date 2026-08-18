@@ -1,12 +1,6 @@
 "use client";
 
-// Dead-simple backend connection: the user runs EdgeRunner on Kaggle (uvicorn
-// + a cloudflared tunnel) and pastes the tunnel URL here. We probe it, point
-// the app at it, and heartbeat to keep the worker's watchdog alive. The URL is
-// persisted so a reload reconnects. No Kaggle API, no auto-launch, no secrets.
-
 import { useCallback, useEffect, useRef, useState } from "react";
-
 import { setApiBase } from "./api";
 
 export type BackendStatus = "off" | "connecting" | "online" | "error";
@@ -22,7 +16,7 @@ function normalize(url: string): string {
 
 async function probe(url: string): Promise<boolean> {
   const c = new AbortController();
-  const t = setTimeout(() => c.abort(), 6000);
+  const t = setTimeout(() => c.abort(), 4000);
   try {
     const r = await fetch(`${url}/api/health`, { signal: c.signal });
     return r.ok;
@@ -38,16 +32,20 @@ export interface UseBackend {
   status: BackendStatus;
   error: string | null;
   hydrated: boolean;
+  isLocal: boolean;
   connect: (url: string) => Promise<boolean>;
   disconnect: () => void;
 }
 
-export function useBackend(): UseBackend {
+export function useBackend(onLocalDetected?: () => void): UseBackend {
   const [url, setUrl] = useState("");
   const [status, setStatus] = useState<BackendStatus>("off");
   const [error, setError] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
+  const [isLocal, setIsLocal] = useState(false);
   const beatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const onLocalDetectedRef = useRef(onLocalDetected);
+  onLocalDetectedRef.current = onLocalDetected;
 
   const stopBeat = useCallback(() => {
     if (beatRef.current) {
@@ -61,6 +59,8 @@ export function useBackend(): UseBackend {
       setApiBase(u);
       setUrl(u);
       setStatus("online");
+      const isLocalHost = u.includes("127.0.0.1") || u.includes("localhost");
+      setIsLocal(isLocalHost);
       setError(null);
       try {
         localStorage.setItem(KEY, u);
@@ -72,6 +72,10 @@ export function useBackend(): UseBackend {
         fetch(`${u}/api/session/heartbeat`, { method: "POST" }).catch(() => {});
       beat();
       beatRef.current = setInterval(beat, 25_000);
+
+      if (isLocalHost && onLocalDetectedRef.current) {
+        onLocalDetectedRef.current();
+      }
     },
     [stopBeat],
   );
@@ -92,7 +96,7 @@ export function useBackend(): UseBackend {
         return true;
       }
       setStatus("error");
-      setError("Could not reach that backend URL (is the tunnel up?).");
+      setError("Could not reach backend server.");
       setApiBase(null);
       return false;
     },
@@ -105,6 +109,7 @@ export function useBackend(): UseBackend {
     setStatus("off");
     setError(null);
     setUrl("");
+    setIsLocal(false);
     try {
       localStorage.removeItem(KEY);
     } catch {
@@ -112,17 +117,28 @@ export function useBackend(): UseBackend {
     }
   }, [stopBeat]);
 
-  // Reconnect to the saved URL on load.
+  // Automated Local Backend Auto-Detection (127.0.0.1:8000)
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+
+    async function checkLocalAndSaved() {
+      // 1. Check local device backend first (http://127.0.0.1:8000)
+      const localOk = await probe("http://127.0.0.1:8000");
+      if (localOk && !cancelled) {
+        goOnline("http://127.0.0.1:8000");
+        setHydrated(true);
+        return;
+      }
+
+      // 2. Check saved URL
       let saved = "";
       try {
         saved = localStorage.getItem(KEY) || "";
       } catch {
         /* ignore */
       }
-      if (saved) {
+
+      if (saved && saved !== "http://127.0.0.1:8000") {
         setUrl(saved);
         if (await probe(saved)) {
           if (!cancelled) goOnline(saved);
@@ -131,13 +147,26 @@ export function useBackend(): UseBackend {
         }
       }
       if (!cancelled) setHydrated(true);
-    })();
+    }
+
+    checkLocalAndSaved();
+
+    // Periodic auto-detector for local server (every 6 seconds if offline or on cloud)
+    const interval = setInterval(async () => {
+      if (url === "http://127.0.0.1:8000" && status === "online") return;
+      const isUp = await probe("http://127.0.0.1:8000");
+      if (isUp && !cancelled) {
+        goOnline("http://127.0.0.1:8000");
+      }
+    }, 6000);
+
     return () => {
       cancelled = true;
+      clearInterval(interval);
     };
-  }, [goOnline]);
+  }, [goOnline, status, url]);
 
   useEffect(() => stopBeat, [stopBeat]);
 
-  return { url, status, error, hydrated, connect, disconnect };
+  return { url, status, error, hydrated, isLocal, connect, disconnect };
 }
