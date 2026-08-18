@@ -463,7 +463,7 @@ export function FileExplorerModal({ isOpen, onClose, inline }: FileExplorerModal
           </div>
 
           {/* VS Code Side Bar (Explorer / Search / Git) */}
-          <div className={`w-full md:w-64 sm:w-72 bg-term-panel/40 border-r border-term-border flex-col shrink-0 select-none ${mobileTab === "files" ? "flex" : "hidden md:flex"}`}>
+          <div className={`flex-1 min-w-0 md:w-64 sm:w-72 md:flex-none bg-term-panel/40 border-r border-term-border flex-col shrink-0 select-none ${mobileTab === "files" ? "flex" : "hidden md:flex"}`}>
             {activityTab === "explorer" && (
               <>
                 {/* Explorer Toolbar Header */}
@@ -870,24 +870,24 @@ export function FileExplorerModal({ isOpen, onClose, inline }: FileExplorerModal
         </div>
 
         {/* VS Code Bottom Status Bar */}
-        <div className="flex items-center justify-between border-t border-term-border bg-term-panel px-3.5 py-1.5 shrink-0 select-none text-xs text-term-dim">
-          <div className="flex items-center gap-3">
-            <span className="flex items-center gap-1.5 text-term-green font-semibold">
+        <div className="flex items-center justify-between border-t border-term-border bg-term-panel px-2.5 sm:px-3.5 py-1 sm:py-1.5 shrink-0 select-none text-xs text-term-dim overflow-hidden">
+          <div className="flex items-center gap-2 sm:gap-3 truncate">
+            <span className="flex items-center gap-1.5 text-term-green font-semibold shrink-0">
               <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24">
                 <path d="M19.5 8a3.5 3.5 0 0 0-3.32 2.41 4.5 4.5 0 0 0-4.68 3.59A3.5 3.5 0 0 0 8 13.5V6.82a3.5 3.5 0 1 0-2 0v10.36a3.5 3.5 0 1 0 2.05.58 4.48 4.48 0 0 0 4.14-3.26 4.51 4.51 0 0 0 3.81-2.9 3.5 3.5 0 1 0 3.5-3.1zM6 4a1.5 1.5 0 1 1-1.5 1.5A1.5 1.5 0 0 1 6 4zm1 16a1.5 1.5 0 1 1 1.5-1.5A1.5 1.5 0 0 1 7 20zm12.5-9a1.5 1.5 0 1 1 1.5-1.5 1.5 1.5 0 0 1-1.5 1.5z"/>
               </svg>
-              <span>{gitStatus.branch}</span>
+              <span className="truncate max-w-[100px]">{gitStatus.branch}</span>
             </span>
-            <span>0 ⊗ 0 ⚠</span>
+            <span className="hidden xs:inline">0 ⊗ 0 ⚠</span>
           </div>
 
-          <div className="flex items-center gap-4">
-            <span>Spaces: 2</span>
-            <span>UTF-8</span>
-            <span className="uppercase text-term-fg font-semibold">
+          <div className="flex items-center gap-2 sm:gap-4 shrink-0">
+            <span className="hidden sm:inline">Spaces: 2</span>
+            <span className="hidden sm:inline">UTF-8</span>
+            <span className="uppercase text-term-fg font-semibold text-[11px] truncate max-w-[100px]">
               {selectedFile ? getLanguageFromPath(selectedFile) : "Plain Text"}
             </span>
-            <span className="text-term-green">Prettier ✓</span>
+            <span className="hidden xs:inline text-term-green">Prettier ✓</span>
           </div>
         </div>
       </div>

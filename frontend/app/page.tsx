@@ -885,7 +885,7 @@ export default function Home() {
 
   return (
     <main className="flex h-[100dvh] w-full max-w-full overflow-hidden bg-term-bg text-term-fg font-mono">
-      {/* Session History Slide-out Drawer (available on Landing & Workspace) */}
+      {/* Universal Navigation & Sessions Slide-out Sandwich Drawer */}
       <Sidebar
         conversations={chat.conversations}
         activeId={active?.id ?? null}
@@ -893,8 +893,8 @@ export default function Home() {
           chat.select(id);
           setViewMode("workspace");
         }}
-        onCreate={() => {
-          chat.create();
+        onCreate={(h) => {
+          chat.create(h as any);
           setViewMode("workspace");
         }}
         onDelete={(id) => {
@@ -903,6 +903,16 @@ export default function Home() {
         }}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
+        harness={harness}
+        onSetHarness={(h) => {
+          chat.setHarness(h);
+          setViewMode("workspace");
+        }}
+        onOpenSettings={() => setShowSettings(true)}
+        onOpenShortcuts={() => setShowShortcutsModal(true)}
+        onOpenModels={() => setShowModelModal(true)}
+        isLight={theme === "light"}
+        onToggleTheme={toggleTheme}
       />
 
       <div className="flex h-full w-full flex-1 flex-col transition-all overflow-hidden">
@@ -910,10 +920,22 @@ export default function Home() {
         {viewMode === "workspace" ? (
           <header className="relative w-full border-b border-term-border bg-term-panel/60 px-2.5 sm:px-4 py-2 sm:py-2.5 text-xs select-none transition-all duration-300">
             <div className="flex items-center justify-between gap-2 sm:gap-4 w-full h-7">
-              {/* Left: Window Controls + History Trigger */}
+              {/* Left: Sandwich Drawer Trigger + Traffic Lights */}
               <div className="flex items-center gap-2 sm:gap-3 shrink-0 z-10">
-                {/* Traffic Lights */}
-                <div className="flex items-center gap-1.5">
+                {/* Mobile / Universal Sandwich Drawer Trigger */}
+                <button
+                  onClick={() => setSidebarOpen(true)}
+                  className="flex items-center justify-center h-7 w-7 rounded border border-term-border bg-term-panel text-term-dim hover:text-term-green hover:border-term-green transition-colors"
+                  title="Open Navigation Menu & Sessions (⌘B)"
+                  aria-label="Open navigation menu and sessions"
+                >
+                  <svg className="w-4 h-4 fill-current" viewBox="0 0 24 24">
+                    <path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/>
+                  </svg>
+                </button>
+
+                {/* Traffic Lights (Desktop & Tablets) */}
+                <div className="hidden xs:flex items-center gap-1.5">
                   <button
                     onClick={() => {
                       // Red dot returns directly to Hero Landing Page
@@ -950,7 +972,7 @@ export default function Home() {
                 <Logo variant="navbar" />
               </div>
 
-              {/* Right: Mode Switcher + Shortcuts + Settings */}
+              {/* Right: Mode Switcher + Desktop Shortcuts & Settings */}
               <div className="flex items-center gap-1.5 sm:gap-2 justify-end shrink-0 z-10">
                 <button
                   onClick={() => {
@@ -975,14 +997,14 @@ export default function Home() {
 
                 <button
                   onClick={() => setShowShortcutsModal(true)}
-                  className="flex items-center justify-center h-7 sm:h-8 px-2 rounded border border-term-border bg-term-panel text-term-dim hover:text-term-green hover:border-term-green transition-colors text-xs"
+                  className="hidden sm:flex items-center justify-center h-7 sm:h-8 px-2 rounded border border-term-border bg-term-panel text-term-dim hover:text-term-green hover:border-term-green transition-colors text-xs"
                   title="Keyboard Shortcuts Guide (⌘/)"
                 >
                   ⌘/
                 </button>
                 <button
                   onClick={() => setShowSettings(true)}
-                  className="flex items-center justify-center h-7 sm:h-8 w-7 sm:w-8 rounded border border-term-border bg-term-panel text-term-dim hover:text-term-green hover:border-term-dim transition-colors text-xs"
+                  className="hidden sm:flex items-center justify-center h-7 sm:h-8 w-7 sm:w-8 rounded border border-term-border bg-term-panel text-term-dim hover:text-term-green hover:border-term-dim transition-colors text-xs"
                   title="Settings & Rig Config (⌘,)"
                 >
                   <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24">
@@ -992,7 +1014,29 @@ export default function Home() {
               </div>
             </div>
           </header>
-        ) : null}
+        ) : (
+          /* Landing Top Minimal Bar for Mobile Navigation & Settings */
+          <div className="flex items-center justify-between px-3 py-2 border-b border-term-border/40 bg-term-panel/30 text-xs shrink-0 select-none">
+            <button
+              onClick={() => setSidebarOpen(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded border border-term-border bg-term-panel text-term-dim hover:text-term-green hover:border-term-green transition-colors text-xs"
+              title="Open Navigation Menu & Sessions (⌘B)"
+            >
+              <span>☰</span>
+              <span className="font-bold">Menu & Sessions ({chat.conversations.length})</span>
+            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => setShowSettings(true)}
+                className="flex items-center gap-1 px-2 py-1 rounded border border-term-border bg-term-panel text-term-dim hover:text-term-green transition-colors text-xs"
+                title="Settings & Rig Config (⌘,)"
+              >
+                <span>⚙</span>
+                <span className="hidden xs:inline">Settings</span>
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Two-Phased Main Content Area */}
         {viewMode === "landing" ? (
