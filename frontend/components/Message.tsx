@@ -77,14 +77,6 @@ export function Message({
 
   return (
     <div className="group py-2 font-mono text-sm sm:text-base leading-relaxed">
-      {tools && tools.length > 0 && (
-        <div className="mb-1.5 space-y-1">
-          {tools.map((t) => (
-            <ToolCall key={t.id} tool={t} />
-          ))}
-        </div>
-      )}
-
       {isEditing ? (
         <div className="my-1.5 rounded border border-term-green/60 bg-term-panel/80 p-2.5 space-y-2">
           <div className="flex items-center justify-between text-xs text-term-dim">
@@ -125,13 +117,13 @@ export function Message({
           </div>
         </div>
       ) : (
-        (content || streaming) && (
+        (content || streaming || (tools && tools.length > 0)) && (
           <div>
             <span className={`${promptColor} select-none font-bold`}>{promptLabel}</span>
             {role === "user" ? (
               <span className="whitespace-pre-wrap break-words">{content}</span>
             ) : (
-              <AssistantBody content={content} streaming={streaming} />
+              <AssistantBody content={content} streaming={streaming} tools={tools} />
             )}
           </div>
         )
@@ -189,38 +181,126 @@ export function Message({
   );
 }
 
-function splitThinking(content: string): {
-  reasoning: string | null;
-  answer: string;
-  thinking: boolean;
-} {
-  const closeIdx = content.indexOf("</think>");
-  if (closeIdx !== -1) {
-    const rawReasoning = content.slice(0, closeIdx).replace(/^<think>\s*/, "").trim();
-    const answer = content.slice(closeIdx + 8).trimStart();
-    return { reasoning: rawReasoning || null, answer, thinking: false };
+function parseMessageContent(content: string, propTools?: ToolEvent[]) {
+  let reasoning: string | null = null;
+  let answer = content;
+  let thinking = false;
+
+  // 1. Handle thinking tags: <think>, </think>, <thought>, </thought>, <reasoning>, </reasoning>, etc.
+  const closeThinkMatch = content.match(/<\/(?:think|thought|reasoning|thought_process)>|\[\/THINK\]/i);
+  if (closeThinkMatch && closeThinkMatch.index !== undefined) {
+    const closeIdx = closeThinkMatch.index;
+    const rawReasoning = content
+      .slice(0, closeIdx)
+      .replace(/^<(?:think|thought|reasoning|thought_process)>\s*|^\[THINK\]\s*/i, "")
+      .trim();
+    reasoning = rawReasoning || null;
+    answer = content.slice(closeIdx + closeThinkMatch[0].length).trimStart();
+    thinking = false;
+  } else if (/^<(?:think|thought|reasoning|thought_process)>|^\[THINK\]/i.test(content)) {
+    reasoning = content
+      .replace(/^<(?:think|thought|reasoning|thought_process)>\s*|^\[THINK\]\s*/i, "")
+      .trimStart();
+    answer = "";
+    thinking = true;
   }
-  if (content.startsWith("<think>")) {
-    const rawReasoning = content.slice(7).trimStart();
-    return { reasoning: rawReasoning, answer: "", thinking: true };
+
+  // 2. Extract inline <tool_call>...</tool_call> or <function=...> from answer
+  const inlineTools: ToolEvent[] = [];
+  const toolCallRegex = /<tool_call>([\s\S]*?)<\/tool_call>/gi;
+  let match;
+  let callCount = 0;
+
+  while ((match = toolCallRegex.exec(answer)) !== null) {
+    callCount++;
+    const inner = match[1].trim();
+
+    // Try parsing JSON
+    let parsedJson: any = null;
+    try {
+      parsedJson = JSON.parse(inner);
+    } catch {}
+
+    if (parsedJson && typeof parsedJson === "object") {
+      const name = parsedJson.name || parsedJson.function?.name || "terminal";
+      const args = parsedJson.arguments || parsedJson.parameters || parsedJson.function?.arguments || parsedJson;
+      inlineTools.push({
+        id: `inline_tool_${callCount}`,
+        name: String(name),
+        arguments: typeof args === "string" ? args : JSON.stringify(args),
+      });
+      continue;
+    }
+
+    // Try parsing XML <function=...> or <function name="...">
+    const fnMatch = inner.match(/<function(?:=|\s+name=[\"']?)([\w\-_]+)[\"']?\s*>([\s\S]*?)(?:<\/function>|$)/i);
+    if (fnMatch) {
+      const fnName = fnMatch[1].trim();
+      const fnBody = fnMatch[2].trim();
+      const paramMatches = [...fnBody.matchAll(/<parameter(?:=|\s+name=[\"']?)([\w\-_]+)[\"']?\s*>([\s\S]*?)<\/parameter>/gi)];
+      let cmd = "";
+      if (paramMatches.length > 0) {
+        cmd = paramMatches.map((m) => m[2].trim()).join("\n");
+      } else {
+        cmd = fnBody;
+      }
+      inlineTools.push({
+        id: `inline_tool_${callCount}`,
+        name: fnName,
+        arguments: cmd,
+      });
+      continue;
+    }
+
+    if (inner) {
+      inlineTools.push({
+        id: `inline_tool_${callCount}`,
+        name: "terminal",
+        arguments: inner,
+      });
+    }
   }
-  return { reasoning: null, answer: content, thinking: false };
+
+  // Clean raw <tool_call> tags from markdown display
+  const cleanAnswer = answer
+    .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "")
+    .replace(/<function(?:=|\s+name=[\"']?)([\w\-_]+)[\"']?\s*>[\s\S]*?<\/function>/gi, "")
+    .trim();
+
+  const allTools = propTools && propTools.length > 0 ? propTools : inlineTools;
+
+  return {
+    reasoning,
+    answer: cleanAnswer,
+    thinking,
+    allTools,
+  };
 }
 
 function AssistantBody({
   content,
   streaming,
+  tools,
 }: {
   content: string;
   streaming?: boolean;
+  tools?: ToolEvent[];
 }) {
-  const { reasoning, answer, thinking } = useMemo(
-    () => splitThinking(content),
-    [content],
+  const { reasoning, answer, thinking, allTools } = useMemo(
+    () => parseMessageContent(content, tools),
+    [content, tools],
   );
 
   return (
     <>
+      {allTools && allTools.length > 0 && (
+        <div className="my-1.5 space-y-1">
+          {allTools.map((t) => (
+            <ToolCall key={t.id} tool={t} />
+          ))}
+        </div>
+      )}
+
       {reasoning && (
         <details
           className="my-1 rounded border border-term-border bg-term-panel/40 px-2.5 py-1 text-xs text-term-dim"
@@ -241,30 +321,72 @@ function AssistantBody({
 
 function ToolCall({ tool }: { tool: ToolEvent }) {
   const [open, setOpen] = useState(false);
-  const isDone = tool.result !== undefined;
+  const [localRunning, setLocalRunning] = useState(false);
+  const [localResult, setLocalResult] = useState<string | null>(tool.result || null);
+
+  const isDone = Boolean(localResult || tool.result);
+  const displayResult = localResult || tool.result;
+
+  const handleRunInTerminal = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (typeof window !== "undefined") {
+      let cmd = tool.arguments || "";
+      try {
+        const parsed = JSON.parse(cmd);
+        if (typeof parsed === "object") {
+          cmd = parsed.command || parsed.cmd || parsed.code || cmd;
+        }
+      } catch {}
+
+      setLocalRunning(true);
+      window.dispatchEvent(
+        new CustomEvent("edgerunner:run-command", {
+          detail: { command: cmd },
+        })
+      );
+      setTimeout(() => {
+        setLocalRunning(false);
+        setLocalResult("Command sent to workspace terminal.");
+      }, 500);
+    }
+  };
 
   return (
-    <div className="rounded border border-term-border bg-term-panel/50 px-2 py-1 text-xs font-mono">
+    <div className="rounded border border-term-border bg-term-panel/50 px-2.5 py-1.5 text-xs font-mono">
       <div
-        className="flex cursor-pointer items-center justify-between gap-2 text-[11px]"
+        className="flex cursor-pointer items-center justify-between gap-2 text-xs"
         onClick={() => isDone && setOpen((o) => !o)}
       >
         <div className="flex items-center gap-1.5 truncate">
           <span className="text-term-dim">tool:</span>
           <span className="text-term-green font-semibold">{tool.name}</span>
           {tool.arguments && (
-            <span className="truncate text-term-dim text-[10px]">
+            <span className="truncate text-term-dim text-[11px] max-w-[200px] sm:max-w-md">
               ({tool.arguments})
             </span>
           )}
         </div>
-        <span className="text-[10px] text-term-dim">
-          {isDone ? (open ? "▾ hide" : "▸ result") : "running…"}
-        </span>
+        <div className="flex items-center gap-2 shrink-0">
+          {!isDone && (
+            <button
+              onClick={handleRunInTerminal}
+              disabled={localRunning}
+              className="flex items-center gap-1 rounded bg-term-green/20 border border-term-green/50 px-2 py-0.5 text-[10px] font-semibold text-term-green hover:bg-term-green/30 transition-colors"
+              title="Run this command in the active terminal"
+            >
+              <span>{localRunning ? "running…" : "▶ Run in Terminal"}</span>
+            </button>
+          )}
+          {isDone && (
+            <span className="text-[10px] text-term-dim">
+              {open ? "▾ hide" : "▸ result"}
+            </span>
+          )}
+        </div>
       </div>
-      {open && tool.result && (
-        <pre className="mt-1 max-h-48 overflow-y-auto rounded bg-term-bg/80 p-1.5 text-[10px] text-term-fg leading-tight">
-          {tool.result}
+      {open && displayResult && (
+        <pre className="mt-1.5 max-h-48 overflow-y-auto rounded bg-term-bg/80 p-2 text-xs text-term-fg leading-relaxed whitespace-pre-wrap break-words border border-term-border/40 font-mono">
+          {displayResult}
         </pre>
       )}
     </div>

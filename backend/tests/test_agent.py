@@ -221,3 +221,120 @@ async def test_agent_markdown_fallback(monkeypatch):
 
     result_ev = next(e for e in events if e.type == "tool_result")
     assert "144" in json.loads(result_ev.data)["result"]
+
+
+class _MockXmlToolCallTransport(httpx.AsyncBaseTransport):
+    """Simulates model emitting raw XML <tool_call><function=terminal><parameter=command>..."""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.calls += 1
+        if self.calls == 1:
+            xml_output = """I'll teach you C++ in a structured way! Let's start with a practical example in the terminal.
+
+<tool_call>
+<function=terminal>
+<parameter=command>
+cat > hello_test.cpp << 'EOF'
+#include <iostream>
+using namespace std;
+
+int main() {
+    cout << "Hello, C++ Testing!" << endl;
+    return 0;
+}
+EOF
+</parameter>
+</function>
+</tool_call>"""
+            body = _sse({"choices": [{"index": 0, "delta": {"content": xml_output}}]})
+        else:
+            body = _sse(
+                {"choices": [{"index": 0, "delta": {"content": "File hello_test.cpp created successfully."}, "finish_reason": "stop"}]}
+            )
+        return httpx.Response(
+            200, content=body.encode(), headers={"content-type": "text/event-stream"}
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_xml_tool_call_cpp(monkeypatch):
+    transport = _MockXmlToolCallTransport()
+    real_client = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        kwargs.pop("timeout", None)
+        return real_client(transport=transport)
+
+    monkeypatch.setattr(agent_mod.httpx, "AsyncClient", fake_client)
+
+    harness = AgentHarness()
+    req = ChatRequest(
+        model="m",
+        harness="agent",
+        messages=[{"role": "user", "content": "teach me C++"}],
+    )
+    events = [ev async for ev in harness.run(req)]
+    types = [e.type for e in events]
+
+    assert "tool_call" in types
+    assert "tool_result" in types
+    assert types[-1] == "done"
+    assert transport.calls == 2
+
+    # Verify the file was actually written to the workspace
+    cat_out = tools.execute("terminal", "cat hello_test.cpp")
+    assert "Hello, C++ Testing!" in cat_out
+
+    # Clean up test file
+    tools.execute("terminal", "rm -f hello_test.cpp")
+
+
+class _MockJsonXmlToolCallTransport(httpx.AsyncBaseTransport):
+    """Simulates model emitting <tool_call>{"name": "terminal", "arguments": {"command": "echo 'xml json'"}}</tool_call>"""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.calls += 1
+        if self.calls == 1:
+            raw = '<tool_call>\n{"name": "terminal", "arguments": {"command": "echo \'xml json tool call\'"}}\n</tool_call>'
+            body = _sse({"choices": [{"index": 0, "delta": {"content": raw}}]})
+        else:
+            body = _sse(
+                {"choices": [{"index": 0, "delta": {"content": "Done."}, "finish_reason": "stop"}]}
+            )
+        return httpx.Response(
+            200, content=body.encode(), headers={"content-type": "text/event-stream"}
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_json_xml_tool_call(monkeypatch):
+    transport = _MockJsonXmlToolCallTransport()
+    real_client = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        kwargs.pop("timeout", None)
+        return real_client(transport=transport)
+
+    monkeypatch.setattr(agent_mod.httpx, "AsyncClient", fake_client)
+
+    harness = AgentHarness()
+    req = ChatRequest(
+        model="m",
+        harness="agent",
+        messages=[{"role": "user", "content": "run test"}],
+    )
+    events = [ev async for ev in harness.run(req)]
+    types = [e.type for e in events]
+
+    assert "tool_call" in types
+    assert "tool_result" in types
+    assert types[-1] == "done"
+
+    result_ev = next(e for e in events if e.type == "tool_result")
+    assert "xml json tool call" in json.loads(result_ev.data)["result"]

@@ -35,26 +35,59 @@ def _cap(text: str) -> str:
     return text[:_OUTPUT_CAP] + "\n…(truncated)" if len(text) > _OUTPUT_CAP else text
 
 
+import ast
+import re
+
 def _extract_command(args: Any) -> str:
-    """Fuzzy extractor: pulls the command or code string out of any argument structure."""
+    """Fuzzy extractor: pulls the command or code string out of any argument structure,
+    including raw strings, JSON dicts, escaped JSON strings, or Python literal dicts."""
+    if isinstance(args, dict):
+        # Priority key search
+        for key in ("command", "cmd", "code", "script", "expression", "input", "text", "query", "run"):
+            val = args.get(key)
+            if val is not None and str(val).strip():
+                return str(val).strip()
+
+        # If dict has only 1 string value, use it
+        for val in args.values():
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+
+        return ""
+
     if isinstance(args, str):
-        return args.strip()
+        s = args.strip()
+        if not s:
+            return ""
 
-    if not isinstance(args, dict):
-        return str(args).strip()
+        # Check if the string is serialized JSON or a Python dict with command/cmd/code
+        if (s.startswith("{") and s.endswith("}")) or any(
+            k in s for k in ('"command":', "'command':", '"cmd":', "'cmd':", '"code":', "'code':")
+        ):
+            try:
+                p = json.loads(s, strict=False)
+                if isinstance(p, dict):
+                    return _extract_command(p)
+            except Exception:
+                pass
+            try:
+                p = ast.literal_eval(s)
+                if isinstance(p, dict):
+                    return _extract_command(p)
+            except Exception:
+                pass
+            # Regex fallback to extract command value from malformed JSON
+            m = re.search(
+                r'["\'](?:command|cmd|code|script|input)["\']\s*:\s*["\'](.*?)["\']\s*\}?$',
+                s,
+                re.DOTALL,
+            )
+            if m:
+                return m.group(1).strip()
 
-    # Priority key search
-    for key in ("command", "cmd", "code", "script", "expression", "input", "text", "query", "run"):
-        val = args.get(key)
-        if val is not None and str(val).strip():
-            return str(val).strip()
+        return s
 
-    # If dict has only 1 string value, use it
-    for val in args.values():
-        if isinstance(val, str) and val.strip():
-            return val.strip()
-
-    return ""
+    return str(args).strip()
 
 
 def run_command(cmd: str, timeout: int = CODE_TIMEOUT) -> tuple[str, int]:
@@ -183,8 +216,8 @@ def execute(name: str, arguments: str | dict) -> str:
 
     if isinstance(arguments, str):
         try:
-            parsed_args = json.loads(arguments) if arguments.strip() else {}
-        except json.JSONDecodeError:
+            parsed_args = json.loads(arguments, strict=False) if arguments.strip() else {}
+        except Exception:
             # If arguments is raw text / command instead of JSON
             parsed_args = arguments
     else:

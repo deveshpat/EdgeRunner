@@ -121,20 +121,14 @@ class AgentHarness(Harness):
                                 yield ev
                         continue
 
-                    # Path B: Fallback - check if non-reasoning model outputted an executable markdown code block
-                    # Only trigger fallback on earlier iterations if tool calls were omitted
-                    if iteration == 0 and not calls and turn_content:
-                        extracted_cmd = _extract_markdown_command(turn_content)
-                        if extracted_cmd:
-                            call = {
-                                "id": f"fallback_call_{iteration}",
-                                "name": "terminal",
-                                "arguments": json.dumps({"command": extracted_cmd}),
-                            }
-                            messages.append({"role": "assistant", "content": turn_content})
+                    # Path B: Model emitted text-based tool calls (XML <tool_call>, <function=...>, Action/Input, JSON, or markdown code blocks)
+                    text_calls = _extract_text_tool_calls(turn_content)
+                    if text_calls:
+                        messages.append({"role": "assistant", "content": turn_content})
+                        for call in text_calls:
                             async for ev in self._run_tool(call, messages):
                                 yield ev
-                            continue
+                        continue
 
                     # No tool calls this turn: answer is complete.
                     yield StreamEvent(type="done")
@@ -241,3 +235,145 @@ def _extract_markdown_command(text: str) -> str | None:
         escaped = code.replace("'", "'\"'\"'")
         return f"{py_exec} -c '{escaped}'"
     return code
+
+
+def _extract_text_tool_calls(text: str) -> list[dict]:
+    """Extract tool calls from free-form model text when structured SSE tool_calls are omitted.
+    Supports:
+    1. <tool_call> with <function=name><parameter=key>...</parameter></function>
+    2. <tool_call> with <function name="name"><parameter name="key">...</parameter></function>
+    3. <tool_call> with raw JSON {"name": "...", "arguments": {...}}
+    4. <function_call>...</function_call>
+    5. Standalone <function=...>...</function>
+    6. Action: ... / Action Input: ...
+    7. Markdown code blocks (```bash ... ``` or ```python ... ```)
+    """
+    calls: list[dict] = []
+
+    # 1. <tool_call> ... </tool_call> blocks
+    tool_call_re = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL | re.IGNORECASE)
+    for match in tool_call_re.finditer(text):
+        inner = match.group(1).strip()
+        call_id = f"text_call_{len(calls) + 1}"
+
+        # 1a. JSON inside <tool_call>
+        try:
+            parsed = json.loads(inner, strict=False)
+            if isinstance(parsed, dict):
+                name = parsed.get("name") or parsed.get("function", {}).get("name") or "terminal"
+                args = (
+                    parsed.get("arguments")
+                    or parsed.get("parameters")
+                    or parsed.get("function", {}).get("arguments")
+                    or parsed.get("function", {}).get("parameters")
+                    or parsed
+                )
+                calls.append(
+                    {
+                        "id": call_id,
+                        "name": str(name),
+                        "arguments": json.dumps(args) if isinstance(args, dict) else str(args),
+                    }
+                )
+                continue
+        except Exception:
+            pass
+
+        # 1b. XML <function=...> or <function name="..."> inside <tool_call>
+        fn_match = re.search(
+            r"<function(?:=|\s+name=[\"']?)([\w\-_]+)[\"']?\s*>(.*?)(?:</function>|$)",
+            inner,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if fn_match:
+            fn_name = fn_match.group(1).strip()
+            fn_body = fn_match.group(2).strip()
+
+            params: dict[str, str] = {}
+            for pm in re.finditer(
+                r"<parameter(?:=|\s+name=[\"']?)([\w\-_]+)[\"']?\s*>(.*?)</parameter>",
+                fn_body,
+                re.DOTALL | re.IGNORECASE,
+            ):
+                params[pm.group(1).strip()] = pm.group(2).strip()
+
+            if not params:
+                params["command"] = fn_body
+
+            calls.append(
+                {
+                    "id": call_id,
+                    "name": fn_name,
+                    "arguments": json.dumps(params),
+                }
+            )
+            continue
+
+        # 1c. Plain text / command directly inside <tool_call>
+        if inner:
+            calls.append(
+                {
+                    "id": call_id,
+                    "name": "terminal",
+                    "arguments": json.dumps({"command": inner}),
+                }
+            )
+
+    # 2. Standalone <function=...> or <function_call> outside <tool_call>
+    if not calls:
+        fn_matches = list(
+            re.finditer(
+                r"<function(?:=|\s+name=[\"']?)([\w\-_]+)[\"']?\s*>(.*?)</function>",
+                text,
+                re.DOTALL | re.IGNORECASE,
+            )
+        )
+        for fn_match in fn_matches:
+            fn_name = fn_match.group(1).strip()
+            fn_body = fn_match.group(2).strip()
+            params = {}
+            for pm in re.finditer(
+                r"<parameter(?:=|\s+name=[\"']?)([\w\-_]+)[\"']?\s*>(.*?)</parameter>",
+                fn_body,
+                re.DOTALL | re.IGNORECASE,
+            ):
+                params[pm.group(1).strip()] = pm.group(2).strip()
+            if not params:
+                params["command"] = fn_body
+            calls.append(
+                {
+                    "id": f"text_call_{len(calls) + 1}",
+                    "name": fn_name,
+                    "arguments": json.dumps(params),
+                }
+            )
+
+    # 3. Action: / Action Input: pattern
+    if not calls:
+        action_match = re.search(
+            r"Action:\s*([\w\-_]+)\s*\n+Action Input:\s*(.+?)(?:\n\s*Observation:|$)",
+            text,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if action_match:
+            calls.append(
+                {
+                    "id": f"action_call_{len(calls) + 1}",
+                    "name": action_match.group(1).strip(),
+                    "arguments": json.dumps({"command": action_match.group(2).strip()}),
+                }
+            )
+
+    # 4. Markdown code block fallback (```bash or ```python)
+    if not calls:
+        cmd = _extract_markdown_command(text)
+        if cmd:
+            calls.append(
+                {
+                    "id": f"markdown_call_{len(calls) + 1}",
+                    "name": "terminal",
+                    "arguments": json.dumps({"command": cmd}),
+                }
+            )
+
+    return calls
