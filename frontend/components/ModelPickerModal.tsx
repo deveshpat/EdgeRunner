@@ -477,9 +477,9 @@ export function ModelPickerModal({
         </div>
 
         {/* Modal Footer */}
-        <div className="flex items-center justify-between border-t border-term-border bg-term-panel/30 p-3 text-[10px] text-term-dim">
-          <span>
-            HARDWARE: {gpuActive ? "NVIDIA T4 (16GB VRAM) + 30GB RAM" : "CPU"} :: ENGINE: LLAMACPP AUTO-STREAM
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-term-border bg-term-panel/30 p-2.5 sm:p-3 text-[9px] sm:text-[10px] text-term-dim">
+          <span className="truncate max-w-[65vw] sm:max-w-none">
+            HARDWARE: {gpuActive ? "NVIDIA T4 (16GB)" : "CPU"} :: LLAMACPP
           </span>
           <button
             onClick={onClose}

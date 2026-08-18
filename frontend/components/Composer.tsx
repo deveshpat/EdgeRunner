@@ -38,13 +38,13 @@ export function Composer({
   }
 
   return (
-    <div className="relative flex flex-col rounded-lg border border-term-border bg-term-bg p-3.5 pb-4 mb-3.5 shadow-sm transition-all focus-within:border-term-green/70 focus-within:shadow-[0_0_14px_rgba(57,255,20,0.12)]">
-      <div className="flex items-start gap-2.5 pb-3 sm:pb-2">
-        <span className="select-none pt-0.5 text-term-green font-bold text-sm">$</span>
+    <div className="relative flex flex-col rounded-lg border border-term-border bg-term-bg p-3 sm:p-3.5 pb-4 mb-3.5 shadow-sm transition-all focus-within:border-term-green/70 focus-within:shadow-[0_0_14px_rgba(57,255,20,0.12)]">
+      <div className="flex items-start gap-2 sm:gap-2.5 pb-3 sm:pb-2">
+        <span className="select-none pt-0.5 text-term-green font-bold text-xs sm:text-sm">$</span>
         <textarea
           ref={ref}
           rows={1}
-          className="flex-1 resize-none bg-transparent text-term-fg placeholder:text-term-dim/60 focus:outline-none text-xs sm:text-sm font-mono leading-relaxed"
+          className="flex-1 resize-none bg-transparent text-term-fg placeholder:text-term-dim/60 focus:outline-none text-xs sm:text-sm font-mono leading-relaxed min-w-0"
           placeholder={
             placeholder || (disabled ? "processing…" : "Type a message…")
           }
@@ -57,7 +57,7 @@ export function Composer({
       </div>
 
       {bottomRight && (
-        <div className="absolute -bottom-3 right-4 flex items-center gap-1.5 bg-term-bg px-2 z-10 select-none">
+        <div className="absolute -bottom-3 right-2 sm:right-4 max-w-[calc(100%-1rem)] flex items-center gap-1 sm:gap-1.5 bg-term-bg px-1 sm:px-2 z-10 select-none overflow-hidden">
           {bottomRight}
         </div>
       )}

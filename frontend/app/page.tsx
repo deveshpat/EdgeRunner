@@ -591,7 +591,7 @@ export default function Home() {
   );
 
   return (
-    <main className="flex h-screen w-screen overflow-hidden bg-term-bg text-term-fg font-mono">
+    <main className="flex h-[100dvh] w-full max-w-full overflow-hidden bg-term-bg text-term-fg font-mono">
       {/* Session History Slide-out Drawer (available on Landing & Workspace) */}
       <Sidebar
         conversations={chat.conversations}
@@ -612,13 +612,13 @@ export default function Home() {
         onClose={() => setSidebarOpen(false)}
       />
 
-      <div className="flex h-screen w-full flex-1 flex-col transition-all overflow-hidden">
+      <div className="flex h-full w-full flex-1 flex-col transition-all overflow-hidden">
         {/* Full-Length Top Navbar */}
         {viewMode === "workspace" ? (
-          <header className="w-full border-b border-term-border bg-term-panel/60 px-4 py-2.5 text-xs select-none transition-all duration-300">
-            <div className="flex items-center justify-between gap-4 w-full">
+          <header className="w-full border-b border-term-border bg-term-panel/60 px-2.5 sm:px-4 py-2 sm:py-2.5 text-xs select-none transition-all duration-300">
+            <div className="flex items-center justify-between gap-2 sm:gap-4 w-full">
               {/* Left: Window Controls + History Trigger */}
-              <div className="flex items-center gap-3 min-w-[140px]">
+              <div className="flex items-center gap-2 sm:gap-3 shrink-0">
                 {/* Traffic Lights */}
                 <div
                   className="flex items-center gap-1.5"
@@ -661,14 +661,14 @@ export default function Home() {
                   setDockedSessionIds([]);
                   setViewMode("landing");
                 }}
-                className="flex-1 flex items-center justify-center cursor-pointer hover:opacity-90 transition-opacity"
+                className="flex-1 flex items-center justify-center cursor-pointer hover:opacity-90 transition-opacity min-w-0 px-1"
                 title="Return to Hero Landing (⌘K)"
               >
                 <Logo variant="navbar" />
               </div>
 
               {/* Right: Merged Power/Status Button + Settings + Shortcuts */}
-              <div className="flex items-center gap-2.5 justify-end min-w-[140px]">
+              <div className="flex items-center gap-1.5 sm:gap-2.5 justify-end shrink-0">
                 {/* Merged Single Status / Power Toggle Button */}
                 {backendOnline ? (
                   <button
@@ -737,67 +737,67 @@ export default function Home() {
         {/* Two-Phased Main Content Area */}
         {viewMode === "landing" ? (
           /* Phase 1: Hero Landing Page */
-          <div className="flex flex-1 flex-col items-center justify-center p-6 text-center select-none overflow-y-auto">
-            <div className="w-full max-w-2xl flex flex-col items-center space-y-6">
+          <div className="flex flex-1 flex-col items-center justify-start sm:justify-center px-3 py-3 sm:py-6 text-center select-none overflow-y-auto w-full">
+            <div className="w-full max-w-2xl flex flex-col items-center space-y-3.5 sm:space-y-6 my-auto py-2">
               {/* Centered Grand Glowing Original Logo */}
-              <Logo variant="hero" className="w-full py-4" />
+              <Logo variant="hero" className="w-full py-1 sm:py-3" />
 
               {/* Terminal Slash Command Menu */}
-              <div className="w-full max-w-md mx-auto space-y-2 py-2 text-left select-none">
+              <div className="w-full max-w-md mx-auto space-y-1.5 sm:space-y-2 py-1 text-left select-none">
                 <button
                   onClick={handleStartNewSession}
-                  className="group flex items-center justify-between w-full rounded border border-term-border/80 bg-term-panel/40 px-4 py-2.5 text-sm text-term-fg transition-all duration-200 hover:border-term-green hover:bg-term-green/[0.04] hover:text-term-green hover:shadow-[0_0_24px_rgba(57,255,20,0.32),inset_0_0_12px_rgba(57,255,20,0.05)]"
+                  className="group flex items-center justify-between w-full rounded border border-term-border/80 bg-term-panel/40 px-3 sm:px-4 py-2 sm:py-2.5 text-xs sm:text-sm text-term-fg transition-all duration-200 hover:border-term-green hover:bg-term-green/[0.04] hover:text-term-green hover:shadow-[0_0_24px_rgba(57,255,20,0.32),inset_0_0_12px_rgba(57,255,20,0.05)]"
                 >
-                  <div className="flex items-center gap-3">
-                    <span className="text-xs font-bold text-term-dim group-hover:text-term-green font-mono transition-colors">
+                  <div className="flex items-center gap-2.5 sm:gap-3">
+                    <span className="text-[10px] sm:text-xs font-bold text-term-dim group-hover:text-term-green font-mono transition-colors">
                       [ 01 ]
                     </span>
-                    <span className="font-semibold text-sm sm:text-base tracking-wide font-mono">
+                    <span className="font-semibold text-xs sm:text-sm md:text-base tracking-wide font-mono">
                       <span className="text-term-green font-bold">/</span>new
                     </span>
                   </div>
-                  <kbd className="rounded border border-term-border/60 bg-term-bg/90 px-2 py-0.5 text-[10px] text-term-dim group-hover:border-term-green/40 group-hover:text-term-green font-mono transition-colors">
+                  <kbd className="hidden xs:inline-block rounded border border-term-border/60 bg-term-bg/90 px-1.5 sm:px-2 py-0.5 text-[9px] sm:text-[10px] text-term-dim group-hover:border-term-green/40 group-hover:text-term-green font-mono transition-colors">
                     ⌘⇧N
                   </kbd>
                 </button>
 
                 <button
                   onClick={() => setSidebarOpen(true)}
-                  className="group flex items-center justify-between w-full rounded border border-term-border/80 bg-term-panel/40 px-4 py-2.5 text-sm text-term-fg transition-all duration-200 hover:border-term-green hover:bg-term-green/[0.04] hover:text-term-green hover:shadow-[0_0_24px_rgba(57,255,20,0.32),inset_0_0_12px_rgba(57,255,20,0.05)]"
+                  className="group flex items-center justify-between w-full rounded border border-term-border/80 bg-term-panel/40 px-3 sm:px-4 py-2 sm:py-2.5 text-xs sm:text-sm text-term-fg transition-all duration-200 hover:border-term-green hover:bg-term-green/[0.04] hover:text-term-green hover:shadow-[0_0_24px_rgba(57,255,20,0.32),inset_0_0_12px_rgba(57,255,20,0.05)]"
                 >
-                  <div className="flex items-center gap-3">
-                    <span className="text-xs font-bold text-term-dim group-hover:text-term-green font-mono transition-colors">
+                  <div className="flex items-center gap-2.5 sm:gap-3">
+                    <span className="text-[10px] sm:text-xs font-bold text-term-dim group-hover:text-term-green font-mono transition-colors">
                       [ 02 ]
                     </span>
-                    <span className="font-semibold text-sm sm:text-base tracking-wide font-mono">
+                    <span className="font-semibold text-xs sm:text-sm md:text-base tracking-wide font-mono">
                       <span className="text-term-green font-bold">/</span>resume
                     </span>
                   </div>
-                  <kbd className="rounded border border-term-border/60 bg-term-bg/90 px-2 py-0.5 text-[10px] text-term-dim group-hover:border-term-green/40 group-hover:text-term-green font-mono transition-colors">
+                  <kbd className="hidden xs:inline-block rounded border border-term-border/60 bg-term-bg/90 px-1.5 sm:px-2 py-0.5 text-[9px] sm:text-[10px] text-term-dim group-hover:border-term-green/40 group-hover:text-term-green font-mono transition-colors">
                     ⌘B
                   </kbd>
                 </button>
 
                 <button
                   onClick={() => setShowModelModal(true)}
-                  className="group flex items-center justify-between w-full rounded border border-term-border/80 bg-term-panel/40 px-4 py-2.5 text-sm text-term-fg transition-all duration-200 hover:border-term-green hover:bg-term-green/[0.04] hover:text-term-green hover:shadow-[0_0_24px_rgba(57,255,20,0.32),inset_0_0_12px_rgba(57,255,20,0.05)]"
+                  className="group flex items-center justify-between w-full rounded border border-term-border/80 bg-term-panel/40 px-3 sm:px-4 py-2 sm:py-2.5 text-xs sm:text-sm text-term-fg transition-all duration-200 hover:border-term-green hover:bg-term-green/[0.04] hover:text-term-green hover:shadow-[0_0_24px_rgba(57,255,20,0.32),inset_0_0_12px_rgba(57,255,20,0.05)]"
                 >
-                  <div className="flex items-center gap-3">
-                    <span className="text-xs font-bold text-term-dim group-hover:text-term-green font-mono transition-colors">
+                  <div className="flex items-center gap-2.5 sm:gap-3">
+                    <span className="text-[10px] sm:text-xs font-bold text-term-dim group-hover:text-term-green font-mono transition-colors">
                       [ 03 ]
                     </span>
-                    <span className="font-semibold text-sm sm:text-base tracking-wide font-mono">
+                    <span className="font-semibold text-xs sm:text-sm md:text-base tracking-wide font-mono">
                       <span className="text-term-green font-bold">/</span>model
                     </span>
                   </div>
-                  <kbd className="rounded border border-term-border/60 bg-term-bg/90 px-2 py-0.5 text-[10px] text-term-dim group-hover:border-term-green/40 group-hover:text-term-green font-mono transition-colors">
+                  <kbd className="hidden xs:inline-block rounded border border-term-border/60 bg-term-bg/90 px-1.5 sm:px-2 py-0.5 text-[9px] sm:text-[10px] text-term-dim group-hover:border-term-green/40 group-hover:text-term-green font-mono transition-colors">
                     ⌘M
                   </kbd>
                 </button>
               </div>
 
               {/* Direct Launch Sandbox Composer with Outline-Breaking Pickers */}
-              <div className="w-full pt-4 pb-3 text-left">
+              <div className="w-full pt-2 sm:pt-4 pb-2 sm:pb-3 text-left">
                 <Composer
                   value={input}
                   onChange={setInput}
@@ -809,7 +809,7 @@ export default function Home() {
               </div>
 
               {/* Shortcuts Matrix Footer */}
-              <div className="flex flex-wrap items-center justify-center gap-2 pt-1 pb-4 text-[11px] text-term-dim">
+              <div className="flex flex-wrap items-center justify-center gap-1.5 sm:gap-2 pt-1 pb-4 text-[10px] sm:text-[11px] text-term-dim">
                 <span className="rounded border border-term-border/70 bg-term-panel/30 px-2 py-0.5">
                   ⌘K Home
                 </span>
@@ -830,7 +830,7 @@ export default function Home() {
           </div>
         ) : (
           /* Phase 2: Active Workspace Mode with Multi-Session Docking Grid */
-          <div className="flex flex-1 flex-col overflow-hidden max-w-7xl mx-auto w-full px-3 sm:px-6 pt-2 pb-4">
+          <div className="flex flex-1 flex-col overflow-hidden max-w-7xl mx-auto w-full px-2 sm:px-6 pt-1 sm:pt-2 pb-2 sm:pb-4">
             {/* Transcript Area / Multi-Session Dock Grid / Drag & Drop Target */}
             <div
               onDragOver={(e) => {

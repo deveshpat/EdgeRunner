@@ -55,7 +55,7 @@ export function Message({
         </div>
       )}
       {!streaming && (content || tools?.length) && (
-        <div className="mt-1 flex items-center gap-3 text-[10px] text-term-dim opacity-0 transition-opacity group-hover:opacity-100">
+        <div className="mt-1 flex flex-wrap items-center gap-2 sm:gap-3 text-[10px] text-term-dim opacity-70 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
           <CopyButton text={content} />
           {onDelete && (
             <button className="hover:text-term-red" onClick={onDelete}>

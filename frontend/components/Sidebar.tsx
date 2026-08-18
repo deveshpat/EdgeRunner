@@ -83,7 +83,7 @@ export function Sidebar({
 
       {/* Slide-out Terminal Drawer */}
       <aside
-        className={`fixed inset-y-0 left-0 z-50 flex w-72 sm:w-80 flex-col
+        className={`fixed inset-y-0 left-0 z-50 flex w-[85vw] max-w-xs sm:w-80 flex-col
                     border-r border-term-border bg-term-bg shadow-2xl font-mono text-xs
                     transform transition-transform duration-200 ease-out
                     ${open ? "translate-x-0" : "-translate-x-full"}`}
