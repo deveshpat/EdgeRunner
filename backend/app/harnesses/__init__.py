@@ -22,6 +22,8 @@ echo_harness = EchoHarness()
 _REGISTRY["chat"] = chat_harness
 _REGISTRY["llamacpp"] = chat_harness
 _REGISTRY["agent"] = agent_harness
+_REGISTRY["deepseek"] = agent_harness
+_REGISTRY["dsh"] = agent_harness
 _REGISTRY["terminal"] = terminal_harness
 _REGISTRY["echo"] = echo_harness
 
@@ -35,8 +37,8 @@ def get(harness_id: str) -> Harness | None:
 
 
 def all_harnesses() -> list[Harness]:
-    """Return the 3 visible public harnesses: Chat, Agent, and Terminal."""
-    return [chat_harness, agent_harness, terminal_harness]
+    """Return the visible public harnesses: Agent, Chat, Terminal."""
+    return [agent_harness, chat_harness, terminal_harness]
 
 
 __all__ = ["Harness", "StreamEvent", "register", "get", "all_harnesses"]

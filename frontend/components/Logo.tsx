@@ -27,7 +27,7 @@ export function Logo({ variant = "hero", className = "" }: LogoProps) {
         <svg
           viewBox="0 0 600 260"
           preserveAspectRatio="xMidYMid meet"
-          className="h-8 xs:h-9 sm:h-10 max-w-[200px] xs:max-w-[250px] sm:max-w-[320px] md:max-w-[360px] w-auto text-term-green fill-current drop-shadow-[0_0_14px_rgba(57,255,20,0.4)] transition-all hover:opacity-90 shrink-0"
+          className="h-9 xs:h-10 sm:h-11 max-w-[240px] xs:max-w-[290px] sm:max-w-[380px] md:max-w-[440px] w-auto text-term-green fill-current drop-shadow-[0_0_18px_rgba(57,255,20,0.45)] transition-all hover:opacity-90 shrink-0"
           aria-label="EdgeRunner"
         >
           <text

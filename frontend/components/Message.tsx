@@ -15,6 +15,7 @@ interface MessageProps {
   harness?: string;
   onDelete?: () => void;
   onEdit?: (newContent: string) => void;
+  onFork?: () => void;
 }
 
 export function Message({
@@ -26,9 +27,11 @@ export function Message({
   harness = "chat",
   onDelete,
   onEdit,
+  onFork,
 }: MessageProps) {
   const isTerminal = harness === "terminal";
   const isAgent = harness === "agent";
+  const isDeepSeek = harness === "deepseek" || harness === "dsh";
 
   const [isEditing, setIsEditing] = useState(false);
   const [editDraft, setEditDraft] = useState(content);
@@ -54,7 +57,9 @@ export function Message({
           ? "bash > "
           : isAgent
             ? "agent > "
-            : "model > "
+            : isDeepSeek
+              ? "deepseek > "
+              : "model > "
         : "# system ";
 
   const promptColor =
@@ -63,7 +68,11 @@ export function Message({
       : role === "assistant"
         ? isTerminal
           ? "text-term-dim"
-          : "text-term-amber"
+          : isAgent
+            ? "text-term-amber"
+            : isDeepSeek
+              ? "text-cyan-400"
+              : "text-term-dim"
         : "text-term-dim";
 
   function handleSaveEdit() {
@@ -143,6 +152,15 @@ export function Message({
               edit
             </button>
           )}
+          {onFork && (
+            <button
+              className="hover:text-cyan-400 transition-colors"
+              onClick={onFork}
+              title="Fork session from this checkpoint"
+            >
+              ⑂ fork
+            </button>
+          )}
           {previewMatch && (
             <button
               onClick={() => {
@@ -181,100 +199,134 @@ export function Message({
   );
 }
 
-function parseMessageContent(content: string, propTools?: ToolEvent[]) {
-  let reasoning: string | null = null;
-  let answer = content;
-  let thinking = false;
+export type MessageSegment =
+  | { type: "think"; content: string; open: boolean }
+  | { type: "tool"; tool: ToolEvent }
+  | { type: "markdown"; content: string };
 
-  // 1. Handle thinking tags: <think>, </think>, <thought>, </thought>, <reasoning>, </reasoning>, etc.
-  const closeThinkMatch = content.match(/<\/(?:think|thought|reasoning|thought_process)>|\[\/THINK\]/i);
-  if (closeThinkMatch && closeThinkMatch.index !== undefined) {
-    const closeIdx = closeThinkMatch.index;
-    const rawReasoning = content
-      .slice(0, closeIdx)
-      .replace(/^<(?:think|thought|reasoning|thought_process)>\s*|^\[THINK\]\s*/i, "")
-      .trim();
-    reasoning = rawReasoning || null;
-    answer = content.slice(closeIdx + closeThinkMatch[0].length).trimStart();
-    thinking = false;
-  } else if (/^<(?:think|thought|reasoning|thought_process)>|^\[THINK\]/i.test(content)) {
-    reasoning = content
-      .replace(/^<(?:think|thought|reasoning|thought_process)>\s*|^\[THINK\]\s*/i, "")
-      .trimStart();
-    answer = "";
-    thinking = true;
-  }
+function parseChronologicalSegments(
+  content: string,
+  propTools?: ToolEvent[],
+): MessageSegment[] {
+  const segments: MessageSegment[] = [];
+  if (!content && (!propTools || propTools.length === 0)) return segments;
 
-  // 2. Extract inline <tool_call>...</tool_call> or <function=...> from answer
-  const inlineTools: ToolEvent[] = [];
-  const toolCallRegex = /<tool_call>([\s\S]*?)<\/tool_call>/gi;
-  let match;
-  let callCount = 0;
+  let toolIdx = 0;
+  const toolsPool = propTools ? [...propTools] : [];
+  let remaining = content || "";
 
-  while ((match = toolCallRegex.exec(answer)) !== null) {
-    callCount++;
-    const inner = match[1].trim();
+  while (remaining.length > 0) {
+    const openThinkMatch = remaining.match(/<(?:think|thought|reasoning|thought_process)>|\[THINK\]/i);
+    const closeThinkMatch = remaining.match(/<\/(?:think|thought|reasoning|thought_process)>|\[\/THINK\]/i);
+    const toolCallMatch = remaining.match(/<tool_call>([\s\S]*?)<\/tool_call>/i);
+    const fnCallMatch = remaining.match(/<function(?:=|\s+name=[\"']?)([\w\-_]+)[\"']?\s*>([\s\S]*?)<\/function>/i);
 
-    // Try parsing JSON
-    let parsedJson: any = null;
-    try {
-      parsedJson = JSON.parse(inner);
-    } catch {}
+    const matches = [
+      openThinkMatch && openThinkMatch.index !== undefined ? { type: "open_think", idx: openThinkMatch.index, match: openThinkMatch } : null,
+      closeThinkMatch && closeThinkMatch.index !== undefined ? { type: "close_think", idx: closeThinkMatch.index, match: closeThinkMatch } : null,
+      toolCallMatch && toolCallMatch.index !== undefined ? { type: "tool_call", idx: toolCallMatch.index, match: toolCallMatch } : null,
+      fnCallMatch && fnCallMatch.index !== undefined ? { type: "fn_call", idx: fnCallMatch.index, match: fnCallMatch } : null,
+    ].filter(Boolean).sort((a, b) => a!.idx - b!.idx);
 
-    if (parsedJson && typeof parsedJson === "object") {
-      const name = parsedJson.name || parsedJson.function?.name || "terminal";
-      const args = parsedJson.arguments || parsedJson.parameters || parsedJson.function?.arguments || parsedJson;
-      inlineTools.push({
-        id: `inline_tool_${callCount}`,
-        name: String(name),
-        arguments: typeof args === "string" ? args : JSON.stringify(args),
-      });
-      continue;
+    if (matches.length === 0) {
+      const clean = remaining.trim();
+      if (clean) segments.push({ type: "markdown", content: clean });
+      break;
     }
 
-    // Try parsing XML <function=...> or <function name="...">
-    const fnMatch = inner.match(/<function(?:=|\s+name=[\"']?)([\w\-_]+)[\"']?\s*>([\s\S]*?)(?:<\/function>|$)/i);
-    if (fnMatch) {
-      const fnName = fnMatch[1].trim();
-      const fnBody = fnMatch[2].trim();
-      const paramMatches = [...fnBody.matchAll(/<parameter(?:=|\s+name=[\"']?)([\w\-_]+)[\"']?\s*>([\s\S]*?)<\/parameter>/gi)];
-      let cmd = "";
-      if (paramMatches.length > 0) {
-        cmd = paramMatches.map((m) => m[2].trim()).join("\n");
+    const first = matches[0]!;
+    const prefix = remaining.slice(0, first.idx);
+
+    if (first.type === "open_think") {
+      if (prefix.trim()) segments.push({ type: "markdown", content: prefix.trim() });
+      const afterOpen = remaining.slice(first.idx + first.match[0].length);
+      const closeMatch = afterOpen.match(/<\/(?:think|thought|reasoning|thought_process)>|\[\/THINK\]/i);
+      if (closeMatch && closeMatch.index !== undefined) {
+        const thoughtContent = afterOpen.slice(0, closeMatch.index).trim();
+        if (thoughtContent) {
+          segments.push({ type: "think", content: thoughtContent, open: false });
+        }
+        remaining = afterOpen.slice(closeMatch.index + closeMatch[0].length);
       } else {
-        cmd = fnBody;
+        const thoughtContent = afterOpen.trim();
+        if (thoughtContent) {
+          segments.push({ type: "think", content: thoughtContent, open: true });
+        }
+        remaining = "";
       }
-      inlineTools.push({
-        id: `inline_tool_${callCount}`,
-        name: fnName,
-        arguments: cmd,
-      });
-      continue;
-    }
+    } else if (first.type === "close_think") {
+      const thoughtContent = prefix.replace(/^<(?:think|thought|reasoning|thought_process)>\s*|^\[THINK\]\s*/i, "").trim();
+      if (thoughtContent) {
+        segments.push({ type: "think", content: thoughtContent, open: false });
+      }
+      remaining = remaining.slice(first.idx + first.match[0].length);
+    } else if (first.type === "tool_call" || first.type === "fn_call") {
+      if (prefix.trim()) segments.push({ type: "markdown", content: prefix.trim() });
 
-    if (inner) {
-      inlineTools.push({
-        id: `inline_tool_${callCount}`,
-        name: "terminal",
-        arguments: inner,
+      let toolName = "terminal";
+      let toolCmd = "";
+
+      if (first.type === "tool_call") {
+        const inner = first.match[1].trim();
+        try {
+          const parsed = JSON.parse(inner);
+          if (parsed && typeof parsed === "object") {
+            toolName = parsed.name || parsed.function?.name || "terminal";
+            const args = parsed.arguments || parsed.parameters || parsed.function?.arguments || parsed;
+            toolCmd = typeof args === "string" ? args : JSON.stringify(args);
+          }
+        } catch {}
+
+        if (!toolCmd) {
+          const innerFn = inner.match(/<function(?:=|\s+name=[\"']?)([\w\-_]+)[\"']?\s*>([\s\S]*?)(?:<\/function>|$)/i);
+          if (innerFn) {
+            toolName = innerFn[1].trim();
+            const paramMatches = [...innerFn[2].matchAll(/<parameter(?:=|\s+name=[\"']?)([\w\-_]+)[\"']?\s*>([\s\S]*?)<\/parameter>/gi)];
+            toolCmd = paramMatches.length > 0 ? paramMatches.map((m) => m[2].trim()).join("\n") : innerFn[2].trim();
+          } else {
+            toolCmd = inner;
+          }
+        }
+      } else if (first.type === "fn_call") {
+        toolName = first.match[1].trim();
+        const paramMatches = [...first.match[2].matchAll(/<parameter(?:=|\s+name=[\"']?)([\w\-_]+)[\"']?\s*>([\s\S]*?)<\/parameter>/gi)];
+        toolCmd = paramMatches.length > 0 ? paramMatches.map((m) => m[2].trim()).join("\n") : first.match[2].trim();
+      }
+
+      let matchedToolIndex = toolsPool.findIndex((t) => {
+        if (t.arguments && toolCmd) {
+          const normA = t.arguments.replace(/\s+/g, " ").trim();
+          const normB = toolCmd.replace(/\s+/g, " ").trim();
+          if (normA === normB || normA.includes(normB) || normB.includes(normA)) return true;
+        }
+        return t.name === toolName;
       });
+
+      let matchedTool: ToolEvent | null = null;
+      if (matchedToolIndex !== -1) {
+        matchedTool = toolsPool.splice(matchedToolIndex, 1)[0];
+      } else if (toolsPool.length > 0) {
+        matchedTool = toolsPool.shift() || null;
+      }
+
+      const toolObj: ToolEvent = matchedTool || {
+        id: `inline_call_${++toolIdx}`,
+        name: toolName,
+        arguments: toolCmd,
+      };
+
+      segments.push({ type: "tool", tool: toolObj });
+      remaining = remaining.slice(first.idx + first.match[0].length);
     }
   }
 
-  // Clean raw <tool_call> tags from markdown display
-  const cleanAnswer = answer
-    .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "")
-    .replace(/<function(?:=|\s+name=[\"']?)([\w\-_]+)[\"']?\s*>[\s\S]*?<\/function>/gi, "")
-    .trim();
+  // Any remaining unassigned tools
+  while (toolsPool.length > 0) {
+    const t = toolsPool.shift()!;
+    segments.push({ type: "tool", tool: t });
+  }
 
-  const allTools = propTools && propTools.length > 0 ? propTools : inlineTools;
-
-  return {
-    reasoning,
-    answer: cleanAnswer,
-    thinking,
-    allTools,
-  };
+  return segments;
 }
 
 function AssistantBody({
@@ -286,36 +338,42 @@ function AssistantBody({
   streaming?: boolean;
   tools?: ToolEvent[];
 }) {
-  const { reasoning, answer, thinking, allTools } = useMemo(
-    () => parseMessageContent(content, tools),
+  const segments = useMemo(
+    () => parseChronologicalSegments(content, tools),
     [content, tools],
   );
 
-  return (
-    <>
-      {allTools && allTools.length > 0 && (
-        <div className="my-1.5 space-y-1">
-          {allTools.map((t) => (
-            <ToolCall key={t.id} tool={t} />
-          ))}
-        </div>
-      )}
+  if (segments.length === 0) {
+    return <Markdown content={content} />;
+  }
 
-      {reasoning && (
-        <details
-          className="my-1 rounded border border-term-border bg-term-panel/40 px-2.5 py-1 text-xs text-term-dim"
-          open={thinking}
-        >
-          <summary className="cursor-pointer select-none text-[10px] uppercase tracking-wider text-term-amber">
-            {thinking ? "⚡ thinking…" : "thought process"}
-          </summary>
-          <div className="mt-1 whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-term-dim border-l border-term-amber/30 pl-2">
-            {reasoning}
-          </div>
-        </details>
-      )}
-      <Markdown content={answer} />
-    </>
+  return (
+    <div className="space-y-2">
+      {segments.map((seg, idx) => {
+        if (seg.type === "think") {
+          return (
+            <details
+              key={`think_${idx}`}
+              className="my-2 rounded-md border border-term-border bg-term-panel/80 px-3 py-1.5 text-xs text-term-dim shadow-sm"
+              open={seg.open}
+            >
+              <summary className="cursor-pointer select-none font-semibold text-[11px] uppercase tracking-wider text-term-amber hover:text-term-fg transition-colors">
+                {seg.open ? "⚡ Thinking Process…" : "💡 Thought Process"}
+              </summary>
+              <div className="mt-2 whitespace-pre-wrap font-mono text-[11px] sm:text-xs leading-relaxed text-term-fg border-l-2 border-term-amber/50 pl-2.5">
+                {seg.content}
+              </div>
+            </details>
+          );
+        }
+
+        if (seg.type === "tool") {
+          return <ToolCall key={seg.tool.id || `tool_${idx}`} tool={seg.tool} />;
+        }
+
+        return <Markdown key={`md_${idx}`} content={seg.content} />;
+      })}
+    </div>
   );
 }
 
@@ -327,29 +385,63 @@ function ToolCall({ tool }: { tool: ToolEvent }) {
   const isDone = Boolean(localResult || tool.result);
   const displayResult = localResult || tool.result;
 
-  const handleRunInTerminal = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (typeof window !== "undefined") {
-      let cmd = tool.arguments || "";
-      try {
-        const parsed = JSON.parse(cmd);
-        if (typeof parsed === "object") {
-          cmd = parsed.command || parsed.cmd || parsed.code || cmd;
-        }
-      } catch {}
+  const handleRunInTerminal = async (e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    let cmd = tool.arguments || "";
+    try {
+      const parsed = JSON.parse(cmd);
+      if (typeof parsed === "object") {
+        cmd = parsed.command || parsed.cmd || parsed.code || cmd;
+      }
+    } catch {}
 
-      setLocalRunning(true);
-      window.dispatchEvent(
-        new CustomEvent("edgerunner:run-command", {
-          detail: { command: cmd },
-        })
-      );
-      setTimeout(() => {
-        setLocalRunning(false);
-        setLocalResult("Command sent to workspace terminal.");
-      }, 500);
+    if (!cmd.trim()) return;
+
+    setLocalRunning(true);
+    try {
+      // 1. Try executing via backend API if available
+      const backendUrl = typeof window !== "undefined" ? localStorage.getItem("edgerunner.backendUrl") : null;
+      let executed = false;
+      let outputText = "";
+
+      if (backendUrl) {
+        try {
+          const res = await fetch(`${backendUrl.replace(/\/+$/, "")}/api/terminal/exec`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ command: cmd }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            outputText = data.output ? `${data.output}\n● exit ${data.exit_code}` : `● exit ${data.exit_code}`;
+            executed = true;
+          }
+        } catch {}
+      }
+
+      // 2. Fallback to in-browser WebAssembly shell execution
+      if (!executed) {
+        const { wasmShell } = await import("@/lib/wasmShell");
+        const res = await wasmShell.execute(cmd);
+        outputText = res.output ? `${res.output}\n● exit ${res.exitCode}` : `● exit ${res.exitCode}`;
+      }
+
+      setLocalResult(outputText);
+      setOpen(true);
+    } catch (err: unknown) {
+      setLocalResult(`error: ${err instanceof Error ? err.message : String(err)}`);
+      setOpen(true);
+    } finally {
+      setLocalRunning(false);
     }
   };
+
+  const isFailed = Boolean(
+    displayResult &&
+      ((displayResult.includes("exit code") && !displayResult.includes("exit code 0") && !displayResult.includes("● exit 0")) ||
+        displayResult.startsWith("error:") ||
+        displayResult.includes("[stderr]"))
+  );
 
   return (
     <div className="rounded border border-term-border bg-term-panel/50 px-2.5 py-1.5 text-xs font-mono">
@@ -368,19 +460,30 @@ function ToolCall({ tool }: { tool: ToolEvent }) {
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {!isDone && (
-            <button
-              onClick={handleRunInTerminal}
-              disabled={localRunning}
-              className="flex items-center gap-1 rounded bg-term-green/20 border border-term-green/50 px-2 py-0.5 text-[10px] font-semibold text-term-green hover:bg-term-green/30 transition-colors"
-              title="Run this command in the active terminal"
-            >
-              <span>{localRunning ? "running…" : "▶ Run in Terminal"}</span>
-            </button>
+            <span className="flex items-center gap-1.5 text-[10px] text-term-green animate-pulse font-medium">
+              <span className="inline-block h-1.5 w-1.5 rounded-full bg-term-green"></span>
+              <span>{localRunning ? "running…" : "executing…"}</span>
+            </span>
           )}
           {isDone && (
-            <span className="text-[10px] text-term-dim">
-              {open ? "▾ hide" : "▸ result"}
-            </span>
+            <div className="flex items-center gap-1.5">
+              {isFailed && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleRunInTerminal();
+                  }}
+                  disabled={localRunning}
+                  className="flex items-center gap-1 rounded bg-term-red/10 border border-term-red/40 px-1.5 py-0.5 text-[10px] font-semibold text-term-red hover:bg-term-red/20 transition-colors"
+                  title="Execution failed. Click to re-run in active terminal"
+                >
+                  <span>{localRunning ? "retrying…" : "↺ Retry in Terminal"}</span>
+                </button>
+              )}
+              <span className="text-[10px] text-term-dim">
+                {open ? "▾ hide" : "▸ result"}
+              </span>
+            </div>
           )}
         </div>
       </div>

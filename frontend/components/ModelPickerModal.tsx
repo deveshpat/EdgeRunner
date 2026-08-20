@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 
 import { LAUNCH_MODELS, type LaunchModel } from "@/lib/models";
 import type { UseModelManager } from "@/lib/useModelManager";
+import type { UseKaggle } from "@/lib/useKaggle";
+import type { UseBackend } from "@/lib/useBackend";
 
 interface ModelPickerModalProps {
   isOpen: boolean;
@@ -19,6 +21,8 @@ interface ModelPickerModalProps {
   modelManager: UseModelManager;
   hfToken?: string | null;
   gpuActive?: boolean;
+  kaggle?: UseKaggle;
+  backend?: UseBackend;
 }
 
 interface HfModelSummary {
@@ -48,6 +52,8 @@ export function ModelPickerModal({
   modelManager,
   hfToken,
   gpuActive,
+  kaggle,
+  backend,
 }: ModelPickerModalProps) {
   const [tab, setTab] = useState<"curated" | "hf">("curated");
 
@@ -262,6 +268,90 @@ export function ModelPickerModal({
             ✕
           </button>
         </div>
+
+        {/* Integrated Compute Rig & Cloud Acceleration Control Banner */}
+        {kaggle && (
+          <div className="border-b border-term-border bg-term-panel/50 p-3 sm:px-4 text-xs select-none">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2.5">
+                <span
+                  className={`h-2.5 w-2.5 rounded-full ${
+                    backend?.isLocal
+                      ? "bg-term-green animate-pulse"
+                      : kaggle.state === "online"
+                        ? "bg-term-green animate-pulse"
+                        : "bg-term-amber"
+                  }`}
+                />
+                <div>
+                  <span className="font-bold text-[11px] text-term-fg">
+                    {backend?.isLocal
+                      ? "LOCAL BACKEND (127.0.0.1:8000)"
+                      : kaggle.state === "online"
+                        ? `KAGGLE CLOUD RIG (${kaggle.accelerator.toUpperCase()})`
+                        : "CLOUD COMPUTE RIG"}
+                  </span>
+                  <span className="text-[10px] text-term-dim block">
+                    {backend?.isLocal
+                      ? "● Connected to local Python instance"
+                      : kaggle.state === "online"
+                        ? "● Connected to Kaggle GPU worker"
+                        : "○ Offline (30h/wk free T4 GPU available)"}
+                  </span>
+                </div>
+              </div>
+
+              {/* Accelerator Toggle & Control Button */}
+              <div className="flex items-center gap-2 ml-auto">
+                <div className="flex rounded border border-term-border bg-term-bg p-0.5 text-[10px]">
+                  <button
+                    onClick={() => kaggle.setAccelerator("gpu")}
+                    className={`px-2 py-0.5 rounded font-semibold transition-colors ${
+                      kaggle.accelerator === "gpu"
+                        ? "bg-term-green/20 text-term-green"
+                        : "text-term-dim hover:text-term-fg"
+                    }`}
+                  >
+                    ⚡ Nvidia T4
+                  </button>
+                  <button
+                    onClick={() => kaggle.setAccelerator("cpu")}
+                    className={`px-2 py-0.5 rounded font-semibold transition-colors ${
+                      kaggle.accelerator === "cpu"
+                        ? "bg-term-green/20 text-term-green"
+                        : "text-term-dim hover:text-term-fg"
+                    }`}
+                  >
+                    🖥 CPU
+                  </button>
+                </div>
+
+                {kaggle.state === "online" ? (
+                  <button
+                    onClick={kaggle.stop}
+                    className="rounded border border-term-red/60 bg-term-red/10 px-2.5 py-1 text-[10px] font-bold text-term-red hover:bg-term-red/20 transition-colors"
+                  >
+                    ■ Stop Rig
+                  </button>
+                ) : kaggle.busy ||
+                  kaggle.state === "packing" ||
+                  kaggle.state === "pushing" ||
+                  kaggle.state === "provisioning" ? (
+                  <span className="text-term-amber text-[10px] font-bold animate-pulse px-2">
+                    ⚡ {kaggle.state.toUpperCase()}…
+                  </span>
+                ) : (
+                  <button
+                    onClick={kaggle.start}
+                    className="rounded border border-term-green/60 bg-term-green/15 px-2.5 py-1 text-[10px] font-bold text-term-green hover:bg-term-green/25 transition-colors shadow-sm"
+                  >
+                    🚀 Launch Rig
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Tabs */}
         <div className="flex border-b border-term-border bg-term-panel/40 px-4 pt-2 text-xs">

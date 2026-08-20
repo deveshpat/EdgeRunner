@@ -16,10 +16,10 @@ const SHORTCUT_GROUPS: ShortcutCategory[] = [
   {
     category: "Modes & Navigation",
     items: [
-      { mac: ["⌥ Option", "1"], win: ["Alt", "1"], description: "Mode 1: Neural Chat (/chat or ⌘1 / Ctrl+1)" },
-      { mac: ["⌥ Option", "2"], win: ["Alt", "2"], description: "Mode 2: VS Code Workspace (/workspace or ⌘E / Ctrl+E)" },
-      { mac: ["⌥ Option", "3"], win: ["Alt", "3"], description: "Mode 3: Interactive Terminal (/terminal or ⌘J / Ctrl+J)" },
-      { mac: ["⌥ Option", "4"], win: ["Alt", "4"], description: "Mode 4: ReAct Agent (/agent or ⌘4 / Ctrl+4)" },
+      { mac: ["⌥ Option", "1"], win: ["Alt", "1"], description: "Mode [ 01 ]: Neural Chat (/chat or ⌘1 / Ctrl+1)" },
+      { mac: ["⌥ Option", "2"], win: ["Alt", "2"], description: "Mode [ 02 ]: Autonomous Agent (/agent or ⌘2 / Ctrl+2)" },
+      { mac: ["⌥ Option", "3"], win: ["Alt", "3"], description: "Mode [ 03 ]: Interactive Terminal (/terminal or ⌘3 / Ctrl+3 or ⌘J)" },
+      { mac: ["⌥ Option", "4"], win: ["Alt", "4"], description: "Mode [ 04 ]: VS Code Workspace (/workspace or ⌘4 / Ctrl+4 or ⌘E)" },
       { mac: ["⌘", "K"], win: ["Ctrl", "K"], description: "Home: Command Center / Landing" },
       { mac: ["⌥ Option", "N"], win: ["Alt", "N"], description: "New Session" },
       { mac: ["⌘", "B"], win: ["Ctrl", "B"], description: "Toggle Sessions Sidebar (or ⌥B / Alt+B)" },
@@ -42,6 +42,18 @@ const SHORTCUT_GROUPS: ShortcutCategory[] = [
       { mac: ["⌘", "S"], win: ["Ctrl", "S"], description: "Save Active File in Monaco Editor" },
       { mac: ["⌘", "Enter"], win: ["Ctrl", "Enter"], description: "Run Script / Commit Changes in Git" },
       { mac: ["Ctrl", "L"], win: ["Ctrl", "L"], description: "Clear Active Screen / Terminal Buffer" },
+    ],
+  },
+  {
+    category: "Slash Commands & Agent Control",
+    items: [
+      { mac: ["/compact"], win: ["/compact"], description: "Compact session context & summarize previous turns" },
+      { mac: ["/undo"], win: ["/undo"], description: "Rewind and remove last user/assistant turn (/rewind)" },
+      { mac: ["/clear"], win: ["/clear"], description: "Clear current session conversation or terminal buffer (/reset)" },
+      { mac: ["/diff"], win: ["/diff"], description: "Inspect uncommitted git / workspace changes" },
+      { mac: ["/review"], win: ["/review"], description: "Perform an automated code review on workspace files" },
+      { mac: ["/init"], win: ["/init"], description: "Generate architectural blueprint & project config" },
+      { mac: ["/preview"], win: ["/preview"], description: "Launch interactive web application preview" },
     ],
   },
   {

@@ -189,17 +189,33 @@ export const githubSync = {
     let downloaded = 0;
 
     for (const item of blobs) {
-      const rawRes = await fetch(`https://api.github.com/repos/${cleanRepo}/git/blobs/${item.sha}`, {
-        headers,
-      });
-      if (rawRes.ok) {
-        const blobData = await rawRes.json();
-        let content = "";
-        if (blobData.encoding === "base64") {
-          content = decodeURIComponent(escape(atob(blobData.content.replace(/\s/g, ""))));
-        } else {
-          content = blobData.content || "";
-        }
+      let content = "";
+      // 1. Try authenticated API if token provided
+      if (token) {
+        try {
+          const rawRes = await fetch(`https://api.github.com/repos/${cleanRepo}/git/blobs/${item.sha}`, { headers });
+          if (rawRes.ok) {
+            const blobData = await rawRes.json();
+            if (blobData.encoding === "base64") {
+              content = decodeURIComponent(escape(atob(blobData.content.replace(/\s/g, ""))));
+            } else {
+              content = blobData.content || "";
+            }
+          }
+        } catch {}
+      }
+
+      // 2. Fallback to direct raw GitHub CDN (unlimited & no token needed)
+      if (!content) {
+        try {
+          const rawRes = await fetch(`https://raw.githubusercontent.com/${cleanRepo}/${branch}/${item.path}`);
+          if (rawRes.ok) {
+            content = await rawRes.text();
+          }
+        } catch {}
+      }
+
+      if (content !== "") {
         vfs.writeFile(item.path, content);
         downloaded++;
         onProgress?.(`Downloaded (${downloaded}/${blobs.length}): ${item.path}`);
@@ -238,7 +254,14 @@ export const githubSync = {
 
     const repo = `${parts[0]}/${parts[1]}`;
     const repoName = parts[1];
-    const destination = targetDir || "";
+    let destination = "";
+    if (targetDir === "." || targetDir === "./") {
+      destination = "";
+    } else if (targetDir && targetDir.trim() !== "") {
+      destination = targetDir.trim();
+    } else {
+      destination = repoName;
+    }
 
     const cleanToken = token ? token.trim() : (typeof window !== "undefined" ? localStorage.getItem("edgerunner.git.token") || "" : "");
     const headers: Record<string, string> = {
@@ -246,7 +269,7 @@ export const githubSync = {
     };
     if (cleanToken) headers.Authorization = `Bearer ${cleanToken}`;
 
-    onProgress?.(`Cloning into '${destination || repoName}'…`);
+    onProgress?.(`Cloning into '${destination || "."}'…`);
 
     // 1. Determine default branch
     let branch = "main";
@@ -288,19 +311,35 @@ export const githubSync = {
     let downloaded = 0;
 
     for (const item of blobs) {
-      const rawRes = await fetch(`https://api.github.com/repos/${repo}/git/blobs/${item.sha}`, {
-        headers,
-      });
+      let content = "";
+      // 1. Try authenticated API if token provided
+      if (cleanToken) {
+        try {
+          const rawRes = await fetch(`https://api.github.com/repos/${repo}/git/blobs/${item.sha}`, {
+            headers,
+          });
+          if (rawRes.ok) {
+            const blobData = await rawRes.json();
+            if (blobData.encoding === "base64") {
+              content = decodeURIComponent(escape(atob(blobData.content.replace(/\s/g, ""))));
+            } else {
+              content = blobData.content || "";
+            }
+          }
+        } catch {}
+      }
 
-      if (rawRes.ok) {
-        const blobData = await rawRes.json();
-        let content = "";
-        if (blobData.encoding === "base64") {
-          content = decodeURIComponent(escape(atob(blobData.content.replace(/\s/g, ""))));
-        } else {
-          content = blobData.content || "";
-        }
+      // 2. Fallback to direct raw GitHub CDN (unlimited & no token needed)
+      if (!content) {
+        try {
+          const rawRes = await fetch(`https://raw.githubusercontent.com/${repo}/${branch}/${item.path}`);
+          if (rawRes.ok) {
+            content = await rawRes.text();
+          }
+        } catch {}
+      }
 
+      if (content !== "") {
         const filePath = destination
           ? `${destination.replace(/\/$/, "")}/${item.path.replace(/^\//, "")}`
           : item.path;

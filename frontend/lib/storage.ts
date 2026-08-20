@@ -42,9 +42,13 @@ export interface Conversation {
   title: string;
   model: string;
   harness: string;
+  preset?: "code" | "standard" | "minimal" | "creator";
+  parentId?: string;
+  forkIndex?: number;
   messages: DisplayMessage[];
   createdAt: number;
   updatedAt: number;
+  cwd?: string;
 }
 
 function hasStorage(): boolean {
@@ -135,13 +139,33 @@ export function newConversation(model: string, harness: string): Conversation {
     messages: [],
     createdAt: now,
     updatedAt: now,
+    cwd: "/workspace",
   };
 }
 
-// Derive a short title from the first user message.
+// Derive an intelligent, clean semantic title from the first user message.
 export function titleFrom(messages: DisplayMessage[]): string {
   const first = messages.find((m) => m.role === "user");
   if (!first) return "new session";
-  const t = first.content.trim().replace(/\s+/g, " ");
-  return t.length > 40 ? t.slice(0, 40) + "…" : t;
+
+  let clean = first.content.trim();
+
+  // Strip code blocks and inline code
+  clean = clean.replace(/```[\s\S]*?```/g, "").replace(/`[^`]+`/g, "");
+  // Strip XML/HTML tags
+  clean = clean.replace(/<[^>]+>/g, "");
+  // Strip conversational noise prefixes
+  clean = clean.replace(
+    /^(can you|could you|please|help me with|help me|i want to|how do i|hey|hi|let's|lets)\s+/i,
+    "",
+  );
+  clean = clean.replace(/\s+/g, " ").trim();
+
+  if (!clean) {
+    return "Session " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  // Capitalize first letter
+  clean = clean.charAt(0).toUpperCase() + clean.slice(1);
+  return clean.length > 45 ? clean.slice(0, 45) + "…" : clean;
 }

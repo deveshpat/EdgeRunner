@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { vfs } from "@/lib/wasmShell";
 
 interface ComposerProps {
   value: string;
@@ -10,6 +11,7 @@ interface ComposerProps {
   disabled?: boolean;
   bottomRight?: React.ReactNode;
   harness?: string;
+  cwd?: string;
 }
 
 // Auto-growing terminal sandbox input with outline-breaking corner controls and Up/Down history
@@ -21,6 +23,7 @@ export function Composer({
   disabled,
   bottomRight,
   harness,
+  cwd,
 }: ComposerProps) {
   const ref = useRef<HTMLTextAreaElement>(null);
   const [history, setHistory] = useState<string[]>(() => {
@@ -44,14 +47,32 @@ export function Composer({
     el.style.height = Math.min(el.scrollHeight, 220) + "px";
   }, [value]);
 
-  // Keep input focused when switching modes
+  // Keep input focused permanently when switching modes or when finished executing
   useLayoutEffect(() => {
     ref.current?.focus();
-  }, [harness]);
+  }, [harness, disabled]);
+
+  // Global listener for ArrowUp/ArrowDown when focus is on document or outside input
+  useEffect(() => {
+    function handleGlobalArrows(e: KeyboardEvent) {
+      const activeTag = document.activeElement?.tagName;
+      if (activeTag === "INPUT" || activeTag === "TEXTAREA" || activeTag === "SELECT") return;
+
+      if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+        ref.current?.focus();
+      }
+    }
+    window.addEventListener("keydown", handleGlobalArrows);
+    return () => window.removeEventListener("keydown", handleGlobalArrows);
+  }, []);
+
+  const isTerminal = harness === "terminal";
+  const isAgent = harness === "agent";
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
+      if (disabled) return;
       const clean = value.trim();
       if (clean) {
         setHistory((prev) => {
@@ -67,16 +88,43 @@ export function Composer({
       setHistoryIndex(-1);
       draftRef.current = "";
       onSubmit();
+      requestAnimationFrame(() => {
+        ref.current?.focus();
+      });
+      return;
+    }
+
+    // Tab key in terminal mode: autocompletion
+    if (e.key === "Tab" && isTerminal) {
+      e.preventDefault();
+      const ta = ref.current;
+      if (!ta) return;
+      const pos = ta.selectionStart;
+      const textBefore = value.slice(0, pos);
+      const tokens = textBefore.split(/\s+/);
+      const lastToken = tokens[tokens.length - 1] || "";
+      if (lastToken) {
+        const files = vfs.listFiles();
+        const matches = files.filter((f) => f.startsWith(lastToken));
+        if (matches.length === 1) {
+          const completion = matches[0].slice(lastToken.length);
+          const next = textBefore + completion + value.slice(pos);
+          onChange(next);
+          setTimeout(() => {
+            if (ref.current) {
+              ref.current.selectionStart = ref.current.selectionEnd = pos + completion.length;
+            }
+          }, 0);
+        }
+      }
       return;
     }
 
     // Up Arrow: cycle previous commands in history
     if (e.key === "ArrowUp") {
-      const ta = ref.current;
-      const isAtStart = ta ? ta.selectionStart === 0 && ta.selectionEnd === 0 : true;
       const isSingleLine = !value.includes("\n");
 
-      if ((isAtStart || isSingleLine) && history.length > 0) {
+      if (isSingleLine && history.length > 0) {
         e.preventDefault();
         if (historyIndex === -1) {
           draftRef.current = value;
@@ -90,15 +138,14 @@ export function Composer({
           }
         }, 0);
       }
+      return;
     }
 
     // Down Arrow: cycle forward through history
     if (e.key === "ArrowDown") {
-      const ta = ref.current;
-      const isAtEnd = ta ? ta.selectionStart === value.length : true;
       const isSingleLine = !value.includes("\n");
 
-      if ((isAtEnd || isSingleLine) && historyIndex !== -1) {
+      if (isSingleLine && historyIndex !== -1) {
         e.preventDefault();
         const nextIdx = historyIndex + 1;
         if (nextIdx >= history.length) {
@@ -114,17 +161,17 @@ export function Composer({
           }
         }, 0);
       }
+      return;
     }
   }
-
-  const isTerminal = harness === "terminal";
-  const isAgent = harness === "agent";
 
   const defaultPlaceholder = isTerminal
     ? "Type a shell command (e.g. ls -la, python3 script.py, pip install …) [↵ to run]"
     : isAgent
       ? "Instruct the coding agent to solve and verify tasks… (↵ to send)"
       : "Type a message… (↵ to send)";
+
+  const currentCwdDisplay = (cwd || vfs.getCwd() || "/workspace").replace(/^\/workspace/, "~/workspace");
 
   return (
     <div
@@ -149,7 +196,8 @@ export function Composer({
         >
           {isTerminal ? (
             <>
-              <span className="hidden sm:inline">you@edgerunner:~/workspace</span>$
+              <span className="hidden sm:inline">edgerunner:</span>
+              <span className="text-term-fg">{currentCwdDisplay}</span>$
             </>
           ) : isAgent ? (
             "agent $"
@@ -160,12 +208,14 @@ export function Composer({
         <textarea
           ref={ref}
           rows={1}
-          className="flex-1 resize-none bg-transparent text-term-fg placeholder:text-term-dim/60 focus:outline-none text-sm sm:text-base font-mono leading-relaxed min-w-0"
+          className={`flex-1 resize-none bg-transparent text-term-fg placeholder:text-term-dim/60 focus:outline-none text-sm sm:text-base font-mono leading-relaxed min-w-0 ${
+            disabled ? "opacity-75 cursor-wait" : ""
+          }`}
           placeholder={
             placeholder || (disabled ? "processing…" : defaultPlaceholder)
           }
           value={value}
-          disabled={disabled}
+          readOnly={disabled}
           onChange={(e) => onChange(e.target.value)}
           onKeyDown={onKeyDown}
           autoFocus

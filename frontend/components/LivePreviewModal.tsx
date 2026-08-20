@@ -155,9 +155,9 @@ export function LivePreviewModal({ isOpen, onClose, initialUrl }: LivePreviewMod
         {/* Top Header & Address Bar */}
         <div className="flex flex-wrap items-center justify-between border-b border-term-border bg-term-panel px-3 py-2 gap-2 select-none shrink-0">
           <div className="flex items-center gap-2">
-            <span className="text-term-green font-bold text-xs flex items-center gap-1">
+            <span className="text-term-green font-bold text-xs flex items-center gap-1.5">
               <span>🌐</span>
-              <span>LIVE PREVIEW</span>
+              <span className="hidden xs:inline">LIVE PREVIEW</span>
             </span>
 
             {/* Mode Switcher */}
@@ -172,13 +172,13 @@ export function LivePreviewModal({ isOpen, onClose, initialUrl }: LivePreviewMod
                 onClick={() => setMode("url")}
                 className={`px-1.5 py-0.5 rounded ${mode === "url" ? "bg-term-green/20 text-term-green font-semibold" : "text-term-dim"}`}
               >
-                Localhost / URL
+                URL / Port
               </button>
             </div>
           </div>
 
           {/* Center Address & File Selector */}
-          <div className="flex flex-1 items-center max-w-md gap-1.5 mx-2">
+          <div className="flex flex-1 items-center min-w-[180px] max-w-md gap-1.5">
             {mode === "vfs" ? (
               <select
                 value={selectedFile}
@@ -197,22 +197,29 @@ export function LivePreviewModal({ isOpen, onClose, initialUrl }: LivePreviewMod
                 value={customUrl}
                 onChange={(e) => setCustomUrl(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && reloadIframe()}
-                placeholder="http://localhost:3000, http://127.0.0.1:8080…"
+                placeholder="http://localhost:3000, https://…"
                 className="flex-1 rounded border border-term-border bg-term-bg px-2 py-0.5 text-xs text-term-fg focus:outline-none focus:border-term-green"
               />
             )}
             <button
               onClick={reloadIframe}
-              className="rounded border border-term-border px-1.5 py-0.5 text-term-dim hover:text-term-fg"
+              className="rounded border border-term-border px-1.5 py-0.5 text-term-dim hover:text-term-fg text-xs"
               title="Reload preview"
             >
               ↻
+            </button>
+            <button
+              onClick={handlePopout}
+              className="rounded border border-term-green/40 bg-term-green/10 text-term-green px-2 py-0.5 text-[11px] font-semibold hover:bg-term-green/20 transition-colors"
+              title="Open in new browser tab"
+            >
+              ↗ Tab
             </button>
           </div>
 
           {/* Right: Device & Popout */}
           <div className="flex items-center gap-1.5">
-            <div className="hidden sm:flex items-center rounded border border-term-border bg-term-bg p-0.5 text-[10px]">
+            <div className="hidden md:flex items-center rounded border border-term-border bg-term-bg p-0.5 text-[10px]">
               {(["responsive", "desktop", "tablet", "mobile"] as const).map((d) => (
                 <button
                   key={d}
@@ -226,18 +233,10 @@ export function LivePreviewModal({ isOpen, onClose, initialUrl }: LivePreviewMod
 
             <button
               onClick={() => setShowConsole((c) => !c)}
-              className={`rounded border px-1.5 py-0.5 text-[10px] transition-colors ${showConsole ? "border-term-green text-term-green bg-term-green/10" : "border-term-border text-term-dim"}`}
+              className={`hidden sm:inline-block rounded border px-1.5 py-0.5 text-[10px] transition-colors ${showConsole ? "border-term-green text-term-green bg-term-green/10" : "border-term-border text-term-dim"}`}
               title="Toggle Console Log Drawer"
             >
               Console ({logs.length})
-            </button>
-
-            <button
-              onClick={handlePopout}
-              className="rounded border border-term-border px-1.5 py-0.5 text-[10px] text-term-dim hover:text-term-green transition-colors"
-              title="Open in new browser tab"
-            >
-              ↗ Tab
             </button>
 
             <button
@@ -250,8 +249,23 @@ export function LivePreviewModal({ isOpen, onClose, initialUrl }: LivePreviewMod
           </div>
         </div>
 
+        {/* Informative notice for external URL security restrictions */}
+        {mode === "url" && customUrl && !customUrl.includes("localhost") && !customUrl.includes("127.0.0.1") && (
+          <div className="bg-term-amber/10 border-b border-term-amber/30 px-3 py-1 text-[11px] text-term-amber flex items-center justify-between">
+            <span className="truncate">
+              Note: External websites (like github.com) may block iframe embedding via X-Frame-Options headers.
+            </span>
+            <button
+              onClick={handlePopout}
+              className="ml-2 underline font-bold shrink-0 hover:text-term-fg"
+            >
+              Open in Tab ↗
+            </button>
+          </div>
+        )}
+
         {/* Viewport Canvas */}
-        <div className="flex-1 bg-[#1e293b]/40 flex items-center justify-center p-2 sm:p-4 overflow-auto">
+        <div className="flex-1 bg-term-panel/40 flex items-center justify-center p-2 sm:p-4 overflow-auto">
           <div className={`h-full bg-white shadow-2xl rounded transition-all duration-200 overflow-hidden ${deviceWidths[device]}`}>
             <iframe
               ref={iframeRef}

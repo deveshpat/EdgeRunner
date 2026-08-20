@@ -24,6 +24,9 @@ yarn-error.log*
 .vscode/
 *.local
 
-# Logs
+# Logs & Runtime
 *.log
+*.db
+backend/workspace/
+workspace/
 frontend/public/kernel-bundle.json

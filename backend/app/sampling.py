@@ -13,7 +13,7 @@ from typing import Optional
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_TOP_P = 0.95
 DEFAULT_MIN_P = 0.05
-DEFAULT_MAX_TOKENS = 1024
+DEFAULT_MAX_TOKENS = 4096
 REPEAT_PENALTY = 1.1
 
 CHAT_SYSTEM_PROMPT = (
@@ -25,18 +25,36 @@ CHAT_SYSTEM_PROMPT = (
 
 
 def sampling_params(
-    temperature: Optional[float],
-    top_p: Optional[float],
-    max_tokens: Optional[int],
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    context_hint: str = "",
 ) -> dict:
-    """Build the sampling half of a chat-completions payload.
+    """Build the sampling half of a chat-completions payload with adaptive optimization.
 
-    llama-cpp-python's OpenAI server honours the llama.cpp extras (min_p,
-    repeat_penalty) alongside the standard OpenAI fields.
+    Adapts temperature and repetition penalty based on task context to maximize precision
+    during coding/debugging while allowing exploration during open research.
     """
+    temp = temperature
+    top = top_p
+
+    if temp is None:
+        c_lower = context_hint.lower()
+        if any(k in c_lower for k in ("error", "traceback", "failed", "syntax", "replace", "patch", "test", "assert")):
+            # High precision, low variance for debugging & surgical code edits
+            temp = 0.15
+            top = 0.90 if top is None else top
+        elif any(k in c_lower for k in ("research", "idea", "architect", "brainstorm", "design")):
+            # Creative exploration
+            temp = 0.60
+            top = 0.95 if top is None else top
+        else:
+            temp = DEFAULT_TEMPERATURE
+            top = DEFAULT_TOP_P if top is None else top
+
     return {
-        "temperature": temperature if temperature is not None else DEFAULT_TEMPERATURE,
-        "top_p": top_p if top_p is not None else DEFAULT_TOP_P,
+        "temperature": temp,
+        "top_p": top if top is not None else DEFAULT_TOP_P,
         "min_p": DEFAULT_MIN_P,
         "repeat_penalty": REPEAT_PENALTY,
         "max_tokens": max_tokens if max_tokens is not None else DEFAULT_MAX_TOKENS,
@@ -50,7 +68,7 @@ def ensure_system_prompt(messages: list[dict], prompt: str) -> list[dict]:
     return [{"role": "system", "content": prompt}] + messages
 
 
-def trim_history(messages: list[dict], max_chars: int = 16000) -> list[dict]:
+def trim_history(messages: list[dict], max_chars: int = 64000) -> list[dict]:
     """Keep the system message + the most recent turns under a char budget.
 
     A rough guard against exceeding the context window on long chats (no

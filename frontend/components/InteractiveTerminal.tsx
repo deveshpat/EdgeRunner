@@ -111,7 +111,18 @@ export function InteractiveTerminal({
     } catch {}
   }, []);
 
-  const PROMPT = "\x1b[1;32medgerunner\x1b[0m:\x1b[1;34m~/workspace\x1b[0m$ ";
+  function getPrompt(): string {
+    const cwd = vfs.getCwd();
+    let display = "~/workspace";
+    if (cwd === "/workspace") {
+      display = "~/workspace";
+    } else if (cwd.startsWith("/workspace/")) {
+      display = `~/workspace/${cwd.slice("/workspace/".length)}`;
+    } else {
+      display = cwd;
+    }
+    return `\x1b[1;32medgerunner\x1b[0m:\x1b[1;34m${display}\x1b[0m$ `;
+  }
 
   // Watch for Theme changes on <html data-theme="...">
   useEffect(() => {
@@ -221,7 +232,7 @@ export function InteractiveTerminal({
     editorRef.current.active = false;
     term.write("\x1b[?1049l"); // Restore primary screen buffer
     term.reset();
-    term.write(PROMPT);
+    term.write(getPrompt());
   }
 
   function handleEditorInput(data: string, term: any) {
@@ -534,13 +545,44 @@ export function InteractiveTerminal({
       termRef.current = term;
       fitAddonRef.current = fitAddon;
 
-      // Welcome Banner
-      term.writeln("\x1b[1;32m╔════════════════════════════════════════════════════════════════════╗\x1b[0m");
-      term.writeln("\x1b[1;32m║\x1b[0m \x1b[1;37mEdgeRunner Interactive Terminal (xterm.js + WebAssembly Engine)\x1b[0m   \x1b[1;32m║\x1b[0m");
-      term.writeln("\x1b[1;32m║\x1b[0m \x1b[2mType 'nano <file>' or 'vim <file>' for in-terminal editing.\x1b[0m         \x1b[1;32m║\x1b[0m");
-      term.writeln("\x1b[1;32m║\x1b[0m \x1b[2mType 'code <file>' or 'vs <file>' to open VS Code Workspace.\x1b[0m        \x1b[1;32m║\x1b[0m");
-      term.writeln("\x1b[1;32m╚════════════════════════════════════════════════════════════════════╝\x1b[0m\r\n");
-      term.write(PROMPT);
+      // Check if a nano/vim editor was queued to open
+      let hasPendingEditor = false;
+      if (typeof window !== "undefined") {
+        try {
+          const raw = localStorage.getItem("edgerunner.pending_editor");
+          if (raw) {
+            const pending = JSON.parse(raw);
+            if (pending && pending.editor && pending.file) {
+              localStorage.removeItem("edgerunner.pending_editor");
+              openInTerminalEditor(term, pending.editor, pending.file);
+              hasPendingEditor = true;
+            }
+          }
+        } catch {}
+      }
+
+      if (!hasPendingEditor && initialCommand) {
+        const tokens = initialCommand.trim().split(/\s+/);
+        const prog = tokens[0]?.toLowerCase();
+        const target = tokens[1] || "untitled.txt";
+        if (prog === "nano") {
+          openInTerminalEditor(term, "nano", target);
+          hasPendingEditor = true;
+        } else if (prog === "vim" || prog === "vi") {
+          openInTerminalEditor(term, "vim", target);
+          hasPendingEditor = true;
+        }
+      }
+
+      if (!hasPendingEditor) {
+        // Welcome Banner
+        term.writeln("\x1b[1;32m╔════════════════════════════════════════════════════════════════════╗\x1b[0m");
+        term.writeln("\x1b[1;32m║\x1b[0m \x1b[1;37mEdgeRunner Interactive Terminal (xterm.js + WebAssembly Engine)\x1b[0m   \x1b[1;32m║\x1b[0m");
+        term.writeln("\x1b[1;32m║\x1b[0m \x1b[2mType 'nano <file>' or 'vim <file>' for in-terminal editing.\x1b[0m         \x1b[1;32m║\x1b[0m");
+        term.writeln("\x1b[1;32m║\x1b[0m \x1b[2mType 'code <file>' or 'vs <file>' to open VS Code Workspace.\x1b[0m        \x1b[1;32m║\x1b[0m");
+        term.writeln("\x1b[1;32m╚════════════════════════════════════════════════════════════════════╝\x1b[0m\r\n");
+        term.write(getPrompt());
+      }
 
       // Handle Key Input
       term.onData(async (data: string) => {
@@ -556,7 +598,7 @@ export function InteractiveTerminal({
             term.writeln("^C");
             runningRef.current = false;
             bufferRef.current = "";
-            term.write(PROMPT);
+            term.write(getPrompt());
           }
           return;
         }
@@ -569,7 +611,7 @@ export function InteractiveTerminal({
           historyIdxRef.current = -1;
 
           if (!rawCmd) {
-            term.write(PROMPT);
+            term.write(getPrompt());
             return;
           }
 
@@ -587,7 +629,7 @@ export function InteractiveTerminal({
             bufferRef.current = "";
             historyIdxRef.current = -1;
             term.reset();
-            term.write(PROMPT);
+            term.write(getPrompt());
             return;
           }
 
@@ -600,7 +642,7 @@ export function InteractiveTerminal({
             if (onClose) {
               setTimeout(() => onClose(), 300);
             } else {
-              term.write(PROMPT);
+              term.write(getPrompt());
             }
             return;
           }
@@ -628,7 +670,7 @@ export function InteractiveTerminal({
               window.dispatchEvent(new CustomEvent("edgerunner:open-workspace"));
             }
             term.writeln(`\x1b[32m✓ Opened ${targetFile === "." ? "workspace" : targetFile} in VS Code Workspace\x1b[0m`);
-            term.write(PROMPT);
+            term.write(getPrompt());
             return;
           }
 
@@ -658,7 +700,7 @@ export function InteractiveTerminal({
             term.writeln(`\x1b[31merror: ${msg}\x1b[0m`);
           } finally {
             runningRef.current = false;
-            term.write(PROMPT);
+            term.write(getPrompt());
           }
           return;
         }
@@ -677,7 +719,7 @@ export function InteractiveTerminal({
           term.writeln("^C");
           bufferRef.current = "";
           historyIdxRef.current = -1;
-          term.write(PROMPT);
+          term.write(getPrompt());
           return;
         }
 
@@ -686,7 +728,7 @@ export function InteractiveTerminal({
           bufferRef.current = "";
           historyIdxRef.current = -1;
           term.reset();
-          term.write(PROMPT);
+          term.write(getPrompt());
           return;
         }
 
@@ -704,7 +746,7 @@ export function InteractiveTerminal({
             term.write(completion);
           } else if (matches.length > 1) {
             term.writeln("\r\n" + matches.join("  "));
-            term.write(PROMPT + bufferRef.current);
+            term.write(getPrompt() + bufferRef.current);
           }
           return;
         }
@@ -781,7 +823,7 @@ export function InteractiveTerminal({
             if (res.exitCode !== 0) term.writeln(`\x1b[31m● exit ${res.exitCode}\x1b[0m`);
           } finally {
             runningRef.current = false;
-            term.write(PROMPT);
+            term.write(getPrompt());
           }
         }, 100);
       }
@@ -815,7 +857,7 @@ export function InteractiveTerminal({
       runningRef.current = false;
       editorRef.current.active = false;
       termRef.current.reset();
-      termRef.current.write(PROMPT);
+      termRef.current.write(getPrompt());
     }
   }
 
@@ -835,12 +877,8 @@ export function InteractiveTerminal({
       {/* Terminal Toolbar Header */}
       <div className="flex items-center justify-between border-b border-term-border bg-term-panel px-3 py-1.5 shrink-0 select-none text-[11px]">
         <div className="flex items-center gap-2">
-          <span className="flex gap-1.5">
-            <span className="h-2.5 w-2.5 rounded-full bg-term-red" />
-            <span className="h-2.5 w-2.5 rounded-full bg-term-amber" />
-            <span className="h-2.5 w-2.5 rounded-full bg-term-green" />
-          </span>
-          <span className="text-term-fg font-semibold ml-1">wasm-bash / pty</span>
+          <span className="text-term-green font-bold text-xs">◈</span>
+          <span className="text-term-fg font-semibold">wasm-bash / pty</span>
         </div>
 
         <div className="flex items-center gap-2">
@@ -886,7 +924,7 @@ export function InteractiveTerminal({
                 if (editorRef.current.active) {
                   handleEditorInput("\x1b", termRef.current);
                 } else {
-                  termRef.current.write("^[\r\n" + PROMPT);
+                  termRef.current.write("^[\r\n" + getPrompt());
                 }
               }
             }}
@@ -915,7 +953,7 @@ export function InteractiveTerminal({
                 runningRef.current = false;
                 bufferRef.current = "";
                 termRef.current.writeln("^C");
-                termRef.current.write(PROMPT);
+                termRef.current.write(getPrompt());
               }
             }}
             className="rounded border border-term-border bg-term-bg px-2 py-0.5 font-bold text-term-red active:bg-term-red/20"

@@ -65,6 +65,7 @@ export interface ChatMessage {
 
 export type StreamEventType =
   | "token"
+  | "think"
   | "tool_call"
   | "tool_result"
   | "done"

@@ -6,19 +6,20 @@ import { getApiBase, type StreamEvent } from "./api";
 import {
   BROWSER_TOOL_SPECS,
   executeBrowserTool,
+  getActiveBrowserToolSlice,
   type BrowserToolContext,
 } from "./browserTools";
+import { computeToolNudge } from "./nudges";
 
 export const BROWSER_AGENT_ID = "browser-agent";
 
 const SYSTEM_PROMPT =
-  "You are EdgeRunner, an agent running inside a terminal-themed web app. " +
-  "You can run sandboxed JavaScript and manage the user's chat sessions via " +
-  "tools. Call a tool when it helps (compute with run_javascript, or read/rename " +
-  "the session); otherwise answer directly. Think step by step, then give a " +
-  "clear Markdown answer. Never invent tool output.";
+  "You are EdgeRunner, an elite autonomous software engineering and coding agent with access to the live workspace.\n" +
+  "You have access to the full tool suite: `terminal`, `view_file`, `replace_file_content`, `grep_search`, `file_search`, `web_search`, `fetch_web_page`, `run_skill`, `save_skill`, `list_skills`, `delegate_task`, `consult_oracle`.\n" +
+  "Always follow the protocol: Think in <think>...</think> -> Inspect -> Act -> Verify -> Answer.\n" +
+  "Never invent tool outputs. Run commands to verify code and provide a clean Markdown response once complete.";
 
-const MAX_ITERATIONS = 5;
+const MAX_ITERATIONS = 30;
 
 interface RunOpts {
   model: string;
@@ -30,119 +31,101 @@ interface RunOpts {
   signal?: AbortSignal;
 }
 
-export async function* runBrowserAgent(opts: RunOpts): AsyncGenerator<StreamEvent> {
-  const url = `${getApiBase()}/v1/chat/completions`;
-  const messages: Record<string, unknown>[] = [
-    { role: "system", content: SYSTEM_PROMPT },
-    ...opts.messages,
-  ];
+function extractTextToolCalls(text: string): { id: string; name: string; arguments: string }[] {
+  const calls: { id: string; name: string; arguments: string }[] = [];
+  
+  // 1. Check for <tool_call> tags (both closed and unclosed)
+  const toolCallRe = /<tool_call>([\s\S]*?)(?:<\/tool_call>|$)/gi;
+  let match: RegExpExecArray | null;
 
-  for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
-    const calls = new Map<number, { id: string; name: string; arguments: string }>();
-    let resp: Response;
+  while ((match = toolCallRe.exec(text)) !== null) {
+    const inner = match[1].trim();
+    if (!inner) continue;
+    const callId = `browser_call_${calls.length + 1}`;
+
+    // 1a. Strict or tolerant JSON parse
     try {
-      resp = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: opts.model,
-          messages,
-          tools: BROWSER_TOOL_SPECS,
-          stream: true,
-          temperature: opts.temperature ?? 0.7,
-          top_p: opts.top_p ?? 0.95,
-          min_p: 0.05,
-          repeat_penalty: 1.1,
-          max_tokens: opts.max_tokens ?? 1024,
-        }),
-        signal: opts.signal,
-      });
-    } catch (e) {
-      yield { type: "error", data: `model unreachable: ${(e as Error).message}` };
-      return;
-    }
-    if (!resp.ok || !resp.body) {
-      yield { type: "error", data: `model ${resp.status}` };
-      return;
-    }
-
-    const reader = resp.body.getReader();
-    const dec = new TextDecoder();
-    let buf = "";
-    let finish = "";
-    outer: while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const frames = buf.split("\n");
-      buf = frames.pop() ?? "";
-      for (const line of frames) {
-        if (!line.startsWith("data:")) continue;
-        const data = line.slice(5).trim();
-        if (data === "[DONE]") break outer;
-        let chunk: {
-          choices?: {
-            delta?: {
-              content?: string;
-              tool_calls?: {
-                index?: number;
-                id?: string;
-                function?: { name?: string; arguments?: string };
-              }[];
-            };
-            finish_reason?: string;
-          }[];
-        };
-        try {
-          chunk = JSON.parse(data);
-        } catch {
-          continue;
-        }
-        const choice = chunk.choices?.[0];
-        if (!choice) continue;
-        const delta = choice.delta ?? {};
-        if (delta.content) yield { type: "token", data: delta.content };
-        for (const tc of delta.tool_calls ?? []) {
-          const idx = tc.index ?? 0;
-          const slot = calls.get(idx) ?? { id: "", name: "", arguments: "" };
-          if (tc.id) slot.id = tc.id;
-          if (tc.function?.name) slot.name = tc.function.name;
-          if (tc.function?.arguments) slot.arguments += tc.function.arguments;
-          calls.set(idx, slot);
-        }
-        if (choice.finish_reason) finish = choice.finish_reason;
+      const parsed = JSON.parse(inner);
+      if (parsed && typeof parsed === "object") {
+        const name = parsed.name || parsed.function?.name || parsed.function_name || "terminal";
+        const args = parsed.arguments || parsed.parameters || parsed;
+        calls.push({
+          id: callId,
+          name: String(name),
+          arguments: typeof args === "string" ? args : JSON.stringify(args),
+        });
+        continue;
       }
-    }
+    } catch {}
 
-    if (calls.size > 0) {
-      const ordered = [...calls.keys()].sort((a, b) => a - b).map((k) => calls.get(k)!);
-      messages.push({
-        role: "assistant",
-        content: null,
-        tool_calls: ordered.map((c) => ({
-          id: c.id,
-          type: "function",
-          function: { name: c.name, arguments: c.arguments },
-        })),
-      });
-      for (const c of ordered) {
-        yield {
-          type: "tool_call",
-          data: JSON.stringify({ id: c.id, name: c.name, arguments: c.arguments }),
-        };
-        const result = await executeBrowserTool(c.name, c.arguments, opts.ctx);
-        yield {
-          type: "tool_result",
-          data: JSON.stringify({ id: c.id, name: c.name, result }),
-        };
-        messages.push({ role: "tool", tool_call_id: c.id, name: c.name, content: result });
+    // 1b. XML / Tag-style function extraction (e.g. <function=view_file>, {"function_name="terminal">, {"name=terminal>)
+    const fnMatch = inner.match(/(?:<function(?:=|\s+name=[\"']?)|(?:\{[\"']?(?:function_name|name)[\"']?\s*[:=]\s*[\"']?))([\w\-_]+)[\"']?\s*>?([\s\S]*?)(?:<\/function>|\}|$)/i);
+    if (fnMatch) {
+      const name = fnMatch[1].trim();
+      const fnBody = fnMatch[2].trim();
+      const paramMatches = [...fnBody.matchAll(/<parameter(?:=|\s+name=[\"']?)([\w\-_]+)[\"']?\s*>([\s\S]*?)(?:<\/parameter>|$)/gi)];
+      const argObj: Record<string, string> = {};
+      if (paramMatches.length > 0) {
+        for (const pm of paramMatches) {
+          argObj[pm[1].trim()] = pm[2].trim().replace(/^[\"']|[\"']$/g, "");
+        }
+      } else if (fnBody) {
+        if (name === "view_file" || name === "read_file" || name === "cat") {
+          argObj["path"] = fnBody.replace(/^[\"']|[\"']$/g, "").trim();
+        } else {
+          argObj["command"] = fnBody;
+        }
       }
+      calls.push({ id: callId, name, arguments: JSON.stringify(argObj) });
       continue;
     }
 
-    void finish;
-    yield { type: "done", data: "" };
-    return;
+    // 1c. Raw text inside <tool_call> fallback
+    calls.push({ id: callId, name: "terminal", arguments: JSON.stringify({ command: inner }) });
   }
-  yield { type: "error", data: `agent stopped after ${MAX_ITERATIONS} tool iterations` };
+
+  // 2. Fallback: if no <tool_call> tags were used, search for standalone <function=...> in text
+  if (calls.length === 0) {
+    const standaloneFnRe = /<function(?:=|\s+name=[\"']?)([\w\-_]+)[\"']?\s*>([\s\S]*?)(?:<\/function>|$)/gi;
+    let sMatch: RegExpExecArray | null;
+    while ((sMatch = standaloneFnRe.exec(text)) !== null) {
+      const name = sMatch[1].trim();
+      const fnBody = sMatch[2].trim();
+      const paramMatches = [...fnBody.matchAll(/<parameter(?:=|\s+name=[\"']?)([\w\-_]+)[\"']?\s*>([\s\S]*?)(?:<\/parameter>|$)/gi)];
+      const argObj: Record<string, string> = {};
+      if (paramMatches.length > 0) {
+        for (const pm of paramMatches) {
+          argObj[pm[1].trim()] = pm[2].trim().replace(/^[\"']|[\"']$/g, "");
+        }
+      } else if (fnBody) {
+        if (name === "view_file" || name === "read_file" || name === "cat") {
+          argObj["path"] = fnBody.replace(/^[\"']|[\"']$/g, "").trim();
+        } else {
+          argObj["command"] = fnBody;
+        }
+      }
+      calls.push({ id: `browser_call_${calls.length + 1}`, name, arguments: JSON.stringify(argObj) });
+    }
+  }
+
+  return calls;
+}
+
+import { runDeepSeekHarness } from "./deepseekHarness";
+
+export async function* runBrowserAgent(opts: RunOpts): AsyncGenerator<StreamEvent> {
+  for await (const ev of runDeepSeekHarness({
+    messages: opts.messages,
+    preset: "code",
+    ctx: opts.ctx,
+    temperature: opts.temperature,
+    top_p: opts.top_p,
+    max_tokens: opts.max_tokens,
+    signal: opts.signal,
+  })) {
+    yield {
+      type: ev.type,
+      data: ev.data || "",
+    };
+  }
 }

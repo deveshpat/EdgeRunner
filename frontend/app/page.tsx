@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Composer } from "@/components/Composer";
 import { FileExplorerModal } from "@/components/FileExplorerModal";
-import { InteractiveTerminal } from "@/components/InteractiveTerminal";
 import { LivePreviewModal } from "@/components/LivePreviewModal";
 import { Logo } from "@/components/Logo";
 import { Message } from "@/components/Message";
@@ -25,6 +24,7 @@ import { useBackend } from "@/lib/useBackend";
 import { useConversations } from "@/lib/useConversations";
 import { useKaggle } from "@/lib/useKaggle";
 import { useModelManager } from "@/lib/useModelManager";
+import { vfs } from "@/lib/wasmShell";
 
 export default function Home() {
   const [catalog, setCatalog] = useState<Catalog | null>(null);
@@ -38,7 +38,6 @@ export default function Home() {
   const [showPreviewModal, setShowPreviewModal] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | undefined>(undefined);
   const [showTerminalDrawer, setShowTerminalDrawer] = useState(false);
-  const [terminalViewModes, setTerminalViewModes] = useState<Record<string, "feed" | "interactive">>({});
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [trafficHovered, setTrafficHovered] = useState(false);
   const [dockedSessionIds, setDockedSessionIds] = useState<string[]>([]);
@@ -245,18 +244,31 @@ export default function Home() {
     [chat, dockedSessionIds],
   );
 
-  // Listen for in-terminal editor launch (nano/vim) from feed or commands to auto-switch to interactive PTY
+  // Listen for editor launch (nano/vim/code) or exit from terminal
   useEffect(() => {
-    function handleOpenTerminalEditor() {
-      const activeId = chat.active?.id;
-      if (activeId) {
-        setTerminalViewModes((prev) => ({ ...prev, [activeId]: "interactive" }));
+    function handleOpenTerminalEditor(e: any) {
+      if (e.detail?.file && typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("edgerunner:open-file", { detail: { path: e.detail.file } }),
+        );
       }
+      chat.setHarness("workspace");
       setViewMode("workspace");
     }
+
+    function handleExitLanding() {
+      setViewMode("landing");
+    }
+
     window.addEventListener("edgerunner:open-terminal-editor", handleOpenTerminalEditor);
-    return () => window.removeEventListener("edgerunner:open-terminal-editor", handleOpenTerminalEditor);
-  }, [chat.active?.id]);
+    window.addEventListener("edgerunner:terminal-exit", handleExitLanding);
+    window.addEventListener("edgerunner:exit-to-landing", handleExitLanding);
+    return () => {
+      window.removeEventListener("edgerunner:open-terminal-editor", handleOpenTerminalEditor);
+      window.removeEventListener("edgerunner:terminal-exit", handleExitLanding);
+      window.removeEventListener("edgerunner:exit-to-landing", handleExitLanding);
+    };
+  }, [chat]);
 
   // Global Keyboard Shortcuts (Collision-free & Cross-platform)
   useEffect(() => {
@@ -377,7 +389,7 @@ export default function Home() {
         return;
       }
 
-      // ⌘/Ctrl + 1 or Option+1: Switch to / Chat Mode
+      // ⌘/Ctrl + 1 or Option+1: Switch to /chat Mode (Mode 01)
       if ((isCmdOrCtrl || isAlt) && (code === "Digit1" || code === "Numpad1" || key === "1" || e.key === "¡")) {
         e.preventDefault();
         chat.setHarness("chat");
@@ -385,18 +397,15 @@ export default function Home() {
         return;
       }
 
-      // ⌘/Ctrl + 2 or Option+2 or ⌘E: Switch to Fullscreen Workspace
-      if (
-        (isCmdOrCtrl && (code === "KeyE" || key === "e")) ||
-        ((isCmdOrCtrl || isAlt) && (code === "Digit2" || code === "Numpad2" || key === "2" || e.key === "™"))
-      ) {
+      // ⌘/Ctrl + 2 or Option+2: Switch to /agent Mode (Mode 02)
+      if ((isCmdOrCtrl || isAlt) && (code === "Digit2" || code === "Numpad2" || key === "2" || e.key === "™")) {
         e.preventDefault();
-        chat.setHarness("workspace");
+        chat.setHarness("agent");
         setViewMode("workspace");
         return;
       }
 
-      // ⌘/Ctrl + 3 or Option+3 or ⌘J: Switch to Terminal Mode
+      // ⌘/Ctrl + 3 or Option+3 or ⌘J: Switch to /terminal Mode (Mode 03)
       if (
         ((isCmdOrCtrl || isAlt) && (code === "Digit3" || code === "Numpad3" || key === "3" || e.key === "£")) ||
         (isCmdOrCtrl && (code === "KeyJ" || key === "j"))
@@ -407,10 +416,13 @@ export default function Home() {
         return;
       }
 
-      // ⌘/Ctrl + 4 or Option+4: Switch to Agent Mode
-      if ((isCmdOrCtrl || isAlt) && (code === "Digit4" || code === "Numpad4" || key === "4" || e.key === "¢")) {
+      // ⌘/Ctrl + 4 or Option+4 or ⌘E: Switch to /workspace Mode (Mode 04)
+      if (
+        (isCmdOrCtrl && (code === "KeyE" || key === "e")) ||
+        ((isCmdOrCtrl || isAlt) && (code === "Digit4" || code === "Numpad4" || key === "4" || e.key === "¢"))
+      ) {
         e.preventDefault();
-        chat.setHarness("agent");
+        chat.setHarness("workspace");
         setViewMode("workspace");
         return;
       }
@@ -462,13 +474,13 @@ export default function Home() {
         return;
       }
 
-      // Auto-focus text sandbox when user starts typing on keyboard
+      // Auto-focus text sandbox when user starts typing on keyboard or presses arrow keys
       if (
         !isInput &&
         !e.metaKey &&
         !e.ctrlKey &&
         !e.altKey &&
-        e.key.length === 1 &&
+        (e.key.length === 1 || e.key === "ArrowUp" || e.key === "ArrowDown") &&
         e.key !== "?" &&
         !showModelModal &&
         !showFilesModal &&
@@ -645,8 +657,13 @@ export default function Home() {
     const text = input.trim();
     if (!text || chat.busy) return;
 
+    const isFromLanding = viewMode === "landing";
+    if (dockedSessionIds.length > 0) {
+      setDockedSessionIds([]);
+    }
+
     // Handle slash command shortcuts typed in text sandbox
-    const lower = text.toLowerCase();
+    const lower = text.toLowerCase().trim();
     if (lower === "/chat") {
       chat.setHarness("chat");
       setViewMode("workspace");
@@ -686,11 +703,51 @@ export default function Home() {
       setInput("");
       return;
     }
-
-    const isFromLanding = viewMode === "landing";
-    if (dockedSessionIds.length > 0) {
-      setDockedSessionIds([]);
+    if (lower.startsWith("/compact") || lower.startsWith("/compress") || lower.startsWith("/summarize")) {
+      const focus = text.replace(/^\/(?:compact|compress|summarize)\s*/i, "").trim();
+      chat.compactActive(focus || undefined);
+      setViewMode("workspace");
+      setInput("");
+      return;
     }
+    if (lower === "/clear" || lower === "/reset") {
+      if (chat.active) {
+        chat.deleteMessage(-1);
+      }
+      setViewMode("workspace");
+      setInput("");
+      return;
+    }
+    if (lower === "/undo" || lower === "/rewind") {
+      chat.undoLastTurn();
+      setViewMode("workspace");
+      setInput("");
+      return;
+    }
+    if (lower === "/preview") {
+      setShowPreviewModal(true);
+      setInput("");
+      return;
+    }
+    if (lower === "/diff") {
+      setViewMode("workspace");
+      chat.send("git diff", isFromLanding);
+      setInput("");
+      return;
+    }
+    if (lower === "/review") {
+      setViewMode("workspace");
+      chat.send("Please perform a comprehensive code review of our workspace files, check for edge cases, syntax, and provide prioritized suggestions.", isFromLanding);
+      setInput("");
+      return;
+    }
+    if (lower === "/init") {
+      setViewMode("workspace");
+      chat.send("Please inspect the workspace directory structure, analyze any existing files, and generate an EDGERUNNER.md architectural blueprint describing our project configuration and next steps.", isFromLanding);
+      setInput("");
+      return;
+    }
+
     setViewMode("workspace");
     chat.send(text, isFromLanding);
     setInput("");
@@ -808,34 +865,6 @@ export default function Home() {
         )
       )}
 
-      {/* Terminal View Mode Feed / PTY Toggle */}
-      {harness === "terminal" && active && (
-        <div className="flex items-center rounded border border-term-border bg-term-bg p-0.5 text-[10px]">
-          <button
-            onClick={() => setTerminalViewModes((prev) => ({ ...prev, [active.id]: "feed" }))}
-            className={`px-1.5 py-0.5 rounded transition-colors ${
-              (terminalViewModes[active.id] || "feed") === "feed"
-                ? "bg-term-green/20 text-term-green font-semibold"
-                : "text-term-dim hover:text-term-fg"
-            }`}
-            title="Block Message Feed view"
-          >
-            Feed
-          </button>
-          <button
-            onClick={() => setTerminalViewModes((prev) => ({ ...prev, [active.id]: "interactive" }))}
-            className={`px-1.5 py-0.5 rounded transition-colors ${
-              terminalViewModes[active.id] === "interactive"
-                ? "bg-term-green/20 text-term-green font-semibold"
-                : "text-term-dim hover:text-term-fg"
-            }`}
-            title="Interactive xterm.js PTY Screen"
-          >
-            ⚡ PTY
-          </button>
-        </div>
-      )}
-
       {/* Modern Theme Switcher Slider with Emoji Thumb */}
       <div
         onClick={toggleTheme}
@@ -934,8 +963,8 @@ export default function Home() {
                   </svg>
                 </button>
 
-                {/* Traffic Lights (Desktop & Tablets) */}
-                <div className="hidden xs:flex items-center gap-1.5">
+                {/* Traffic Lights (Always accessible on all screen sizes) */}
+                <div className="flex items-center gap-1.5 shrink-0">
                   <button
                     onClick={() => {
                       // Red dot returns directly to Hero Landing Page
@@ -943,17 +972,17 @@ export default function Home() {
                       setViewMode("landing");
                     }}
                     title="Close session & return to Landing (⌘K)"
-                    className="h-3 w-3 rounded-full bg-[#FF5F56] transition-transform hover:scale-110 active:scale-95 shadow-sm"
+                    className="h-3.5 w-3.5 rounded-full bg-[#FF5F56] transition-transform hover:scale-110 active:scale-95 shadow-sm"
                   />
                   <button
                     onClick={() => chat.active && chat.deleteMessage(-1)}
                     title="Clear Active Transcript (⌘L)"
-                    className="h-3 w-3 rounded-full bg-[#FFBD2E] transition-transform hover:scale-110 active:scale-95 shadow-sm"
+                    className="h-3.5 w-3.5 rounded-full bg-[#FFBD2E] transition-transform hover:scale-110 active:scale-95 shadow-sm"
                   />
                   <button
                     onClick={toggleSplitDock}
                     title={dockedConvos.length > 0 ? "Collapse to Selected Active Window (⌘\\)" : "Dock All Windows (⌘\\)"}
-                    className={`h-3 w-3 rounded-full ${
+                    className={`h-3.5 w-3.5 rounded-full ${
                       dockedConvos.length > 0 ? "bg-[#3ecf5c] ring-1 ring-white" : "bg-[#27C93F]"
                     } transition-transform hover:scale-110 active:scale-95 shadow-sm`}
                   />
@@ -984,7 +1013,7 @@ export default function Home() {
                     setViewMode("workspace");
                   }}
                   className="group flex items-center gap-1 h-7 sm:h-8 rounded-md border border-term-border bg-term-panel px-2 sm:px-2.5 text-xs font-mono font-semibold transition-all hover:border-term-green/80 hover:bg-term-green/[0.04]"
-                  title="Active Mode: Click to cycle (/chat → /agent → /terminal → /workspace) or use ⌥1/⌥2/⌥3/⌥4"
+                  title="Active Mode: Click to cycle (/chat → /agent → /terminal → /workspace)"
                 >
                   <span className="text-term-dim group-hover:text-term-fg transition-colors">[</span>
                   <span className="text-term-green font-bold">/</span>
@@ -1019,11 +1048,10 @@ export default function Home() {
           <div className="flex items-center justify-between px-3 py-2 border-b border-term-border/40 bg-term-panel/30 text-xs shrink-0 select-none">
             <button
               onClick={() => setSidebarOpen(true)}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded border border-term-border bg-term-panel text-term-dim hover:text-term-green hover:border-term-green transition-colors text-xs"
-              title="Open Navigation Menu & Sessions (⌘B)"
+              className="flex items-center justify-center h-7 w-7 rounded border border-term-border bg-term-panel text-term-dim hover:text-term-green hover:border-term-green transition-colors text-sm"
+              title={`Menu & Sessions (${chat.conversations.length})`}
             >
               <span>☰</span>
-              <span className="font-bold">Menu & Sessions ({chat.conversations.length})</span>
             </button>
             <div className="flex items-center gap-1.5">
               <button
@@ -1075,18 +1103,18 @@ export default function Home() {
                     chat.create("agent");
                     setViewMode("workspace");
                   }}
-                  className="group flex items-center justify-between rounded-lg border border-term-border/80 bg-term-panel/40 px-4 py-2.5 sm:py-3 text-sm sm:text-base text-term-fg transition-all duration-200 hover:border-term-green hover:bg-term-green/[0.04] hover:text-term-green hover:shadow-[0_0_20px_rgba(57,255,20,0.2)]"
+                  className="group flex items-center justify-between rounded-lg border border-term-border/80 bg-term-panel/40 px-4 py-2.5 sm:py-3 text-sm sm:text-base text-term-fg transition-all duration-200 hover:border-cyan-400 hover:bg-cyan-400/[0.04] hover:text-cyan-400 hover:shadow-[0_0_20px_rgba(34,211,238,0.2)]"
                 >
                   <div className="flex items-center gap-3">
-                    <span className="text-xs font-bold text-term-dim group-hover:text-term-green font-mono transition-colors">
+                    <span className="text-xs font-bold text-term-dim group-hover:text-cyan-400 font-mono transition-colors">
                       [ 02 ]
                     </span>
                     <div className="font-semibold text-sm sm:text-base tracking-wide font-mono">
-                      <span className="text-term-green font-bold">/</span>agent
+                      <span className="text-cyan-400 font-bold">/</span>agent
                     </div>
                   </div>
                   <span className="text-xs text-term-dim group-hover:text-term-fg">
-                    Autonomous ReAct Coding Agent
+                    DeepSeek Harness (dsh) & Dual-Phase Reasoning
                   </span>
                 </button>
 
@@ -1147,6 +1175,7 @@ export default function Home() {
                   disabled={chat.busy || modelManager.isSwitching}
                   bottomRight={sandboxPickers}
                   harness={harness}
+                  cwd="/workspace"
                 />
               </div>
 
@@ -1365,14 +1394,10 @@ export default function Home() {
                           </div>
                         </div>
 
-                        {/* Pane Message Transcript OR Interactive Terminal OR Inline Workspace */}
+                        {/* Pane Message Transcript OR Inline Workspace */}
                         {paneMode === "workspace" ? (
                           <div className="flex-1 overflow-hidden p-0 h-full">
                             <FileExplorerModal isOpen={true} inline={true} />
-                          </div>
-                        ) : paneMode === "terminal" ? (
-                          <div className="flex-1 overflow-hidden p-0 h-full">
-                            <InteractiveTerminal className="h-full rounded-none border-0 shadow-none" />
                           </div>
                         ) : (
                           <div
@@ -1399,6 +1424,7 @@ export default function Home() {
                                   harness={convo.harness}
                                   onDelete={isActive ? () => chat.deleteMessage(i) : undefined}
                                   onEdit={isActive ? (newContent) => chat.editMessage(i, newContent) : undefined}
+                                  onFork={isActive ? () => chat.forkConversation(i) : undefined}
                                 />
                               ))
                             )}
@@ -1421,7 +1447,7 @@ export default function Home() {
                   })}
                 </div>
               ) : (
-                /* Single Active Session: Fullscreen Workspace OR Interactive Terminal OR Chat Transcript */
+                /* Single Active Session: Fullscreen Workspace OR Chat Transcript */
                 harness === "workspace" ? (
                   <div className="h-full w-full overflow-hidden flex flex-col">
                     <FileExplorerModal
@@ -1429,10 +1455,6 @@ export default function Home() {
                       inline={true}
                       onClose={() => setViewMode("landing")}
                     />
-                  </div>
-                ) : active?.harness === "terminal" && terminalViewModes[active.id] === "interactive" ? (
-                  <div className="h-full flex flex-col overflow-hidden">
-                    <InteractiveTerminal className="flex-1 rounded-lg border border-term-border shadow-md" />
                   </div>
                 ) : (
                   <div
@@ -1460,6 +1482,7 @@ export default function Home() {
                           harness={active?.harness || harness}
                           onDelete={() => chat.deleteMessage(i)}
                           onEdit={(newContent) => chat.editMessage(i, newContent)}
+                          onFork={() => chat.forkConversation(i)}
                         />
                       ))
                     )}
@@ -1529,6 +1552,7 @@ export default function Home() {
                   disabled={chat.busy || modelManager.isSwitching}
                   bottomRight={sandboxPickers}
                   harness={harness}
+                  cwd={active?.cwd || vfs.getCwd()}
                 />
               </div>
             )}
@@ -1544,6 +1568,8 @@ export default function Home() {
         modelManager={modelManager}
         hfToken={kaggle.hfToken}
         gpuActive={kaggle.accelerator === "gpu"}
+        kaggle={kaggle}
+        backend={backend}
       />
 
       <ShortcutsModal

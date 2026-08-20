@@ -4,9 +4,10 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { useWorkspaceFiles, type FileItem } from "@/lib/useWorkspaceFiles";
 import { gitManager, type GitCommit } from "@/lib/gitManager";
+import { githubSync } from "@/lib/githubSync";
 import { wasmShell } from "@/lib/wasmShell";
 import { zipExporter } from "@/lib/zipExporter";
-import { FileIcon } from "./FileIcons";
+import { FileIcon, FolderIcon } from "./FileIcons";
 
 // Dynamically load Monaco Editor (VS Code Editor Engine)
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), { ssr: false });
@@ -723,6 +724,83 @@ export function FileExplorerModal({ isOpen, onClose, inline }: FileExplorerModal
                     <p className="text-xs text-center text-term-green font-semibold">{gitNotice}</p>
                   )}
                 </div>
+
+                {/* GitHub Remote Sync & Storage Export (Workspace Integrated) */}
+                <div className="space-y-2 pt-3 border-t border-term-border">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] uppercase font-bold text-term-dim">Remote Sync & Storage</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      onClick={async () => {
+                        const token = typeof window !== "undefined" ? localStorage.getItem("edgerunner.git.token") || "" : "";
+                        const repo = typeof window !== "undefined" ? localStorage.getItem("edgerunner.git.repo") || "" : "";
+                        const branch = typeof window !== "undefined" ? localStorage.getItem("edgerunner.git.branch") || "main" : "main";
+                        if (!token || !repo) {
+                          setGitNotice("Configure GitHub Token in Settings (⚙) first.");
+                          return;
+                        }
+                        setGitNotice("Pushing to GitHub…");
+                        try {
+                          const res = await githubSync.push({ token, repo, branch }, (m) => setGitNotice(m));
+                          setGitNotice(`✓ Pushed commit ${res.sha.slice(0, 7)}!`);
+                        } catch (err: unknown) {
+                          setGitNotice(`Push failed: ${err instanceof Error ? err.message : String(err)}`);
+                        }
+                      }}
+                      className="flex items-center justify-center gap-1 rounded border border-term-border bg-term-panel py-1 text-[11px] font-semibold text-term-dim hover:text-term-green hover:border-term-green transition-colors"
+                      title="Push workspace to remote GitHub repo"
+                    >
+                      <span>↑ Push</span>
+                    </button>
+                    <button
+                      onClick={async () => {
+                        const token = typeof window !== "undefined" ? localStorage.getItem("edgerunner.git.token") || "" : "";
+                        const repo = typeof window !== "undefined" ? localStorage.getItem("edgerunner.git.repo") || "" : "";
+                        const branch = typeof window !== "undefined" ? localStorage.getItem("edgerunner.git.branch") || "main" : "main";
+                        if (!repo) {
+                          setGitNotice("No remote repo configured.");
+                          return;
+                        }
+                        setGitNotice("Pulling from GitHub…");
+                        try {
+                          const res = await githubSync.pull({ token, repo, branch }, (m) => setGitNotice(m));
+                          setGitNotice(`✓ Pulled ${res.filesCount} files!`);
+                          refresh();
+                        } catch (err: unknown) {
+                          setGitNotice(`Pull failed: ${err instanceof Error ? err.message : String(err)}`);
+                        }
+                      }}
+                      className="flex items-center justify-center gap-1 rounded border border-term-border bg-term-panel py-1 text-[11px] font-semibold text-term-dim hover:text-term-green hover:border-term-green transition-colors"
+                      title="Pull latest files from remote GitHub repo"
+                    >
+                      <span>↓ Pull</span>
+                    </button>
+                    <button
+                      onClick={() => zipExporter.downloadZip()}
+                      className="flex items-center justify-center gap-1 rounded border border-term-border bg-term-panel py-1 text-[11px] font-semibold text-term-dim hover:text-term-fg transition-colors"
+                      title="Download complete workspace as .ZIP"
+                    >
+                      <span>📦 .ZIP</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        const json = gitManager.exportBundle();
+                        const blob = new Blob([json], { type: "application/json" });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement("a");
+                        a.href = url;
+                        a.download = `edgerunner-bundle-${Date.now()}.json`;
+                        a.click();
+                        URL.revokeObjectURL(url);
+                      }}
+                      className="flex items-center justify-center gap-1 rounded border border-term-border bg-term-panel py-1 text-[11px] font-semibold text-term-dim hover:text-term-fg transition-colors"
+                      title="Export entire workspace and git DAG as portable JSON bundle"
+                    >
+                      <span>💾 Export</span>
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
           </div>
@@ -951,9 +1029,7 @@ function RenderTreeItems({
                     >
                       <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"/>
                     </svg>
-                    <svg className="w-4 h-4 text-term-amber shrink-0" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
-                    </svg>
+                    <FolderIcon isOpen={!isCollapsed} className="w-4 h-4 text-term-amber shrink-0" />
                   </>
                 ) : (
                   <FileIcon path={item.path} className="w-4 h-4 shrink-0" />

@@ -62,53 +62,55 @@ export function useTerminal(): UseTerminal {
       const timeStr = new Date().toLocaleTimeString();
 
       try {
-        const base = getBackendBase();
-        const url = `${base}/api/terminal/exec`;
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ command: cleanCmd }),
-        });
+        try {
+          const base = getBackendBase();
+          const url = `${base}/api/terminal/exec`;
+          const res = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ command: cleanCmd }),
+          });
 
-        if (res.ok) {
-          const data = (await res.json()) as {
-            output: string;
-            exit_code: number;
-            duration_ms: number;
-          };
+          if (res.ok) {
+            const data = (await res.json()) as {
+              output: string;
+              exit_code: number;
+              duration_ms: number;
+            };
 
-          const entry: TerminalEntry = {
-            id: Math.random().toString(36).slice(2),
-            timestamp: timeStr,
-            type,
-            command: cleanCmd,
-            output: data.output,
-            exitCode: data.exit_code,
-            durationMs: data.duration_ms,
-          };
+            const entry: TerminalEntry = {
+              id: Math.random().toString(36).slice(2),
+              timestamp: timeStr,
+              type,
+              command: cleanCmd,
+              output: data.output,
+              exitCode: data.exit_code,
+              durationMs: data.duration_ms,
+            };
 
-          setEntries((prev) => [...prev, entry]);
-          return entry;
+            setEntries((prev) => [...prev, entry]);
+            return entry;
+          }
+        } catch {
+          // Backend offline -> Fallback to client-side WebAssembly Shell
         }
-      } catch {
-        // Backend offline -> Fallback to client-side WebAssembly Shell
+
+        const wasmRes = await wasmShell.execute(cleanCmd);
+        const entry: TerminalEntry = {
+          id: Math.random().toString(36).slice(2),
+          timestamp: timeStr,
+          type,
+          command: cleanCmd,
+          output: wasmRes.output,
+          exitCode: wasmRes.exitCode,
+          durationMs: wasmRes.durationMs || Math.round(performance.now() - startTime),
+        };
+
+        setEntries((prev) => [...prev, entry]);
+        return entry;
+      } finally {
+        setIsRunning(false);
       }
-
-      // Execute via In-Browser WebAssembly Shell
-      const wasmRes = await wasmShell.execute(cleanCmd);
-      const entry: TerminalEntry = {
-        id: Math.random().toString(36).slice(2),
-        timestamp: timeStr,
-        type,
-        command: cleanCmd,
-        output: wasmRes.output,
-        exitCode: wasmRes.exitCode,
-        durationMs: wasmRes.durationMs || Math.round(performance.now() - startTime),
-      };
-
-      setEntries((prev) => [...prev, entry]);
-      setIsRunning(false);
-      return entry;
     },
     [],
   );

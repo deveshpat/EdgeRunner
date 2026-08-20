@@ -11,26 +11,44 @@
   --term-bg: #0a0e0a;         /* Main app canvas background */
   --term-panel: #0f140f;      /* Cards and secondary panels background */
   --term-border: #1e2a1e;     /* Outlines and panel dividers */
-  --term-dim: #4a5a4a;        /* Muted descriptions, secondary labels, icons */
-  --term-fg: #f4d5fd;         /* Main text color */
+  --term-dim: #5c725c;        /* Muted descriptions, secondary labels, icons */
+  --term-fg: #f0fdf4;         /* Main text color */
   --term-green: #39FF14;      /* Neon accent */
-  --term-amber: #e6b23e;      /* Warning / Connecting status */
-  --term-red: #e6483e;        /* Error / Offline / Abort buttons */
+  --term-amber: #f59e0b;      /* Warning / Connecting status */
+  --term-red: #ef4444;        /* Error / Offline / Abort buttons */
+  --code-bg: #0b0f0b;
+  --code-header: #0f140f;
+  --code-text: #f0fdf4;
+  --hljs-comment: #5c725c;
+  --hljs-keyword: #39FF14;
+  --hljs-string: #f59e0b;
+  --hljs-number: #38bdf8;
+  --hljs-title: #f0fdf4;
+  --hljs-variable: #a7f3d0;
 }
 
 [data-theme="light"] {
   color-scheme: light;
   /* ========================================================================= */
-  /*  CYBERPUNK LIGHT THEME (HIGH-TECH NEO-TOKYO TITANIUM)                    */
+  /*  HIGH-CONTRAST LIGHT / DAY THEME                                          */
   /* ========================================================================= */
-  --term-bg: #eceff3;         /* Cool titanium-slate cyber canvas */
-  --term-panel: #ffffff;      /* Clean cyber panel cards */
-  --term-border: #94a3b8;     /* Crisp structural grid border */
-  --term-dim: #475569;        /* Sharp high-readability slate */
-  --term-fg: #030712;         /* Deep high-contrast obsidian */
-  --term-green: #0284c7;      /* High-tech electric cyan / neon cobalt accent */
+  --term-bg: #f8fafc;         /* High-tech clean titanium slate background */
+  --term-panel: #ffffff;      /* Pure white card panel */
+  --term-border: #cbd5e1;     /* Crisp slate-300 structural border */
+  --term-dim: #475569;        /* Slate-600 high-readability text */
+  --term-fg: #090d16;         /* Ultra-high-contrast sharp obsidian body text */
+  --term-green: #0284c7;      /* Crisp high-tech electric blue / cyan */
   --term-amber: #d97706;      /* High-visibility amber-600 */
-  --term-red: #e11d48;        /* Cyber laser-rose red-600 */
+  --term-red: #dc2626;        /* High-visibility red-600 */
+  --code-bg: #f1f5f9;
+  --code-header: #e2e8f0;
+  --code-text: #090d16;
+  --hljs-comment: #64748b;
+  --hljs-keyword: #0284c7;
+  --hljs-string: #b45309;
+  --hljs-number: #0891b2;
+  --hljs-title: #090d16;
+  --hljs-variable: #047857;
 }
 
 html,
@@ -78,7 +96,6 @@ body {
 .er-markdown ul,
 .er-markdown ol {
   margin: 0.4rem 0;
-  /* Room for markers so multi-digit numbers never clip. */
   padding-left: 1.75rem;
   list-style-position: outside;
 }
@@ -97,7 +114,7 @@ body {
 .er-markdown h4 {
   margin: 0.8rem 0 0.4rem;
   font-weight: 700;
-  color: #eaffea;
+  color: var(--term-fg);
 }
 .er-markdown h1 {
   font-size: 1.15rem;
@@ -106,64 +123,72 @@ body {
   font-size: 1.05rem;
 }
 .er-markdown a {
-  color: #3ecf5c;
+  color: var(--term-green);
   text-decoration: underline;
+  font-weight: 600;
 }
 .er-markdown blockquote {
   margin: 0.5rem 0;
-  padding-left: 0.75rem;
-  border-left: 2px solid #1e2a1e;
-  color: #9fc39f;
+  padding: 0.35rem 0.75rem;
+  border-left: 3px solid var(--term-border);
+  background: var(--term-panel);
+  border-radius: 0 4px 4px 0;
+  color: var(--term-dim);
 }
 .er-markdown table {
   margin: 0.5rem 0;
   border-collapse: collapse;
+  width: 100%;
 }
 .er-markdown th,
 .er-markdown td {
-  border: 1px solid #1e2a1e;
-  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--term-border);
+  padding: 0.35rem 0.6rem;
+  color: var(--term-fg);
 }
 .er-markdown th {
-  color: #eaffea;
+  background: var(--term-panel);
+  font-weight: 700;
 }
 .er-inline-code {
-  background: #0f140f;
-  border: 1px solid #1e2a1e;
+  background: var(--term-panel);
+  border: 1px solid var(--term-border);
   border-radius: 3px;
-  padding: 0.05rem 0.3rem;
-  font-size: 0.85em;
-  color: #e6b23e;
+  padding: 0.08rem 0.35rem;
+  font-size: 0.88em;
+  color: var(--term-green);
+  font-weight: 600;
 }
 
 /* --- Code blocks ----------------------------------------------------- */
 .er-codeblock {
   margin: 0.6rem 0;
-  border: 1px solid #1e2a1e;
+  border: 1px solid var(--term-border);
   border-radius: 6px;
   overflow: hidden;
-  background: #0b0f0b;
+  background: var(--code-bg);
 }
 .er-codeblock-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0.25rem 0.6rem;
-  background: #0f140f;
-  border-bottom: 1px solid #1e2a1e;
+  background: var(--code-header);
+  border-bottom: 1px solid var(--term-border);
 }
 .er-codeblock-lang {
   font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #4a5a4a;
+  color: var(--term-dim);
+  font-weight: 600;
 }
 .er-codeblock-copy {
   font-size: 0.7rem;
-  color: #4a5a4a;
+  color: var(--term-dim);
 }
 .er-codeblock-copy:hover {
-  color: #3ecf5c;
+  color: var(--term-green);
 }
 .er-codeblock pre {
   margin: 0;
@@ -171,19 +196,21 @@ body {
   overflow-x: auto;
   font-size: 0.85rem;
   line-height: 1.5;
+  color: var(--code-text);
 }
 
 /* --- Code runner ----------------------------------------------------- */
 .er-runner {
-  border-top: 1px solid #1e2a1e;
+  border-top: 1px solid var(--term-border);
 }
 .er-run-btn {
   font-size: 0.72rem;
   padding: 0.3rem 0.7rem;
-  color: #3ecf5c;
+  color: var(--term-green);
+  font-weight: 600;
 }
 .er-run-btn:hover {
-  background: #0f140f;
+  background: var(--term-panel);
 }
 .er-run-btn:disabled {
   opacity: 0.5;
@@ -192,11 +219,11 @@ body {
   width: 100%;
   height: 220px;
   border: 0;
-  border-top: 1px solid #1e2a1e;
+  border-top: 1px solid var(--term-border);
   background: #fff;
 }
 .er-run-out {
-  border-top: 1px solid #1e2a1e;
+  border-top: 1px solid var(--term-border);
   padding: 0.5rem 0.7rem;
   font-size: 0.78rem;
   line-height: 1.5;
@@ -206,24 +233,24 @@ body {
   word-break: break-word;
 }
 .er-log-error {
-  color: #e6483e;
+  color: var(--term-red);
 }
 .er-log-warn {
-  color: #e6b23e;
+  color: var(--term-amber);
 }
 .er-log-result {
-  color: #3ecf5c;
+  color: var(--term-green);
 }
 .er-log-log,
 .er-log-info,
 .er-log-debug {
-  color: #c8e6c8;
+  color: var(--term-fg);
 }
 
-/* highlight.js tokens, terminal palette */
+/* highlight.js tokens */
 .hljs-comment,
 .hljs-quote {
-  color: #4a5a4a;
+  color: var(--hljs-comment);
   font-style: italic;
 }
 .hljs-keyword,
@@ -231,34 +258,36 @@ body {
 .hljs-built_in,
 .hljs-name,
 .hljs-tag {
-  color: #3ecf5c;
+  color: var(--hljs-keyword);
+  font-weight: 600;
 }
 .hljs-string,
 .hljs-attr,
 .hljs-symbol,
 .hljs-bullet,
 .hljs-addition {
-  color: #e6b23e;
+  color: var(--hljs-string);
 }
 .hljs-number,
 .hljs-literal,
 .hljs-type,
 .hljs-params {
-  color: #86d9a0;
+  color: var(--hljs-number);
 }
 .hljs-title,
 .hljs-section,
 .hljs-function .hljs-title,
 .hljs-attribute {
-  color: #eaffea;
+  color: var(--hljs-title);
+  font-weight: 600;
 }
 .hljs-variable,
 .hljs-template-variable,
 .hljs-meta {
-  color: #9fc39f;
+  color: var(--hljs-variable);
 }
 .hljs-deletion {
-  color: #e6483e;
+  color: var(--term-red);
 }
 
 /* --- Range slider ---------------------------------------------------- */
