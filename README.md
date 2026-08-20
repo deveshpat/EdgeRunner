@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="EdgeRunner.svg" alt="EdgeRunner Logo" width="550" />
+  <img src="frontend/public/EdgeRunner.svg" alt="EdgeRunner Logo" width="550" />
 </p>
 
 <p align="center">
@@ -147,7 +147,9 @@ EdgeRunner/
 ├── frontend/
 │   ├── app/                    # Next.js App Router (layout, landing, workspace)
 │   ├── components/             # Composer, Message, Markdown, Terminal, Modals, Logo
-│   └── lib/                    # deepseekHarness, dshPlugins, api, storage, useConversations
+│   ├── lib/                    # deepseekHarness, dshPlugins, api, storage, useConversations
+│   └── public/
+│       └── EdgeRunner.svg      # Authentic ASCII vector wordmark
 └── kaggle/                     # Automated remote Kaggle GPU bootstrap scripts
 ```
 
